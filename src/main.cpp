@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
        << " force_split " << (options.force_split ? 1 : 0)
        << " strict_retry " << (options.strict_retry ? 1 : 0) << "\n";
 
-  PatternStats stats = sample_patterns(golden, trojan, options.pattern_count);
+  PatternStats stats = sample_patterns(golden, trojan, options.pattern_count, 0);
 
   cout << "pattern_total " << stats.total_patterns << "\n";
   cout << "trigger_patterns " << stats.trigger_patterns_total << "\n";
@@ -180,9 +180,11 @@ int main(int argc, char** argv) {
        << " rules_applied " << fix_result.rules_applied
        << " rules_skipped " << fix_result.rules_skipped
        << " po_candidates " << fix_result.po_candidates
-       << " po_fixed " << fix_result.po_fixed << '\n';
+       << " po_fixed " << fix_result.po_fixed
+       << " po_xor " << fix_result.po_fixed_xor
+       << " po_mux " << fix_result.po_fixed_mux << '\n';
 
-  PatternStats stats_after = sample_patterns(golden, trojan, options.pattern_count);
+  PatternStats stats_after = sample_patterns(golden, trojan, options.pattern_count, 1337);
   const double trojan_rate_after = compute_trojan_rate(stats_after);
   cout << "trigger_patterns_after " << stats_after.trigger_patterns_total << '\n';
   const ios_base::fmtflags prev_flags = cout.flags();

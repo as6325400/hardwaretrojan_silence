@@ -13,6 +13,8 @@ struct FixResult {
   std::size_t rules_skipped = 0;
   std::size_t po_candidates = 0;
   std::size_t po_fixed = 0;
+  std::size_t po_fixed_xor = 0;
+  std::size_t po_fixed_mux = 0;
 };
 
 bool apply_rule_fix(const circuit& golden,

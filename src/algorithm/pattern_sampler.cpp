@@ -7,7 +7,8 @@
 
 PatternStats sample_patterns(const circuit& golden,
                              const circuit& trojan,
-                             std::size_t pattern_count) {
+                             std::size_t pattern_count,
+                             std::uint32_t base_seed) {
   PatternStats stats;
 
   stats.gate_indices.reserve(trojan.node_count());
@@ -36,7 +37,7 @@ PatternStats sample_patterns(const circuit& golden,
 #pragma omp parallel reduction(+:mismatch_patterns)
 {
   const int tid = omp_get_thread_num();
-  std::mt19937 rng(0 + tid);
+  std::mt19937 rng(base_seed + static_cast<std::uint32_t>(tid));
   std::uniform_int_distribution<int> dist(0, 1);
   circuit golden_local = golden;
   circuit trojan_local = trojan;
