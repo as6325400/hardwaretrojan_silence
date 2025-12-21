@@ -6,6 +6,7 @@
 #include "algorithm/candidate_selector.hpp"
 #include "algorithm/miner.hpp"
 #include "algorithm/pattern_sampler.hpp"
+#include "algorithm/trigger_fixer.hpp"
 #include "core/circuit_compare.hpp"
 #include "io/bench_parser.hpp"
 #include "io/bench_writer.hpp"
@@ -160,6 +161,36 @@ int main(int argc, char** argv) {
   cout << '\n';
 
   cout << "mis match " << stats.mismatch_patterns << '\n';
+
+  FixResult fix_result;
+  if (!apply_rule_fix(golden,
+                      trojan,
+                      stats.trigger_patterns,
+                      result.feature_nodes,
+                      result.model,
+                      &fix_result,
+                      &error)) {
+    if (!error.empty()) {
+      cerr << "Trigger fix error: " << error << "\n";
+    }
+    return 1;
+  }
+
+  cout << "trigger_fix rules_total " << fix_result.rules_total
+       << " rules_applied " << fix_result.rules_applied
+       << " rules_skipped " << fix_result.rules_skipped
+       << " po_candidates " << fix_result.po_candidates
+       << " po_fixed " << fix_result.po_fixed << '\n';
+
+  PatternStats stats_after = sample_patterns(golden, trojan, options.pattern_count);
+  const double trojan_rate_after = compute_trojan_rate(stats_after);
+  cout << "trigger_patterns_after " << stats_after.trigger_patterns_total << '\n';
+  const ios_base::fmtflags prev_flags = cout.flags();
+  const streamsize prev_precision = cout.precision();
+  cout << defaultfloat << setprecision(6);
+  cout << "trojan_rates_after " << trojan_rate_after << '\n';
+  cout.flags(prev_flags);
+  cout.precision(prev_precision);
 
   if (!options.output_path.empty()) {
     error.clear();

@@ -81,6 +81,20 @@ void circuit::define_gate(const std::string& name, GType gtype, const std::vecto
   eval_order_.push_back(idx);
 }
 
+void circuit::force_gate_const(int idx, int value) {
+  if (idx < 0 || static_cast<std::size_t>(idx) >= cells_.size()) {
+    throw std::runtime_error("node index out of range");
+  }
+  cell& c = cells_[idx];
+  if (c.ctype != CType::GATE) {
+    throw std::runtime_error("node is not a gate: " + node_name(idx));
+  }
+  c.ctype = CType::CONST;
+  c.val = value ? 1 : 0;
+  c.inputs.clear();
+  gate_count_cached_ = 0;
+}
+
 void circuit::add_output_name(const std::string& name) {
   po_names_.push_back(name);
 }

@@ -41,6 +41,7 @@ public:
   void define_pi(const std::string& name); // Mark node as a primary input.
   void define_const(const std::string& name, int value); // Define a constant node value (0/1).
   void define_gate(const std::string& name, GType gtype, const std::vector<int>& inputs); // Define gate and its inputs.
+  void force_gate_const(int idx, int value); // Force a gate node to constant 0/1 and clear its inputs.
 
   void add_output_name(const std::string& name); // Record an output signal name.
   void finalize_outputs(); // Resolve output names to indices and validate.
