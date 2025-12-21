@@ -1,33 +1,41 @@
-#include <algorithm>
-#include <cstdint>
 #include <iomanip>
 #include <iostream>
-#include <random>
 #include <string>
 #include <vector>
-#include <omp.h>
 
+#include "algorithm/candidate_selector.hpp"
+#include "algorithm/miner.hpp"
+#include "algorithm/pattern_sampler.hpp"
+#include "core/circuit_compare.hpp"
 #include "io/bench_parser.hpp"
 #include "io/bench_writer.hpp"
-#include "core/circuit_compare.hpp"
-#include "algorithm/matching.hpp"
+#include "io/cli_options.hpp"
 
 using namespace std;
 
 int main(int argc, char** argv) {
-  if (argc < 3) {
-    cerr << "Usage: " << argv[0] << " <golden_bench> <trojan_bench>\n";
+  AppOptions options;
+  string error;
+  const ParseStatus status = parse_cli_options(argc, argv, &options, &error);
+  if (status == ParseStatus::help) {
+    print_usage(argv[0]);
+    return 0;
+  }
+  if (status == ParseStatus::error) {
+    if (!error.empty()) {
+      cerr << error << "\n";
+    }
+    print_usage(argv[0]);
     return 1;
   }
 
   circuit golden;
   circuit trojan;
-  string error;
-  if (!bench_io::parse_bench_file(argv[1], golden, &error)) {
+  if (!bench_io::parse_bench_file(options.golden_path, golden, &error)) {
     cerr << "Golden parse error: " << error << "\n";
     return 1;
   }
-  if (!bench_io::parse_bench_file(argv[2], trojan, &error)) {
+  if (!bench_io::parse_bench_file(options.trojan_path, trojan, &error)) {
     cerr << "Trojan parse error: " << error << "\n";
     return 1;
   }
@@ -37,160 +45,129 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const size_t pattern_count = 10000000;
-  vector<vector<int>> errors;
+  cout << "patterns " << options.pattern_count
+       << " depth " << options.max_depth
+       << " eval " << options.eval_count
+       << " neg_ratio " << options.neg_ratio
+       << " mine_rounds " << options.mine_rounds
+       << " mine_max " << options.mine_max << "\n";
+  cout << "p1_trigger " << options.p1_trigger_threshold
+       << " p1_notrigger " << options.p1_notrigger_threshold
+       << " include_pi " << (options.include_pi ? 1 : 0)
+       << " no_filter " << (options.no_filter ? 1 : 0)
+       << " force_split " << (options.force_split ? 1 : 0)
+       << " strict_retry " << (options.strict_retry ? 1 : 0) << "\n";
 
-  vector<int> gate_indices;
-  gate_indices.reserve(trojan.node_count());
-  for (size_t i = 0; i < trojan.node_count(); ++i) {
-    const auto& c = trojan.get_cell(static_cast<int>(i));
-    if (c.ctype == CType::GATE) {
-      gate_indices.push_back(static_cast<int>(i));
-    }
-  }
+  PatternStats stats = sample_patterns(golden, trojan, options.pattern_count);
 
-  const int thread_count = omp_get_max_threads();
-  vector<vector<uint64_t>> ones_total_thread(thread_count, vector<uint64_t>(gate_indices.size(), 0));
-  vector<vector<uint64_t>> ones_trigger_thread(thread_count, vector<uint64_t>(gate_indices.size(), 0));
-  vector<vector<uint64_t>> ones_notrigger_thread(thread_count, vector<uint64_t>(gate_indices.size(), 0));
-  vector<uint64_t> total_count_thread(thread_count, 0);
-  vector<uint64_t> trigger_count_thread(thread_count, 0);
-  vector<uint64_t> notrigger_count_thread(thread_count, 0);
-
-  size_t mismatch_patterns = 0;
-
-#pragma omp parallel reduction(+:mismatch_patterns)
-{
-  const int tid = omp_get_thread_num();
-  mt19937 rng(0 + tid);
-  uniform_int_distribution<int> dist(0, 1);
-  circuit golden_local = golden;
-  circuit trojan_local = trojan;
-
-  #pragma omp for schedule(static)
-  for (size_t p = 0; p < pattern_count; ++p) {
-
-    vector<int> pi_values;
-    pi_values.reserve(golden_local.pi_count());
-    for (size_t i = 0; i < golden_local.pi_count(); ++i) {
-      pi_values.push_back(dist(rng));
-    }
-
-    vector<int> golden_outputs;
-    vector<int> trojan_outputs;
-    try {
-      golden_outputs = golden_local.simulate(pi_values);
-      trojan_outputs = trojan_local.simulate(pi_values);
-    } catch (const exception& e) {
-      #pragma omp critical 
-      {
-        cerr << "Simulation error: " << e.what() << "\n";
-      }
-      continue;
-    }
-
-    size_t diff = 0;
-    for (size_t i = 0; i < golden_outputs.size(); ++i) {
-      if (golden_outputs[i] != trojan_outputs[i]) {
-        ++diff;
-      }
-    }
-
-    const bool triggered = diff > 0;
-    total_count_thread[tid]++;
-    if (triggered) {
-      trigger_count_thread[tid]++;
-    } else {
-      notrigger_count_thread[tid]++;
-    }
-
-    for (size_t g = 0; g < gate_indices.size(); ++g) {
-      const int idx = gate_indices[g];
-      const int val = trojan_local.get_cell(idx).val;
-      const uint64_t one = (val == 1) ? 1 : 0;
-      ones_total_thread[tid][g] += one;
-      if (triggered) {
-        ones_trigger_thread[tid][g] += one;
-      } else {
-        ones_notrigger_thread[tid][g] += one;
-      }
-    }
-
-    if (diff == 0) {
-      // cout << "pattern " << p << ": match\n";
-    } else {
-      // cout << "pattern " << p << ": mismatch (" << diff << " outputs)\n";
-      #pragma omp critical
-      {
-        errors.push_back(pi_values);
-      }
-      ++mismatch_patterns;
-    }
-    // if(p % 100000 == 0) cout << p << '\n';
-  }
-}
-
-  vector<uint64_t> ones_total(gate_indices.size(), 0);
-  vector<uint64_t> ones_trigger(gate_indices.size(), 0);
-  vector<uint64_t> ones_notrigger(gate_indices.size(), 0);
-  uint64_t total_patterns = 0;
-  uint64_t trigger_patterns = 0;
-  uint64_t notrigger_patterns = 0;
-
-  for (int t = 0; t < thread_count; ++t) {
-    total_patterns += total_count_thread[t];
-    trigger_patterns += trigger_count_thread[t];
-    notrigger_patterns += notrigger_count_thread[t];
-    for (size_t g = 0; g < gate_indices.size(); ++g) {
-      ones_total[g] += ones_total_thread[t][g];
-      ones_trigger[g] += ones_trigger_thread[t][g];
-      ones_notrigger[g] += ones_notrigger_thread[t][g];
-    }
-  }
+  cout << "pattern_total " << stats.total_patterns << "\n";
+  cout << "trigger_patterns " << stats.trigger_patterns_total << "\n";
+  cout << "notrigger_patterns " << stats.notrigger_patterns_total << "\n";
+  const double trojan_rate = compute_trojan_rate(stats);
+  cout << "trojan_rates " << trojan_rate << '\n';
 
   cout << "gate_zero_ratio\n";
   cout << fixed << setprecision(4);
-  for (size_t g = 0; g < gate_indices.size(); ++g) {
-    const string& name = trojan.node_name(gate_indices[g]);
-    double zero_ratio = 0.0;
-    if (total_patterns > 0) {
-      zero_ratio = 1.0 - (static_cast<double>(ones_total[g]) / static_cast<double>(total_patterns));
-    }
-    cout << name << ' ' << zero_ratio << '\n';
+
+  vector<CandidateInfo> candidates;
+  if (!build_candidates(stats,
+                        options.p1_trigger_threshold,
+                        options.p1_notrigger_threshold,
+                        options.no_filter,
+                        &candidates,
+                        &error)) {
+    cerr << error << "\n";
+    return 1;
   }
 
   cout << "trigger_candidates\n";
-  const double high = 0.8;
-  const double low = 0.2;
-  vector<pair<double, size_t>> candidates;
-  if (trigger_patterns > 0 && notrigger_patterns > 0) {
-    for (size_t g = 0; g < gate_indices.size(); ++g) {
-      const double p1_trigger =
-          static_cast<double>(ones_trigger[g]) / static_cast<double>(trigger_patterns);
-      const double p1_notrigger =
-          static_cast<double>(ones_notrigger[g]) / static_cast<double>(notrigger_patterns);
-      if (p1_trigger >= high && p1_notrigger <= low) {
-        candidates.emplace_back(p1_trigger - p1_notrigger, g);
-      }
-    }
-  }
-  sort(candidates.begin(), candidates.end(),
-       [](const auto& a, const auto& b) { return a.first > b.first; });
-  for (const auto& item : candidates) {
-    const size_t g = item.second;
-    const string& name = trojan.node_name(gate_indices[g]);
-    const double p1_trigger =
-        (trigger_patterns > 0)
-            ? static_cast<double>(ones_trigger[g]) / static_cast<double>(trigger_patterns)
-            : 0.0;
-    const double p1_notrigger =
-        (notrigger_patterns > 0)
-            ? static_cast<double>(ones_notrigger[g]) / static_cast<double>(notrigger_patterns)
-            : 0.0;
-    cout << name << " p1_trigger=" << p1_trigger << " p1_notrigger=" << p1_notrigger << '\n';
+  for (const auto& cand : candidates) {
+    cout << trojan.node_name(cand.gate_idx)
+         << " p1_trigger=" << cand.p1_trigger
+         << " p1_notrigger=" << cand.p1_notrigger << '\n';
   }
 
-  cout << "mismatch " << mismatch_patterns << '\n';
+  vector<int> candidate_indices = candidate_gate_indices(candidates);
+
+  MiningOptions mining_options;
+  mining_options.max_depth = options.max_depth;
+  mining_options.neg_ratio = options.neg_ratio;
+  mining_options.eval_count = options.eval_count;
+  mining_options.mine_rounds = options.mine_rounds;
+  mining_options.mine_max = options.mine_max;
+  mining_options.include_pi = options.include_pi;
+  mining_options.force_split = options.force_split;
+  mining_options.strict_retry = options.strict_retry;
+
+  MiningResult result;
+  if (!run_mining(golden,
+                  trojan,
+                  stats.trigger_patterns,
+                  candidate_indices,
+                  mining_options,
+                  trojan_rate,
+                  &result,
+                  &error)) {
+    if (!error.empty()) {
+      cerr << error << "\n";
+    }
+    return 1;
+  }
+
+  cout << "training_set pos=" << result.data_pos
+       << " neg=" << result.data_neg << '\n';
+  cout << "hard_mined " << result.hard_added
+       << " rounds " << result.rounds_used << '\n';
+
+  cout << "decision_tree_rules " << result.model.rules.size()
+       << " depth_used " << result.model.max_depth_used
+       << " leaf_count " << result.model.leaf_count << '\n';
+
+  for (size_t i = 0; i < result.model.rules.size(); ++i) {
+    const auto& rule = result.model.rules[i];
+    cout << "rule " << (i + 1) << ": ";
+    if (rule.terms.empty()) {
+      cout << "TRUE\n";
+      continue;
+    }
+    for (size_t t = 0; t < rule.terms.size(); ++t) {
+      if (t > 0) {
+        cout << " & ";
+      }
+      const size_t feature_idx = rule.terms[t].first;
+      const int value = rule.terms[t].second;
+      if (feature_idx < result.feature_nodes.size()) {
+        cout << trojan.node_name(result.feature_nodes[feature_idx]) << '=' << value;
+      } else {
+        cout << "f" << feature_idx << '=' << value;
+      }
+    }
+    cout << '\n';
+  }
+
+  cout << "train_pos " << result.train_pos << " train_neg " << result.train_neg << '\n';
+  cout << "train_false_neg " << result.train_false_neg
+       << " train_false_pos " << result.train_false_pos << '\n';
+
+  cout << "eval_normal " << result.eval_checked
+       << " eval_false_pos " << result.eval_false_pos;
+  if (result.eval_checked > 0) {
+    const double rate =
+        static_cast<double>(result.eval_false_pos) /
+        static_cast<double>(result.eval_checked);
+    cout << " rate " << rate;
+  }
+  cout << '\n';
+
+  cout << "mis match " << stats.mismatch_patterns << '\n';
+
+  if (!options.output_path.empty()) {
+    error.clear();
+    if (!bench_io::write_bench_file(options.output_path, trojan, &error)) {
+      cerr << "Write error: " << error << "\n";
+      return 1;
+    }
+  }
 
   return 0;
 }
