@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  cout << "area " << c.area() << "delay " << c.level() << '\n';
+  cout << "area " << c.area() << ' ' << "delay " << c.level() << '\n';
 
    
 
