@@ -6,6 +6,7 @@
 #include <omp.h>
 
 #include "io/bench_parser.hpp"
+#include "io/bench_writer.hpp"
 #include "core/circuit_compare.hpp"
 #include "algorithm/matching.hpp"
 
@@ -13,7 +14,7 @@ using namespace std;
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    cerr << "Usage: " << argv[0] << " <golden_bench> <trojan_bench>\n";
+    cerr << "Usage: " << argv[0] << " <golden_bench> <trojan_bench> [output_bench]\n";
     return 1;
   }
 
@@ -35,7 +36,7 @@ int main(int argc, char** argv) {
   }
 
 
-  const size_t pattern_count = 1000000;
+  const size_t pattern_count = 100000;
   vector<vector<int>> errors;
 
   size_t mismatch_patterns = 0;
@@ -117,6 +118,13 @@ int main(int argc, char** argv) {
 
   cout << "mis match " << mismatch_patterns << '\n';
   cout << "fix success " << success_num << '\n';
+
+  if (argc >= 4) {
+    if (!bench_io::write_bench_file(argv[3], trojan, &error)) {
+      cerr << "Write error: " << error << "\n";
+      return 1;
+    }
+  }
 
   return 0;
 }

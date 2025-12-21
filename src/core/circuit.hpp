@@ -50,8 +50,11 @@ public:
   std::size_t pi_count() const; // Number of primary inputs.
   std::size_t po_count() const; // Number of primary outputs.
   const cell& get_cell(int idx) const; // Access a node cell by index.
+  std::size_t node_count() const; // Number of total nodes.
+  const std::vector<int>& eval_order() const; // Get gate indices in eval order.
   std::size_t level() const; // Compute max logic level from PI/CONST to PO.
   std::size_t area() const; // Count number of gate nodes.
+  void ensure_eval_order(); // Ensure eval_order_ is topologically sorted.
   int add_gate_auto(const std::string& prefix, GType gtype, const std::vector<int>& inputs); // Create a gate with a unique name.
   int add_const_auto(const std::string& prefix, int value); // Create a constant node with a unique name.
   void set_po_index(std::size_t pos, int idx); // Replace a PO index by position.

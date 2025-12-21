@@ -3,7 +3,7 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pedantic -fopenmp
 BUILD_DIR = ../build
 BIN_DIR = ../bin
 TARGET = $(BIN_DIR)/main
-SRCS = main.cpp core/circuit.cpp core/circuit_compare.cpp io/bench_parser.cpp algorithm/matching.cpp
+SRCS = main.cpp core/circuit.cpp core/circuit_compare.cpp io/bench_parser.cpp io/bench_writer.cpp algorithm/matching.cpp
 OBJS = $(SRCS:%.cpp=$(BUILD_DIR)/%.o)
 
 all: $(TARGET)

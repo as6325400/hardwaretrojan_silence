@@ -107,6 +107,8 @@ const std::vector<int>& circuit::po_indices() const { return po_; }
 std::size_t circuit::pi_count() const { return pi_.size(); }
 std::size_t circuit::po_count() const { return po_.size(); }
 const cell& circuit::get_cell(int idx) const { return cells_[static_cast<std::size_t>(idx)]; }
+std::size_t circuit::node_count() const { return cells_.size(); }
+const std::vector<int>& circuit::eval_order() const { return eval_order_; }
 
 std::size_t circuit::level() const {
   if (cells_.empty()) {
@@ -163,6 +165,12 @@ std::size_t circuit::area() const {
     }
   }
   return count;
+}
+
+void circuit::ensure_eval_order() {
+  if (gate_count_cached_ != area()) {
+    rebuild_eval_order();
+  }
 }
 
 void circuit::rebuild_eval_order() {
@@ -254,9 +262,7 @@ void circuit::set_po_index(std::size_t pos, int idx) {
 }
 
 std::vector<int> circuit::simulate(const std::vector<int>& pi_values) {
-  if (gate_count_cached_ != area()) {
-    rebuild_eval_order();
-  }
+  ensure_eval_order();
   if (pi_values.size() != pi_.size()) {
     throw std::runtime_error("PI vector size mismatch");
   }
