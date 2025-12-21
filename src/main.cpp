@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
   }
 
 
-  const size_t pattern_count = 100000;
+  const size_t pattern_count = 1000000000;
   vector<vector<int>> errors;
 
   size_t mismatch_patterns = 0;

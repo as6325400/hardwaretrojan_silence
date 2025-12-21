@@ -2,3 +2,5 @@
 /trojaned_bench
 /build
 /bin
+**/abc.history
+abc_docs.txt

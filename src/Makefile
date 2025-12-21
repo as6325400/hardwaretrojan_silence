@@ -2,13 +2,16 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pedantic -fopenmp
 BUILD_DIR = ../build
 BIN_DIR = ../bin
-TARGET = $(BIN_DIR)/main
-SRCS = main.cpp core/circuit.cpp core/circuit_compare.cpp io/bench_parser.cpp io/bench_writer.cpp algorithm/matching.cpp
-OBJS = $(SRCS:%.cpp=$(BUILD_DIR)/%.o)
 
-all: $(TARGET)
+PROG_SRCS := $(wildcard *.cpp)
+LIB_SRCS := $(wildcard core/*.cpp io/*.cpp algorithm/*.cpp)
+PROG_OBJS := $(PROG_SRCS:%.cpp=$(BUILD_DIR)/%.o)
+LIB_OBJS := $(LIB_SRCS:%.cpp=$(BUILD_DIR)/%.o)
+TARGETS := $(PROG_SRCS:%.cpp=$(BIN_DIR)/%)
 
-$(TARGET): $(OBJS)
+all: $(TARGETS)
+
+$(BIN_DIR)/%: $(BUILD_DIR)/%.o $(LIB_OBJS)
 	mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
@@ -17,5 +20,5 @@ $(BUILD_DIR)/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)
 	rm -rf $(BUILD_DIR)
