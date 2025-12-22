@@ -4,3 +4,4 @@
 /bin
 **/abc.history
 abc_docs.txt
+**/*.bench
