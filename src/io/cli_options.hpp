@@ -12,6 +12,7 @@ enum class ParseStatus {
 struct AppOptions {
   std::string golden_path;
   std::string trojan_path;
+  std::string groundtruth_path;
   std::string output_path;
   std::size_t pattern_count = 1000000000;
   std::size_t max_depth = 10;

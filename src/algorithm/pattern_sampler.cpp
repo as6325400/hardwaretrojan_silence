@@ -1,9 +1,20 @@
 #include "pattern_sampler.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <random>
 
 #include <omp.h>
+
+#include "../core/packed_circuit.hpp"
+
+namespace {
+
+std::uint64_t popcount_ull(packed_circuit::word_t value) {
+  return static_cast<std::uint64_t>(__builtin_popcountll(value));
+}
+
+}  // namespace
 
 PatternStats sample_patterns(const circuit& golden,
                              const circuit& trojan,
@@ -34,6 +45,10 @@ PatternStats sample_patterns(const circuit& golden,
 
   std::size_t mismatch_patterns = 0;
 
+  const std::size_t block_count =
+      (pattern_count + packed_circuit::kWordBits - 1) /
+      packed_circuit::kWordBits;
+
 #pragma omp parallel reduction(+:mismatch_patterns)
 {
   const int tid = omp_get_thread_num();
@@ -41,20 +56,34 @@ PatternStats sample_patterns(const circuit& golden,
   std::uniform_int_distribution<int> dist(0, 1);
   circuit golden_local = golden;
   circuit trojan_local = trojan;
+  packed_circuit golden_packed(golden_local);
+  packed_circuit trojan_packed(trojan_local);
 
   #pragma omp for schedule(static)
-  for (std::size_t p = 0; p < pattern_count; ++p) {
-    std::vector<int> pi_values;
-    pi_values.reserve(golden_local.pi_count());
-    for (std::size_t i = 0; i < golden_local.pi_count(); ++i) {
-      pi_values.push_back(dist(rng));
+  for (std::size_t block = 0; block < block_count; ++block) {
+    const std::size_t start = block * packed_circuit::kWordBits;
+    const std::size_t remaining =
+        (pattern_count > start) ? (pattern_count - start) : 0;
+    const std::size_t block_size =
+        std::min(remaining, packed_circuit::kWordBits);
+    if (block_size == 0) {
+      continue;
     }
 
-    std::vector<int> golden_outputs;
-    std::vector<int> trojan_outputs;
+    std::vector<std::vector<int>> patterns;
+    patterns.reserve(block_size);
+    for (std::size_t p = 0; p < block_size; ++p) {
+      std::vector<int> pi_values;
+      pi_values.reserve(golden_local.pi_count());
+      for (std::size_t i = 0; i < golden_local.pi_count(); ++i) {
+        pi_values.push_back(dist(rng));
+      }
+      patterns.push_back(std::move(pi_values));
+    }
+
     try {
-      golden_outputs = golden_local.simulate(pi_values);
-      trojan_outputs = trojan_local.simulate(pi_values);
+      golden_packed.simulate(patterns);
+      trojan_packed.simulate(patterns);
     } catch (const std::exception& e) {
       #pragma omp critical
       {
@@ -63,39 +92,47 @@ PatternStats sample_patterns(const circuit& golden,
       continue;
     }
 
-    std::size_t diff = 0;
-    for (std::size_t i = 0; i < golden_outputs.size(); ++i) {
-      if (golden_outputs[i] != trojan_outputs[i]) {
-        ++diff;
-      }
+    const packed_circuit::word_t pattern_mask =
+        packed_circuit::mask_for_count(block_size);
+    packed_circuit::word_t diff_mask = 0;
+    for (std::size_t i = 0; i < trojan_local.po_count(); ++i) {
+      diff_mask |= (golden_packed.po_bits(i) ^ trojan_packed.po_bits(i));
     }
+    diff_mask &= pattern_mask;
 
-    const bool triggered = diff > 0;
-    total_count_thread[tid]++;
-    if (triggered) {
-      trigger_count_thread[tid]++;
-    } else {
-      notrigger_count_thread[tid]++;
-    }
+    const std::uint64_t triggered_count = popcount_ull(diff_mask);
+    mismatch_patterns += triggered_count;
+    total_count_thread[tid] += static_cast<std::uint64_t>(block_size);
+    trigger_count_thread[tid] += triggered_count;
+    notrigger_count_thread[tid] +=
+        static_cast<std::uint64_t>(block_size) - triggered_count;
+
+    const packed_circuit::word_t notrigger_mask =
+        pattern_mask & ~diff_mask;
 
     for (std::size_t g = 0; g < stats.gate_indices.size(); ++g) {
       const int idx = stats.gate_indices[g];
-      const int val = trojan_local.get_cell(idx).val;
-      const std::uint64_t one = (val == 1) ? 1 : 0;
-      ones_total_thread[tid][g] += one;
-      if (triggered) {
-        ones_trigger_thread[tid][g] += one;
-      } else {
-        ones_notrigger_thread[tid][g] += one;
-      }
+      const packed_circuit::word_t bits =
+          trojan_packed.node_bits(idx) & pattern_mask;
+      ones_total_thread[tid][g] += popcount_ull(bits);
+      ones_trigger_thread[tid][g] += popcount_ull(bits & diff_mask);
+      ones_notrigger_thread[tid][g] += popcount_ull(bits & notrigger_mask);
     }
 
-    if (triggered) {
+    if (diff_mask != 0) {
+      std::vector<std::vector<int>> local_triggered;
+      local_triggered.reserve(triggered_count);
+      for (std::size_t bit = 0; bit < block_size; ++bit) {
+        if (diff_mask & (packed_circuit::word_t(1) << bit)) {
+          local_triggered.push_back(patterns[bit]);
+        }
+      }
       #pragma omp critical
       {
-        trigger_patterns.push_back(pi_values);
+        trigger_patterns.insert(trigger_patterns.end(),
+                                local_triggered.begin(),
+                                local_triggered.end());
       }
-      ++mismatch_patterns;
     }
   }
 }

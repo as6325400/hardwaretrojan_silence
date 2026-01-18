@@ -1,9 +1,9 @@
 #include <bits/stdc++.h>
 
-#include "io/bench_parser.hpp"
-#include "io/bench_writer.hpp"
-#include "core/circuit_compare.hpp"
-#include "algorithm/matching.hpp"
+#include "../io/bench_parser.hpp"
+#include "../io/bench_writer.hpp"
+#include "../core/circuit_compare.hpp"
+#include "../algorithm/matching.hpp"
 
 using namespace std;
 
@@ -23,6 +23,7 @@ int main(int argc, char** argv) {
   }
 
   cout << "area " << c.area() << ' ' << "delay " << c.level() << '\n';
+  cout << "PI Count " << c.pi_count() << ' ' << "PO Count " << c.po_count() << '\n';
 
    
 

@@ -7,7 +7,7 @@
 namespace {
 
 struct TrainingData {
-  std::vector<std::vector<int>> features;
+  PackedFeatureMatrix features;
   std::vector<int> labels;
   std::size_t pos_count = 0;
   std::size_t neg_count = 0;
@@ -30,28 +30,59 @@ std::vector<int> build_feature_nodes(const circuit& trojan,
   return nodes;
 }
 
-std::vector<int> collect_features(circuit& c, const std::vector<int>& feature_nodes) {
-  std::vector<int> row;
-  row.reserve(feature_nodes.size());
-  for (int idx : feature_nodes) {
-    row.push_back(c.get_cell(idx).val ? 1 : 0);
+using FeatureWord = PackedFeatureMatrix::word_t;
+
+void pack_feature_row(circuit& c,
+                      const std::vector<int>& feature_nodes,
+                      std::size_t words_per_row,
+                      std::vector<FeatureWord>* row) {
+  if (!row) {
+    return;
   }
-  return row;
+  row->assign(words_per_row, 0);
+  for (std::size_t i = 0; i < feature_nodes.size(); ++i) {
+    if (c.get_cell(feature_nodes[i]).val) {
+      const std::size_t word_idx = i / PackedFeatureMatrix::kWordBits;
+      const std::size_t bit_idx = i % PackedFeatureMatrix::kWordBits;
+      (*row)[word_idx] |= (FeatureWord(1) << bit_idx);
+    }
+  }
+}
+
+bool append_feature_row(const std::vector<FeatureWord>& row,
+                        PackedFeatureMatrix* matrix) {
+  if (!matrix) {
+    return false;
+  }
+  const std::size_t words_per_row = matrix->words_per_row();
+  if (row.size() != words_per_row) {
+    return false;
+  }
+  matrix->data.insert(matrix->data.end(), row.begin(), row.end());
+  matrix->row_count += 1;
+  return true;
 }
 
 bool build_training_data(const circuit& golden,
                          const circuit& trojan,
                          const std::vector<std::vector<int>>& trigger_patterns,
                          const std::vector<int>& feature_nodes,
+                         const std::vector<std::vector<int>>* extra_neg_patterns,
                          std::size_t neg_ratio,
                          TrainingData* data) {
-  data->features.clear();
+  data->features.data.clear();
+  data->features.row_count = 0;
+  data->features.feature_count = feature_nodes.size();
   data->labels.clear();
   data->pos_count = 0;
   data->neg_count = 0;
 
   circuit golden_train = golden;
   circuit trojan_train = trojan;
+
+  const std::size_t words_per_row = data->features.words_per_row();
+  std::vector<FeatureWord> row_bits;
+  row_bits.reserve(words_per_row);
 
   for (const auto& pattern : trigger_patterns) {
     try {
@@ -60,7 +91,8 @@ bool build_training_data(const circuit& golden,
       std::cerr << "Training trigger simulation error: " << e.what() << "\n";
       continue;
     }
-    data->features.push_back(collect_features(trojan_train, feature_nodes));
+    pack_feature_row(trojan_train, feature_nodes, words_per_row, &row_bits);
+    append_feature_row(row_bits, &data->features);
     data->labels.push_back(1);
     data->pos_count += 1;
   }
@@ -69,8 +101,22 @@ bool build_training_data(const circuit& golden,
     return false;
   }
 
+  if (extra_neg_patterns && !extra_neg_patterns->empty()) {
+    for (const auto& pattern : *extra_neg_patterns) {
+      try {
+        trojan_train.simulate(pattern);
+      } catch (const std::exception&) {
+        continue;
+      }
+      pack_feature_row(trojan_train, feature_nodes, words_per_row, &row_bits);
+      append_feature_row(row_bits, &data->features);
+      data->labels.push_back(0);
+      data->neg_count += 1;
+    }
+  }
+
   const std::size_t target_negatives = data->pos_count * std::max<std::size_t>(1, neg_ratio);
-  data->features.reserve(data->pos_count + target_negatives);
+  data->features.data.reserve((data->pos_count + target_negatives) * words_per_row);
   data->labels.reserve(data->pos_count + target_negatives);
 
   std::size_t attempts = 0;
@@ -102,7 +148,8 @@ bool build_training_data(const circuit& golden,
       }
     }
     if (!triggered) {
-      data->features.push_back(collect_features(trojan_train, feature_nodes));
+      pack_feature_row(trojan_train, feature_nodes, words_per_row, &row_bits);
+      append_feature_row(row_bits, &data->features);
       data->labels.push_back(0);
       data->neg_count += 1;
     }
@@ -133,8 +180,10 @@ bool train_model(const TrainingData& data,
   *train_neg = 0;
   *train_false_pos = 0;
   *train_false_neg = 0;
-  for (std::size_t i = 0; i < data.features.size(); ++i) {
-    const bool pred = eval_rules(model->rules, data.features[i]);
+  for (std::size_t i = 0; i < data.features.row_count; ++i) {
+    const bool pred = eval_rules_packed(model->rules,
+                                        data.features.row_ptr(i),
+                                        data.features.feature_count);
     if (data.labels[i] == 1) {
       *train_pos += 1;
       if (!pred) {
@@ -190,11 +239,14 @@ EvalResult eval_and_mine(const circuit& golden,
       }
     }
     if (!triggered) {
-      const std::vector<int> row = collect_features(trojan_eval, feature_nodes);
-      if (eval_rules(model.rules, row)) {
+      std::vector<FeatureWord> row_bits;
+      const std::size_t words_per_row = (feature_nodes.size() + PackedFeatureMatrix::kWordBits - 1) /
+                                        PackedFeatureMatrix::kWordBits;
+      pack_feature_row(trojan_eval, feature_nodes, words_per_row, &row_bits);
+      if (eval_rules_packed(model.rules, row_bits.data(), feature_nodes.size())) {
         result.false_pos += 1;
         if (data && result.added < max_add) {
-          data->features.push_back(row);
+          append_feature_row(row_bits, &data->features);
           data->labels.push_back(0);
           data->neg_count += 1;
           result.added += 1;
@@ -321,6 +373,7 @@ bool run_mining(const circuit& golden,
                 const std::vector<int>& candidate_gate_indices,
                 const MiningOptions& options,
                 double target_rate,
+                const std::vector<std::vector<int>>* extra_neg_patterns,
                 MiningResult* result,
                 std::string* error) {
   if (error) {
@@ -362,6 +415,7 @@ bool run_mining(const circuit& golden,
                            trojan,
                            trigger_patterns,
                            feature_nodes,
+                           extra_neg_patterns,
                            options.neg_ratio,
                            &data)) {
     if (error) {
@@ -398,6 +452,7 @@ bool run_mining(const circuit& golden,
                             trojan,
                             trigger_patterns,
                             strict_features,
+                            extra_neg_patterns,
                             options.neg_ratio,
                             &strict_data) &&
         run_mining_loop(golden,

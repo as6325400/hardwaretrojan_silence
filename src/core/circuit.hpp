@@ -59,6 +59,7 @@ public:
   int add_gate_auto(const std::string& prefix, GType gtype, const std::vector<int>& inputs); // Create a gate with a unique name.
   int add_const_auto(const std::string& prefix, int value); // Create a constant node with a unique name.
   void set_po_index(std::size_t pos, int idx); // Replace a PO index by position.
+  void replace_gate_inputs(int old_idx, int new_idx, std::size_t max_node); // Rewrite gate inputs (index < max_node) from old_idx to new_idx.
 
   std::vector<int> simulate(const std::vector<int>& pi_values); // Simulate one input vector and return PO values.
 

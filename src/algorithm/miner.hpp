@@ -39,5 +39,6 @@ bool run_mining(const circuit& golden,
                 const std::vector<int>& candidate_gate_indices,
                 const MiningOptions& options,
                 double target_rate,
+                const std::vector<std::vector<int>>* extra_neg_patterns,
                 MiningResult* result,
                 std::string* error); // Train decision tree with hard-negative mining.

@@ -42,6 +42,7 @@ void print_usage(const char* prog) {
   const char* name = prog ? prog : "main";
   std::cout << "Usage: " << name
             << " <golden_bench> <trojan_bench> [output_bench]"
+               " [--groundtruth PATH]"
                " [--patterns N] [--depth N] [--eval N] [--neg-ratio N]"
                " [--mine-rounds N] [--mine-max N]"
                " [--p1-trigger X] [--p1-notrigger Y] [--include-pi] [--no-filter]"
@@ -187,6 +188,22 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
     }
     if (arg == "--no-strict") {
       out->strict_retry = false;
+      continue;
+    }
+    if (arg == "--groundtruth") {
+      if (i + 1 >= argc) {
+        arg_error = "Missing value for --groundtruth";
+        break;
+      }
+      out->groundtruth_path = argv[++i];
+      continue;
+    }
+    const std::string groundtruth_prefix = "--groundtruth=";
+    if (arg.rfind(groundtruth_prefix, 0) == 0) {
+      out->groundtruth_path = arg.substr(groundtruth_prefix.size());
+      if (out->groundtruth_path.empty()) {
+        arg_error = "Missing value for --groundtruth";
+      }
       continue;
     }
     if (arg == "--output") {

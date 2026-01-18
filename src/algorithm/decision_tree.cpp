@@ -5,7 +5,14 @@
 #include <limits>
 #include <memory>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace {
+
+using PackedWord = PackedFeatureMatrix::word_t;
+constexpr std::size_t kPackedWordBits = PackedFeatureMatrix::kWordBits;
 
 struct Node {
   bool is_leaf = true;
@@ -30,6 +37,16 @@ double gini_impurity(std::size_t pos, std::size_t neg) {
   return 1.0 - (p * p + q * q);
 }
 
+int packed_feature_value(const PackedFeatureMatrix& features,
+                         std::size_t words_per_row,
+                         std::size_t row,
+                         std::size_t feature) {
+  const std::size_t word_idx = feature / kPackedWordBits;
+  const std::size_t bit_idx = feature % kPackedWordBits;
+  const PackedWord* row_ptr = features.data.data() + row * words_per_row;
+  return static_cast<int>((row_ptr[word_idx] >> bit_idx) & PackedWord(1));
+}
+
 std::unique_ptr<Node> make_leaf(bool label, std::size_t depth, BuildStats& stats) {
   auto node = std::make_unique<Node>();
   node->is_leaf = true;
@@ -39,7 +56,7 @@ std::unique_ptr<Node> make_leaf(bool label, std::size_t depth, BuildStats& stats
   return node;
 }
 
-std::unique_ptr<Node> build_node(const std::vector<std::vector<int>>& features,
+std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
                                  const std::vector<int>& labels,
                                  const std::vector<std::size_t>& samples,
                                  const std::vector<std::size_t>& feature_indices,
@@ -70,18 +87,91 @@ std::unique_ptr<Node> build_node(const std::vector<std::vector<int>>& features,
     return make_leaf(true, depth, stats);
   }
 
+  const std::size_t words_per_row = features.words_per_row();
   const double parent_impurity = gini_impurity(pos, neg);
   double best_gain = -std::numeric_limits<double>::infinity();
   std::size_t best_feature = 0;
   bool found = false;
 
+#ifdef _OPENMP
+  double global_best_gain = -std::numeric_limits<double>::infinity();
+  std::size_t global_best_feature = 0;
+  bool global_found = false;
+
+  #pragma omp parallel
+  {
+    double local_best_gain = -std::numeric_limits<double>::infinity();
+    std::size_t local_best_feature = 0;
+    bool local_found = false;
+
+    #pragma omp for schedule(static)
+    for (std::size_t i = 0; i < feature_indices.size(); ++i) {
+      const std::size_t f = feature_indices[i];
+      std::size_t pos0 = 0;
+      std::size_t neg0 = 0;
+      std::size_t pos1 = 0;
+      std::size_t neg1 = 0;
+      for (std::size_t idx : samples) {
+        const int value = packed_feature_value(features, words_per_row, idx, f);
+        if (value == 1) {
+          if (labels[idx] == 1) {
+            pos1 += 1;
+          } else {
+            neg1 += 1;
+          }
+        } else {
+          if (labels[idx] == 1) {
+            pos0 += 1;
+          } else {
+            neg0 += 1;
+          }
+        }
+      }
+
+      const std::size_t total0 = pos0 + neg0;
+      const std::size_t total1 = pos1 + neg1;
+      if (total0 == 0 || total1 == 0) {
+        continue;
+      }
+
+      const double weighted_impurity =
+          (static_cast<double>(total0) / static_cast<double>(samples.size())) *
+              gini_impurity(pos0, neg0) +
+          (static_cast<double>(total1) /
+           static_cast<double>(samples.size())) *
+              gini_impurity(pos1, neg1);
+      const double gain = parent_impurity - weighted_impurity;
+
+      if (!local_found || gain > local_best_gain) {
+        local_best_gain = gain;
+        local_best_feature = f;
+        local_found = true;
+      }
+    }
+
+    #pragma omp critical
+    {
+      if (local_found && (!global_found || local_best_gain > global_best_gain)) {
+        global_best_gain = local_best_gain;
+        global_best_feature = local_best_feature;
+        global_found = true;
+      }
+    }
+  }
+
+  if (global_found) {
+    best_gain = global_best_gain;
+    best_feature = global_best_feature;
+    found = true;
+  }
+#else
   for (std::size_t f : feature_indices) {
     std::size_t pos0 = 0;
     std::size_t neg0 = 0;
     std::size_t pos1 = 0;
     std::size_t neg1 = 0;
     for (std::size_t idx : samples) {
-      const int value = features[idx][f];
+      const int value = packed_feature_value(features, words_per_row, idx, f);
       if (value == 1) {
         if (labels[idx] == 1) {
           pos1 += 1;
@@ -116,6 +206,7 @@ std::unique_ptr<Node> build_node(const std::vector<std::vector<int>>& features,
       found = true;
     }
   }
+#endif
 
   if (!found || (!options.force_split && best_gain <= 0.0)) {
     return make_leaf(true, depth, stats);
@@ -126,7 +217,7 @@ std::unique_ptr<Node> build_node(const std::vector<std::vector<int>>& features,
   left_samples.reserve(samples.size());
   right_samples.reserve(samples.size());
   for (std::size_t idx : samples) {
-    const int value = features[idx][best_feature];
+    const int value = packed_feature_value(features, words_per_row, idx, best_feature);
     if (value == 1) {
       right_samples.push_back(idx);
     } else {
@@ -175,7 +266,7 @@ void collect_rules(const Node& node,
 
 }  // namespace
 
-DecisionTreeModel build_decision_tree(const std::vector<std::vector<int>>& features,
+DecisionTreeModel build_decision_tree(const PackedFeatureMatrix& features,
                                       const std::vector<int>& labels,
                                       const DecisionTreeOptions& options,
                                       std::string* error) {
@@ -183,30 +274,35 @@ DecisionTreeModel build_decision_tree(const std::vector<std::vector<int>>& featu
   if (error) {
     error->clear();
   }
-  if (features.empty() || labels.empty()) {
+  if (features.row_count == 0 || labels.empty()) {
     if (error) {
       *error = "empty training data";
     }
     return model;
   }
-  if (features.size() != labels.size()) {
+  if (features.row_count != labels.size()) {
     if (error) {
       *error = "feature/label size mismatch";
     }
     return model;
   }
 
-  const std::size_t feature_count = features.front().size();
-  for (const auto& row : features) {
-    if (row.size() != feature_count) {
-      if (error) {
-        *error = "inconsistent feature dimensions";
-      }
-      return model;
+  const std::size_t feature_count = features.feature_count;
+  if (feature_count == 0) {
+    if (error) {
+      *error = "empty feature set";
     }
+    return model;
+  }
+  const std::size_t words_per_row = features.words_per_row();
+  if (features.data.size() != features.row_count * words_per_row) {
+    if (error) {
+      *error = "packed feature size mismatch";
+    }
+    return model;
   }
 
-  std::vector<std::size_t> samples(features.size());
+  std::vector<std::size_t> samples(features.row_count);
   for (std::size_t i = 0; i < samples.size(); ++i) {
     samples[i] = i;
   }
@@ -244,6 +340,37 @@ bool eval_rules(const std::vector<DecisionTreeRule>& rules,
         break;
       }
       const int value = features[idx] ? 1 : 0;
+      if (value != expected) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool eval_rules_packed(const std::vector<DecisionTreeRule>& rules,
+                       const PackedFeatureMatrix::word_t* features,
+                       std::size_t feature_count) {
+  if (!features) {
+    return false;
+  }
+  for (const auto& rule : rules) {
+    bool match = true;
+    for (const auto& term : rule.terms) {
+      const std::size_t idx = term.first;
+      const int expected = term.second;
+      if (idx >= feature_count) {
+        match = false;
+        break;
+      }
+      const std::size_t word_idx = idx / kPackedWordBits;
+      const std::size_t bit_idx = idx % kPackedWordBits;
+      const int value =
+          static_cast<int>((features[word_idx] >> bit_idx) & PackedWord(1));
       if (value != expected) {
         match = false;
         break;

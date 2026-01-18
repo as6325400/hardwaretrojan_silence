@@ -275,6 +275,28 @@ void circuit::set_po_index(std::size_t pos, int idx) {
   }
 }
 
+void circuit::replace_gate_inputs(int old_idx, int new_idx, std::size_t max_node) {
+  if (old_idx == new_idx) {
+    return;
+  }
+  if (old_idx < 0 || new_idx < 0) {
+    throw std::runtime_error("gate input replacement index out of range");
+  }
+  const std::size_t max_limit =
+      std::min(max_node, static_cast<std::size_t>(cells_.size()));
+  for (std::size_t idx = 0; idx < max_limit; ++idx) {
+    cell& c = cells_[idx];
+    if (c.ctype != CType::GATE) {
+      continue;
+    }
+    for (int& input_idx : c.inputs) {
+      if (input_idx == old_idx) {
+        input_idx = new_idx;
+      }
+    }
+  }
+}
+
 std::vector<int> circuit::simulate(const std::vector<int>& pi_values) {
   ensure_eval_order();
   if (pi_values.size() != pi_.size()) {
