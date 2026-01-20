@@ -27,3 +27,9 @@ bool evaluate_fix_candidate(const circuit& base,
                             std::size_t* out_area,
                             std::size_t* out_level,
                             std::string* error);
+
+bool verify_patch_groundtruth(const circuit& golden,
+                              const circuit& patched,
+                              const std::vector<std::vector<int>>& patterns,
+                              std::size_t* mismatch_index,
+                              std::string* error);

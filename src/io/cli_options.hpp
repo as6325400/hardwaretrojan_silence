@@ -16,7 +16,7 @@ struct AppOptions {
   std::string output_path;
   std::size_t pattern_count = 1000000000;
   std::size_t max_depth = 10;
-  std::size_t eval_count = 1000000;
+  std::size_t eval_count = 100000;
   std::size_t neg_ratio = 50;
   std::size_t mine_rounds = 15;
   std::size_t mine_max = 5000;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <numeric>
 #include <random>
 
 namespace {
@@ -398,6 +399,21 @@ bool run_mining(const circuit& golden,
     return false;
   }
 
+  const std::size_t max_trigger_patterns = 50;
+  std::vector<std::vector<int>> limited_triggers;
+  const std::vector<std::vector<int>>* training_triggers = &trigger_patterns;
+  if (trigger_patterns.size() > max_trigger_patterns) {
+    std::vector<std::size_t> indices(trigger_patterns.size());
+    std::iota(indices.begin(), indices.end(), 0U);
+    std::mt19937 rng(1337);
+    std::shuffle(indices.begin(), indices.end(), rng);
+    limited_triggers.reserve(max_trigger_patterns);
+    for (std::size_t i = 0; i < max_trigger_patterns; ++i) {
+      limited_triggers.push_back(trigger_patterns[indices[i]]);
+    }
+    training_triggers = &limited_triggers;
+  }
+
   DecisionTreeOptions tree_options;
   tree_options.max_depth = options.max_depth;
   tree_options.force_split = options.force_split;
@@ -413,7 +429,7 @@ bool run_mining(const circuit& golden,
   TrainingData data;
   if (!build_training_data(golden,
                            trojan,
-                           trigger_patterns,
+                           *training_triggers,
                            feature_nodes,
                            extra_neg_patterns,
                            options.neg_ratio,
@@ -450,7 +466,7 @@ bool run_mining(const circuit& golden,
     TrainingData strict_data;
     if (build_training_data(golden,
                             trojan,
-                            trigger_patterns,
+                            *training_triggers,
                             strict_features,
                             extra_neg_patterns,
                             options.neg_ratio,

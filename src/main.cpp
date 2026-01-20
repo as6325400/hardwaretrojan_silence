@@ -581,17 +581,31 @@ int main(int argc, char** argv) {
         return 1;
       }
 
-      const string output_path = options.output_path.empty()
-                                     ? derive_patched_path(options.trojan_path)
-                                     : options.output_path;
-      if (!bench_io::write_bench_file(output_path, patched, &error)) {
-        cerr << "Write error: " << error << "\n";
-        return 1;
+      std::size_t mismatch_index = 0;
+      if (!verify_patch_groundtruth(golden,
+                                    patched,
+                                    stats.trigger_patterns,
+                                    &mismatch_index,
+                                    &error)) {
+        cerr << "Payload fix verification failed: " << error;
+        if (!stats.trigger_patterns.empty()) {
+          cerr << " pattern " << mismatch_index;
+        }
+        cerr << "\n";
+        cout << "payload_fix_apply skipped: groundtruth_verify_failed\n";
+      } else {
+        const string output_path = options.output_path.empty()
+                                       ? derive_patched_path(options.trojan_path)
+                                       : options.output_path;
+        if (!bench_io::write_bench_file(output_path, patched, &error)) {
+          cerr << "Write error: " << error << "\n";
+          return 1;
+        }
+        cout << "payload_fix_selected " << patched.node_name(best_idx)
+             << " area_delta " << best_area
+             << " level_delta " << best_level << "\n";
+        cout << "payload_fix_bench " << output_path << "\n";
       }
-      cout << "payload_fix_selected " << patched.node_name(best_idx)
-           << " area_delta " << best_area
-           << " level_delta " << best_level << "\n";
-      cout << "payload_fix_bench " << output_path << "\n";
     } else {
       cout << "payload_fix_apply skipped: no viable candidate\n";
     }

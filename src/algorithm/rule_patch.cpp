@@ -290,3 +290,59 @@ bool evaluate_fix_candidate(const circuit& base,
   }
   return true;
 }
+
+bool verify_patch_groundtruth(const circuit& golden,
+                              const circuit& patched,
+                              const std::vector<std::vector<int>>& patterns,
+                              std::size_t* mismatch_index,
+                              std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (mismatch_index) {
+    *mismatch_index = 0;
+  }
+  if (patterns.empty()) {
+    return true;
+  }
+  if (golden.pi_count() != patched.pi_count()) {
+    if (error) {
+      *error = "PI count mismatch";
+    }
+    return false;
+  }
+  if (golden.po_count() != patched.po_count()) {
+    if (error) {
+      *error = "PO count mismatch";
+    }
+    return false;
+  }
+
+  circuit golden_eval = golden;
+  circuit patched_eval = patched;
+  for (std::size_t i = 0; i < patterns.size(); ++i) {
+    try {
+      const std::vector<int> g_out = golden_eval.simulate(patterns[i]);
+      const std::vector<int> p_out = patched_eval.simulate(patterns[i]);
+      if (g_out != p_out) {
+        if (mismatch_index) {
+          *mismatch_index = i;
+        }
+        if (error) {
+          *error = "groundtruth mismatch";
+        }
+        return false;
+      }
+    } catch (const std::exception& e) {
+      if (mismatch_index) {
+        *mismatch_index = i;
+      }
+      if (error) {
+        *error = e.what();
+      }
+      return false;
+    }
+  }
+
+  return true;
+}
