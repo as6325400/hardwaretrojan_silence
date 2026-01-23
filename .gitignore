@@ -2,5 +2,8 @@
 /trojaned_bench
 /build
 /bin
+/groundtruth
 **/abc.history
 abc_docs.txt
+**/*.bench
+**/__pycache__/**

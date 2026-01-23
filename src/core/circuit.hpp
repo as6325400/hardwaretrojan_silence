@@ -41,6 +41,7 @@ public:
   void define_pi(const std::string& name); // Mark node as a primary input.
   void define_const(const std::string& name, int value); // Define a constant node value (0/1).
   void define_gate(const std::string& name, GType gtype, const std::vector<int>& inputs); // Define gate and its inputs.
+  void force_gate_const(int idx, int value); // Force a gate node to constant 0/1 and clear its inputs.
 
   void add_output_name(const std::string& name); // Record an output signal name.
   void finalize_outputs(); // Resolve output names to indices and validate.
@@ -58,6 +59,7 @@ public:
   int add_gate_auto(const std::string& prefix, GType gtype, const std::vector<int>& inputs); // Create a gate with a unique name.
   int add_const_auto(const std::string& prefix, int value); // Create a constant node with a unique name.
   void set_po_index(std::size_t pos, int idx); // Replace a PO index by position.
+  void replace_gate_inputs(int old_idx, int new_idx, std::size_t max_node); // Rewrite gate inputs (index < max_node) from old_idx to new_idx.
 
   std::vector<int> simulate(const std::vector<int>& pi_values); // Simulate one input vector and return PO values.
 

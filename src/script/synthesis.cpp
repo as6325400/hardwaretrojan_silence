@@ -3,9 +3,9 @@
 #include <string>
 #include <vector>
 
-#include "io/bench_parser.hpp"
-#include "io/bench_writer.hpp"
-#include "io/eqn_parser.hpp"
+#include "../io/bench_parser.hpp"
+#include "../io/bench_writer.hpp"
+#include "../io/eqn_parser.hpp"
 
 struct Flow {
   std::string name;

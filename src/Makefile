@@ -1,9 +1,10 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pedantic -fopenmp
+LDFLAGS ?= -lz3
 BUILD_DIR = ../build
 BIN_DIR = ../bin
 
-PROG_SRCS := $(wildcard *.cpp)
+PROG_SRCS := $(wildcard *.cpp script/*.cpp)
 LIB_SRCS := $(wildcard core/*.cpp io/*.cpp algorithm/*.cpp)
 PROG_OBJS := $(PROG_SRCS:%.cpp=$(BUILD_DIR)/%.o)
 LIB_OBJS := $(LIB_SRCS:%.cpp=$(BUILD_DIR)/%.o)
@@ -13,7 +14,7 @@ all: $(TARGETS)
 
 $(BIN_DIR)/%: $(BUILD_DIR)/%.o $(LIB_OBJS)
 	mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD_DIR)/%.o: %.cpp
 	mkdir -p $(dir $@)

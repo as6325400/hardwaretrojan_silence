@@ -81,6 +81,20 @@ void circuit::define_gate(const std::string& name, GType gtype, const std::vecto
   eval_order_.push_back(idx);
 }
 
+void circuit::force_gate_const(int idx, int value) {
+  if (idx < 0 || static_cast<std::size_t>(idx) >= cells_.size()) {
+    throw std::runtime_error("node index out of range");
+  }
+  cell& c = cells_[idx];
+  if (c.ctype != CType::GATE) {
+    throw std::runtime_error("node is not a gate: " + node_name(idx));
+  }
+  c.ctype = CType::CONST;
+  c.val = value ? 1 : 0;
+  c.inputs.clear();
+  gate_count_cached_ = 0;
+}
+
 void circuit::add_output_name(const std::string& name) {
   po_names_.push_back(name);
 }
@@ -258,6 +272,28 @@ void circuit::set_po_index(std::size_t pos, int idx) {
   po_[pos] = idx;
   if (pos < po_names_.size()) {
     po_names_[pos] = node_name(idx);
+  }
+}
+
+void circuit::replace_gate_inputs(int old_idx, int new_idx, std::size_t max_node) {
+  if (old_idx == new_idx) {
+    return;
+  }
+  if (old_idx < 0 || new_idx < 0) {
+    throw std::runtime_error("gate input replacement index out of range");
+  }
+  const std::size_t max_limit =
+      std::min(max_node, static_cast<std::size_t>(cells_.size()));
+  for (std::size_t idx = 0; idx < max_limit; ++idx) {
+    cell& c = cells_[idx];
+    if (c.ctype != CType::GATE) {
+      continue;
+    }
+    for (int& input_idx : c.inputs) {
+      if (input_idx == old_idx) {
+        input_idx = new_idx;
+      }
+    }
   }
 }
 
