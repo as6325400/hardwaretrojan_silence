@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../core/packed_circuit.hpp"
+
 namespace {
 
 int build_and_tree(circuit& net,
@@ -116,6 +118,180 @@ int build_trigger_match_gate(circuit& net,
     return rule_matches[0];
   }
   return build_or_tree(net, rule_matches, "rule_or_");
+}
+
+bool extract_single_literal_trigger(const std::vector<int>& feature_nodes,
+                                    const DecisionTreeModel& model,
+                                    int* trigger_idx,
+                                    int* expected_value,
+                                    std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (model.rules.empty()) {
+    return false;
+  }
+
+  bool have_literal = false;
+  std::size_t feature_idx = 0;
+  int expected = 0;
+  for (const auto& rule : model.rules) {
+    if (rule.terms.empty()) {
+      return false;
+    }
+    if (rule.terms.size() != 1U) {
+      return false;
+    }
+    const auto& term = rule.terms[0];
+    if (!have_literal) {
+      feature_idx = term.first;
+      expected = term.second ? 1 : 0;
+      have_literal = true;
+    } else if (term.first != feature_idx || term.second != expected) {
+      return false;
+    }
+  }
+
+  if (!have_literal) {
+    return false;
+  }
+  if (feature_idx >= feature_nodes.size()) {
+    if (error) {
+      *error = "trigger feature index out of range";
+    }
+    return false;
+  }
+  if (trigger_idx) {
+    *trigger_idx = feature_nodes[feature_idx];
+  }
+  if (expected_value) {
+    *expected_value = expected;
+  }
+  return true;
+}
+
+bool is_not_gate_of(const circuit& net, int node_idx, int input_idx) {
+  if (node_idx < 0 || input_idx < 0 ||
+      static_cast<std::size_t>(node_idx) >= net.node_count() ||
+      static_cast<std::size_t>(input_idx) >= net.node_count()) {
+    return false;
+  }
+  const cell& c = net.get_cell(node_idx);
+  if (c.ctype != CType::GATE || c.gtype != GType::NOT || c.inputs.size() != 1U) {
+    return false;
+  }
+  return c.inputs[0] == input_idx;
+}
+
+bool matches_trigger_input(const circuit& net,
+                           int input_idx,
+                           int trigger_idx,
+                           int expected_value,
+                           GType gtype) {
+  bool needs_invert = false;
+  if (gtype == GType::XOR) {
+    needs_invert = (expected_value == 0);
+  } else if (gtype == GType::XNOR) {
+    needs_invert = (expected_value != 0);
+  } else {
+    return false;
+  }
+
+  if (!needs_invert) {
+    return input_idx == trigger_idx;
+  }
+  return is_not_gate_of(net, input_idx, trigger_idx);
+}
+
+bool apply_rule_bypass(circuit& net,
+                       const std::vector<int>& feature_nodes,
+                       const DecisionTreeModel& model,
+                       int fix_idx,
+                       std::size_t base_nodes,
+                       bool* applied,
+                       std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (applied) {
+    *applied = false;
+  }
+  if (fix_idx < 0 || static_cast<std::size_t>(fix_idx) >= net.node_count()) {
+    if (error) {
+      *error = "fix node index out of range";
+    }
+    return false;
+  }
+
+  int trigger_idx = -1;
+  int expected_value = 0;
+  std::string trigger_error;
+  if (!extract_single_literal_trigger(feature_nodes,
+                                      model,
+                                      &trigger_idx,
+                                      &expected_value,
+                                      &trigger_error)) {
+    if (!trigger_error.empty()) {
+      if (error) {
+        *error = trigger_error;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  const cell& fix_cell = net.get_cell(fix_idx);
+  if (fix_cell.ctype != CType::GATE) {
+    return true;
+  }
+  if (fix_cell.gtype != GType::XOR && fix_cell.gtype != GType::XNOR) {
+    return true;
+  }
+  if (fix_cell.inputs.size() != 2U) {
+    return true;
+  }
+
+  int bypass_idx = -1;
+  int matches = 0;
+  if (matches_trigger_input(net,
+                            fix_cell.inputs[0],
+                            trigger_idx,
+                            expected_value,
+                            fix_cell.gtype)) {
+    bypass_idx = fix_cell.inputs[1];
+    matches += 1;
+  }
+  if (matches_trigger_input(net,
+                            fix_cell.inputs[1],
+                            trigger_idx,
+                            expected_value,
+                            fix_cell.gtype)) {
+    bypass_idx = fix_cell.inputs[0];
+    matches += 1;
+  }
+  if (matches != 1) {
+    return true;
+  }
+  if (bypass_idx < 0 ||
+      static_cast<std::size_t>(bypass_idx) >= net.node_count()) {
+    if (error) {
+      *error = "bypass node index out of range";
+    }
+    return false;
+  }
+
+  net.replace_gate_inputs(fix_idx, bypass_idx, base_nodes);
+  const auto& po_indices = net.po_indices();
+  for (std::size_t pos = 0; pos < po_indices.size(); ++pos) {
+    if (po_indices[pos] == fix_idx) {
+      net.set_po_index(pos, bypass_idx);
+    }
+  }
+  net.force_gate_const(fix_idx, 0);
+  if (applied) {
+    *applied = true;
+  }
+  return true;
 }
 
 }  // namespace
@@ -256,6 +432,36 @@ bool apply_rule_inversion(circuit& net,
   return true;
 }
 
+bool apply_rule_patch(circuit& net,
+                      const std::vector<int>& feature_nodes,
+                      const DecisionTreeModel& model,
+                      int fix_idx,
+                      std::size_t base_nodes,
+                      bool* used_bypass,
+                      std::string* error) {
+  if (used_bypass) {
+    *used_bypass = false;
+  }
+  bool bypass_applied = false;
+  if (!apply_rule_bypass(net,
+                         feature_nodes,
+                         model,
+                         fix_idx,
+                         base_nodes,
+                         &bypass_applied,
+                         error)) {
+    return false;
+  }
+  if (bypass_applied) {
+    if (used_bypass) {
+      *used_bypass = true;
+    }
+    return true;
+  }
+
+  return apply_rule_inversion(net, feature_nodes, model, fix_idx, base_nodes, error);
+}
+
 bool evaluate_fix_candidate(const circuit& base,
                             const std::vector<int>& feature_nodes,
                             const DecisionTreeModel& model,
@@ -275,7 +481,13 @@ bool evaluate_fix_candidate(const circuit& base,
 
   circuit candidate = base;
   const std::size_t base_nodes = candidate.node_count();
-  if (!apply_rule_inversion(candidate, feature_nodes, model, fix_idx, base_nodes, error)) {
+  if (!apply_rule_patch(candidate,
+                        feature_nodes,
+                        model,
+                        fix_idx,
+                        base_nodes,
+                        nullptr,
+                        error)) {
     return false;
   }
   try {
@@ -320,28 +532,76 @@ bool verify_patch_groundtruth(const circuit& golden,
 
   circuit golden_eval = golden;
   circuit patched_eval = patched;
-  for (std::size_t i = 0; i < patterns.size(); ++i) {
+  packed_circuit golden_packed(golden_eval);
+  packed_circuit patched_packed(patched_eval);
+  std::size_t offset = 0;
+  while (offset < patterns.size()) {
+    const std::size_t remaining = patterns.size() - offset;
+    const std::size_t block_size =
+        std::min(packed_circuit::kWordBits, remaining);
+    std::vector<std::vector<int>> block;
+    block.reserve(block_size);
+    for (std::size_t p = 0; p < block_size; ++p) {
+      block.push_back(patterns[offset + p]);
+    }
+
+    bool packed_ok = false;
     try {
-      const std::vector<int> g_out = golden_eval.simulate(patterns[i]);
-      const std::vector<int> p_out = patched_eval.simulate(patterns[i]);
-      if (g_out != p_out) {
-        if (mismatch_index) {
-          *mismatch_index = i;
-        }
-        if (error) {
-          *error = "groundtruth mismatch";
-        }
-        return false;
-      }
+      golden_packed.simulate(block);
+      patched_packed.simulate(block);
+      packed_ok = true;
     } catch (const std::exception& e) {
-      if (mismatch_index) {
-        *mismatch_index = i;
-      }
       if (error) {
         *error = e.what();
       }
+    }
+
+    if (!packed_ok) {
+      for (std::size_t p = 0; p < block.size(); ++p) {
+        try {
+          const std::vector<int> g_out = golden_eval.simulate(block[p]);
+          const std::vector<int> p_out = patched_eval.simulate(block[p]);
+          if (g_out != p_out) {
+            if (mismatch_index) {
+              *mismatch_index = offset + p;
+            }
+            if (error) {
+              *error = "groundtruth mismatch";
+            }
+            return false;
+          }
+        } catch (const std::exception& e) {
+          if (mismatch_index) {
+            *mismatch_index = offset + p;
+          }
+          if (error) {
+            *error = e.what();
+          }
+          return false;
+        }
+      }
+      offset += block_size;
+      continue;
+    }
+
+    packed_circuit::word_t diff_mask = 0;
+    for (std::size_t o = 0; o < golden_eval.po_count(); ++o) {
+      diff_mask |= (golden_packed.po_bits(o) ^ patched_packed.po_bits(o));
+    }
+    diff_mask &= packed_circuit::mask_for_count(block_size);
+    if (diff_mask != 0) {
+      const std::size_t bit =
+          static_cast<std::size_t>(__builtin_ctzll(diff_mask));
+      if (mismatch_index) {
+        *mismatch_index = offset + bit;
+      }
+      if (error) {
+        *error = "groundtruth mismatch";
+      }
       return false;
     }
+
+    offset += block_size;
   }
 
   return true;

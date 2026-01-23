@@ -20,6 +20,14 @@ bool apply_rule_inversion(circuit& net,
                           std::size_t base_nodes,
                           std::string* error);
 
+bool apply_rule_patch(circuit& net,
+                      const std::vector<int>& feature_nodes,
+                      const DecisionTreeModel& model,
+                      int fix_idx,
+                      std::size_t base_nodes,
+                      bool* used_bypass,
+                      std::string* error);
+
 bool evaluate_fix_candidate(const circuit& base,
                             const std::vector<int>& feature_nodes,
                             const DecisionTreeModel& model,

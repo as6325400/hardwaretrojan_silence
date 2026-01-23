@@ -6,3 +6,4 @@
 **/abc.history
 abc_docs.txt
 **/*.bench
+**/__pycache__/**

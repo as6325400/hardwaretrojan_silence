@@ -24,6 +24,61 @@ Outputs:
 - `bin/` contains the executables
 - `build/` contains object files
 
+## Groundtruth / pattern collection (Docker)
+
+This repo includes a helper script to run the `ht-collect` Docker image over many
+trojaned `.bench` files and write JSON logs with the same folder structure.
+
+### Requirements
+- Docker installed
+- `ht-collect` image available locally
+
+### Batch collection helper
+
+The script `trojan_collect_batch.py` scans a trojan root directory (recursively)
+for `.bench` files, finds the matching golden bench in `benchmarks/`, and writes
+JSON outputs under `output_root` while mirroring the trojan folder structure.
+
+Examples:
+
+```bash
+# Run all trojans and write outputs under groundtruth/V1_singleTrigger_multiPayload/...
+python3 trojan_collect_batch.py \
+  --trojan_root trojaned_bench/V1_singleTrigger_multiPayload \
+  --output_root groundtruth/V1_singleTrigger_multiPayload
+
+# Limit to a round range (runs r0 for all, then r1 for all, ...):
+python3 trojan_collect_batch.py \
+  --trojan_root trojaned_bench/V1_singleTrigger_multiPayload \
+  --output_root groundtruth/V1_singleTrigger_multiPayload \
+  --start-round 0 \
+  --end-round 2
+
+# Explicit round list:
+python3 trojan_collect_batch.py \
+  --trojan_root trojaned_bench/V1_singleTrigger_multiPayload \
+  --output_root groundtruth/V1_singleTrigger_multiPayload \
+  --rounds 0,1,2
+
+# Single trojan bench with fixed golden bench:
+python3 trojan_collect_batch.py \
+  --trojan_root trojaned_bench/V1_singleTrigger_multiPayload/c880/c880_trojan1.bench \
+  --benchmarks_root benchmarks/c880.bench \
+  --output_root groundtruth/V1_singleTrigger_multiPayload
+
+# Dry-run prints the docker command(s) without executing:
+python3 trojan_collect_batch.py \
+  --trojan_root trojaned_bench/V1_singleTrigger_multiPayload \
+  --output_root groundtruth/V1_singleTrigger_multiPayload \
+  --dry-run
+```
+
+Notes:
+- Output is written to the host `output_root` directory, which is mounted inside
+  the container as `/out`.
+- Golden bench matching uses the trojan file’s parent folder name, then falls back
+  to the filename prefix before `_trojan`.
+
 ## Binaries
 
 ### `bin/main`

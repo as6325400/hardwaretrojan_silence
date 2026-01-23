@@ -175,22 +175,37 @@ bool build_stats_from_groundtruth(const circuit& golden,
   stats->ones_notrigger.assign(stats->gate_indices.size(), 0);
 
   circuit trojan_trigger = trojan;
-  for (const auto& pattern : stats->trigger_patterns) {
+  packed_circuit trojan_packed(trojan_trigger);
+  std::size_t trigger_offset = 0;
+  while (trigger_offset < stats->trigger_patterns.size()) {
+    const std::size_t remaining =
+        stats->trigger_patterns.size() - trigger_offset;
+    const std::size_t block_size =
+        std::min(packed_circuit::kWordBits, remaining);
+    std::vector<std::vector<int>> patterns;
+    patterns.reserve(block_size);
+    for (std::size_t p = 0; p < block_size; ++p) {
+      patterns.push_back(stats->trigger_patterns[trigger_offset + p]);
+    }
+
     try {
-      trojan_trigger.simulate(pattern);
+      trojan_packed.simulate(patterns);
     } catch (const std::exception& e) {
       if (error) {
         *error = string("Trigger simulation error: ") + e.what();
       }
       return false;
     }
-    for (size_t g = 0; g < stats->gate_indices.size(); ++g) {
+
+    #pragma omp parallel for schedule(static)
+    for (std::size_t g = 0; g < stats->gate_indices.size(); ++g) {
       const int idx = stats->gate_indices[g];
-      const int val = trojan_trigger.get_cell(idx).val;
-      const std::uint64_t one = (val == 1) ? 1 : 0;
-      stats->ones_trigger[g] += one;
-      stats->ones_total[g] += one;
+      const std::uint64_t ones = popcount_ull(trojan_packed.node_bits(idx));
+      stats->ones_trigger[g] += ones;
+      stats->ones_total[g] += ones;
     }
+
+    trigger_offset += block_size;
   }
 
   const size_t target_notrigger = stats->trigger_patterns_total;
@@ -207,7 +222,7 @@ bool build_stats_from_groundtruth(const circuit& golden,
   circuit golden_eval = golden;
   circuit trojan_eval = trojan;
   packed_circuit golden_packed(golden_eval);
-  packed_circuit trojan_packed(trojan_eval);
+  packed_circuit trojan_eval_packed(trojan_eval);
   mt19937 rng(1337);
   uniform_int_distribution<int> dist(0, 1);
   size_t attempts = 0;
@@ -235,7 +250,7 @@ bool build_stats_from_groundtruth(const circuit& golden,
 
     try {
       golden_packed.simulate(patterns);
-      trojan_packed.simulate(patterns);
+      trojan_eval_packed.simulate(patterns);
     } catch (const std::exception&) {
       attempts += block_size;
       continue;
@@ -245,7 +260,7 @@ bool build_stats_from_groundtruth(const circuit& golden,
         packed_circuit::mask_for_count(block_size);
     packed_circuit::word_t diff_mask = 0;
     for (size_t o = 0; o < trojan_eval.po_count(); ++o) {
-      diff_mask |= (golden_packed.po_bits(o) ^ trojan_packed.po_bits(o));
+      diff_mask |= (golden_packed.po_bits(o) ^ trojan_eval_packed.po_bits(o));
     }
     diff_mask &= mask;
     packed_circuit::word_t notrigger_mask = mask & ~diff_mask;
@@ -261,10 +276,11 @@ bool build_stats_from_groundtruth(const circuit& golden,
     if (take > 0) {
       stats->notrigger_patterns_total += take;
       stats->total_patterns += take;
+      #pragma omp parallel for schedule(static)
       for (size_t g = 0; g < stats->gate_indices.size(); ++g) {
         const int idx = stats->gate_indices[g];
         const packed_circuit::word_t bits =
-            trojan_packed.node_bits(idx) & accept_mask;
+            trojan_eval_packed.node_bits(idx) & accept_mask;
         const std::uint64_t ones = popcount_ull(bits);
         stats->ones_notrigger[g] += ones;
         stats->ones_total[g] += ones;
@@ -533,8 +549,8 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    std::size_t best_area = std::numeric_limits<std::size_t>::max();
-    std::size_t best_level = std::numeric_limits<std::size_t>::max();
+    long long best_area_delta = std::numeric_limits<long long>::max();
+    long long best_level_delta = std::numeric_limits<long long>::max();
     int best_idx = -1;
 
     for (int fix_idx : payload_fix_nodes) {
@@ -550,20 +566,22 @@ int main(int argc, char** argv) {
         cerr << "Payload fix candidate error: " << error << "\n";
         continue;
       }
-      const std::size_t delta_area =
-          (cand_area >= base_area) ? (cand_area - base_area) : 0;
-      const std::size_t delta_level =
-          (cand_level >= base_level) ? (cand_level - base_level) : 0;
+      const long long delta_area =
+          static_cast<long long>(cand_area) -
+          static_cast<long long>(base_area);
+      const long long delta_level =
+          static_cast<long long>(cand_level) -
+          static_cast<long long>(base_level);
       cout << "payload_fix_candidate " << trojan.node_name(fix_idx)
            << " area " << cand_area
            << " level " << cand_level
            << " area_delta " << delta_area
            << " level_delta " << delta_level << "\n";
 
-      if (delta_level < best_level ||
-          (delta_level == best_level && delta_area < best_area)) {
-        best_level = delta_level;
-        best_area = delta_area;
+      if (delta_level < best_level_delta ||
+          (delta_level == best_level_delta && delta_area < best_area_delta)) {
+        best_level_delta = delta_level;
+        best_area_delta = delta_area;
         best_idx = fix_idx;
       }
     }
@@ -571,12 +589,14 @@ int main(int argc, char** argv) {
     if (best_idx >= 0) {
       circuit patched = trojan;
       const std::size_t base_nodes = patched.node_count();
-      if (!apply_rule_inversion(patched,
-                                result.feature_nodes,
-                                result.model,
-                                best_idx,
-                                base_nodes,
-                                &error)) {
+      bool used_bypass = false;
+      if (!apply_rule_patch(patched,
+                            result.feature_nodes,
+                            result.model,
+                            best_idx,
+                            base_nodes,
+                            &used_bypass,
+                            &error)) {
         cerr << "Payload fix apply error: " << error << "\n";
         return 1;
       }
@@ -602,8 +622,11 @@ int main(int argc, char** argv) {
           return 1;
         }
         cout << "payload_fix_selected " << patched.node_name(best_idx)
-             << " area_delta " << best_area
-             << " level_delta " << best_level << "\n";
+             << " area_delta " << best_area_delta
+             << " level_delta " << best_level_delta << "\n";
+        if (used_bypass) {
+          cout << "payload_fix_mode bypass\n";
+        }
         cout << "payload_fix_bench " << output_path << "\n";
       }
     } else {
