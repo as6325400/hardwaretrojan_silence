@@ -2,6 +2,7 @@ import argparse
 import shlex
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +14,8 @@ CONTAINER_TROJANS = "/data/trojaned_bench"
 CONTAINER_OUT = "/out"
 DEFAULT_DOCKER_IMAGE = "ht-collect"
 DEFAULT_DOCKER_BIN = "docker"
-SUBDIR_ALLOWLIST = ["c880", "c2670", "c3540", "c5315", "c6288", "c7552"]
+DEFAULT_TIMEOUT_SEC = 180
+SUBDIR_ALLOWLIST = ["c880", "c6288", "c7552"]
 
 
 def _iter_bench_files(root: Path) -> list[Path]:
@@ -55,6 +57,12 @@ def _unique_names(items: list[str]) -> list[str]:
             result.append(item)
             seen.add(item)
     return result
+
+
+def _append_skip_log(log_path: Path, message: str) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(message.rstrip() + "\n")
 
 
 def _resolve_original_bench(trojan_path: Path, bench_map: dict[str, list[Path]]) -> Path:
@@ -135,6 +143,12 @@ def main() -> None:
     parser.add_argument("--cpu", type=int, default=None)
     parser.add_argument("--docker_image", default=DEFAULT_DOCKER_IMAGE)
     parser.add_argument("--docker_bin", default=DEFAULT_DOCKER_BIN)
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT_SEC,
+        help=f"Kill a container if it runs longer than N seconds (default: {DEFAULT_TIMEOUT_SEC}).",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -178,12 +192,15 @@ def main() -> None:
     if output_root.exists() and output_root.is_file():
         raise ValueError(f"output_root must be a directory: {output_root}")
     output_root.mkdir(parents=True, exist_ok=True)
+    skip_log_path = output_root / "skipped_containers.log"
 
     job_rounds = rounds if rounds is not None else [None]
     total_jobs = len(trojan_files) * len(job_rounds)
+    job_index = 0
     with tqdm(total=total_jobs, unit="bench") as pbar:
         for round_value in job_rounds:
             for trojan_file in trojan_files:
+                job_index += 1
                 rel_path = trojan_file.relative_to(trojan_mount_root)
                 rel_dir = rel_path.parent
                 if round_value is None:
@@ -204,10 +221,13 @@ def main() -> None:
                     output_dir_container = CONTAINER_OUT
                 else:
                     output_dir_container = f"{CONTAINER_OUT}/{rel_dir.as_posix()}"
+                container_name = f"ht-collect-{job_index}-{int(datetime.utcnow().timestamp())}"
                 cmd = [
                     args.docker_bin,
                     "run",
                     "--rm",
+                    "--name",
+                    container_name,
                     "-v",
                     f"{original_mount_root}:{CONTAINER_BENCHMARKS}",
                     "-v",
@@ -232,27 +252,50 @@ def main() -> None:
                     pbar.update(1)
                     continue
 
-                if args.verbose:
-                    result = subprocess.run(cmd)
-                    if result.returncode != 0:
-                        pbar.close()
-                        print(f"Failed: {trojan_file.as_posix()}")
-                        return
-                else:
-                    result = subprocess.run(
-                        cmd,
+                try:
+                    if args.verbose:
+                        result = subprocess.run(cmd, timeout=args.timeout)
+                    else:
+                        result = subprocess.run(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            timeout=args.timeout,
+                        )
+                except subprocess.TimeoutExpired:
+                    subprocess.run(
+                        [args.docker_bin, "kill", container_name],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
                     )
-                    if result.returncode != 0:
-                        pbar.close()
-                        print(f"Failed: {trojan_file.as_posix()}")
+                    subprocess.run(
+                        [args.docker_bin, "rm", "-f", container_name],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    timestamp = datetime.utcnow().isoformat()
+                    round_label = "none" if round_value is None else str(round_value)
+                    _append_skip_log(
+                        skip_log_path,
+                        f"{timestamp} timeout={args.timeout}s round={round_label} "
+                        f"trojan={trojan_file.as_posix()} "
+                        f"golden={original_file.as_posix()}",
+                    )
+                    pbar.update(1)
+                    continue
+
+                if result.returncode != 0:
+                    pbar.close()
+                    print(f"Failed: {trojan_file.as_posix()}")
+                    if not args.verbose:
                         if result.stdout:
                             print(result.stdout)
                         if result.stderr:
                             print(result.stderr, file=sys.stderr)
-                        return
+                    return
 
                 pbar.update(1)
 
