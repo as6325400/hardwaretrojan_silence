@@ -337,6 +337,18 @@ ParallelCollectLog::ParallelCollectLog(const std::string& path) : path_(path) {
       round_it->second->IsNumber()) {
     round_ = static_cast<int>(round_it->second->number_value);
   }
+
+  auto origin_it = root.object_value.find("origin_path");
+  if (origin_it != root.object_value.end() && origin_it->second &&
+      origin_it->second->IsString()) {
+    origin_path_ = origin_it->second->string_value;
+  }
+
+  auto trojan_it = root.object_value.find("trojan_path");
+  if (trojan_it != root.object_value.end() && trojan_it->second &&
+      trojan_it->second->IsString()) {
+    trojan_path_ = trojan_it->second->string_value;
+  }
 }
 
 const JsonValue& ParallelCollectLog::get_pattern(int index,

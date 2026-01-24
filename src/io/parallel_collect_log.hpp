@@ -84,6 +84,8 @@ class ParallelCollectLog {
   std::optional<double> elapsed_time() const { return elapsed_seconds_; }
   const std::vector<std::string>& pi_order() const { return pi_order_; }
   const std::vector<JsonValue>& patterns() const { return patterns_; }
+  const std::optional<std::string>& origin_path() const { return origin_path_; }
+  const std::optional<std::string>& trojan_path() const { return trojan_path_; }
 
   const JsonValue& get_pattern(int index, bool one_based = false) const;
   std::optional<std::string> get_pattern_bits(int index,
@@ -111,4 +113,6 @@ class ParallelCollectLog {
   std::optional<double> elapsed_seconds_;
   std::optional<std::string> benchmark_;
   std::optional<int> round_;
+  std::optional<std::string> origin_path_;
+  std::optional<std::string> trojan_path_;
 };
