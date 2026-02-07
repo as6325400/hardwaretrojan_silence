@@ -15,7 +15,7 @@ CONTAINER_OUT = "/out"
 DEFAULT_DOCKER_IMAGE = "ht-collect"
 DEFAULT_DOCKER_BIN = "docker"
 DEFAULT_TIMEOUT_SEC = 180
-SUBDIR_ALLOWLIST = ["c880", "c6288", "c7552"]
+SUBDIR_ALLOWLIST = ["c880"]
 
 
 def _iter_bench_files(root: Path) -> list[Path]:

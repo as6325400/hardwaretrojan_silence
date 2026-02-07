@@ -262,6 +262,44 @@ int circuit::add_const_auto(const std::string& prefix, int value) {
   return node_index(name);
 }
 
+bool circuit::rename_node(int idx, const std::string& new_name, std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (idx < 0 || static_cast<std::size_t>(idx) >= names_.size()) {
+    if (error) {
+      *error = "node index out of range";
+    }
+    return false;
+  }
+  if (new_name.empty()) {
+    if (error) {
+      *error = "new node name is empty";
+    }
+    return false;
+  }
+  const std::string old_name = names_[static_cast<std::size_t>(idx)];
+  if (old_name == new_name) {
+    return true;
+  }
+  auto it = name_to_index_.find(new_name);
+  if (it != name_to_index_.end() && it->second != idx) {
+    if (error) {
+      *error = "node name already exists: " + new_name;
+    }
+    return false;
+  }
+  name_to_index_.erase(old_name);
+  names_[static_cast<std::size_t>(idx)] = new_name;
+  name_to_index_[new_name] = idx;
+  for (std::size_t pos = 0; pos < po_.size() && pos < po_names_.size(); ++pos) {
+    if (po_[pos] == idx) {
+      po_names_[pos] = new_name;
+    }
+  }
+  return true;
+}
+
 void circuit::set_po_index(std::size_t pos, int idx) {
   if (pos >= po_.size()) {
     throw std::runtime_error("PO index out of range");

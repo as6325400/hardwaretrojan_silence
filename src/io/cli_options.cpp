@@ -41,8 +41,7 @@ bool is_help_arg(const char* arg) {
 void print_usage(const char* prog) {
   const char* name = prog ? prog : "main";
   std::cout << "Usage: " << name
-            << " <golden_bench> <trojan_bench> [output_bench]"
-               " [--groundtruth PATH]"
+            << " <golden_bench> <trojan_bench> <groundtruth_log> [output_bench]"
                " [--patterns N] [--depth N] [--eval N] [--neg-ratio N]"
                " [--mine-rounds N] [--mine-max N]"
                " [--p1-trigger X] [--p1-notrigger Y] [--include-pi] [--no-filter]"
@@ -67,19 +66,20 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
     }
   }
 
-  if (argc < 3) {
+  if (argc < 4) {
     if (error) {
-      *error = "Missing required bench paths";
+      *error = "Missing required bench/groundtruth paths";
     }
     return ParseStatus::error;
   }
 
   out->golden_path = argv[1];
   out->trojan_path = argv[2];
+  out->groundtruth_path = argv[3];
 
   std::string arg_error;
 
-  for (int i = 3; i < argc; ++i) {
+  for (int i = 4; i < argc; ++i) {
     std::string arg = argv[i];
 
     auto parse_option = [&](const std::string& name, std::size_t* target) -> bool {
@@ -188,22 +188,6 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
     }
     if (arg == "--no-strict") {
       out->strict_retry = false;
-      continue;
-    }
-    if (arg == "--groundtruth") {
-      if (i + 1 >= argc) {
-        arg_error = "Missing value for --groundtruth";
-        break;
-      }
-      out->groundtruth_path = argv[++i];
-      continue;
-    }
-    const std::string groundtruth_prefix = "--groundtruth=";
-    if (arg.rfind(groundtruth_prefix, 0) == 0) {
-      out->groundtruth_path = arg.substr(groundtruth_prefix.size());
-      if (out->groundtruth_path.empty()) {
-        arg_error = "Missing value for --groundtruth";
-      }
       continue;
     }
     if (arg == "--output") {

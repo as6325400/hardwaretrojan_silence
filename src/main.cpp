@@ -44,19 +44,6 @@ packed_circuit::word_t take_first_bits(packed_circuit::word_t mask,
   return out;
 }
 
-string derive_groundtruth_path(const string& trojan_path) {
-  string base = trojan_path;
-  const size_t slash = base.find_last_of("/\\");
-  if (slash != string::npos) {
-    base = base.substr(slash + 1);
-  }
-  const size_t dot = base.rfind('.');
-  if (dot != string::npos) {
-    base = base.substr(0, dot);
-  }
-  return "groundtruth/" + base + "_error_patterns.json";
-}
-
 bool build_stats_from_groundtruth(const circuit& golden,
                                   const circuit& trojan,
                                   const string& log_path,
@@ -336,9 +323,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const string groundtruth_path = options.groundtruth_path.empty()
-                                      ? derive_groundtruth_path(options.trojan_path)
-                                      : options.groundtruth_path;
+  const string& groundtruth_path = options.groundtruth_path;
   cout << "groundtruth " << groundtruth_path << "\n";
 
   cout << "patterns " << options.pattern_count
@@ -370,8 +355,6 @@ int main(int argc, char** argv) {
   cout << "notrigger_patterns " << stats.notrigger_patterns_total << "\n";
   const double trojan_rate = compute_trojan_rate(stats);
   cout << "trojan_rates " << trojan_rate << '\n';
-
-  cout << "gate_zero_ratio\n";
   cout << fixed << setprecision(4);
 
   vector<CandidateInfo> candidates;
@@ -491,46 +474,6 @@ int main(int argc, char** argv) {
   cout << "hard_mined " << result.hard_added
        << " rounds " << result.rounds_used << '\n';
 
-  cout << "decision_tree_rules " << result.model.rules.size()
-       << " depth_used " << result.model.max_depth_used
-       << " leaf_count " << result.model.leaf_count << '\n';
-
-  for (size_t i = 0; i < result.model.rules.size(); ++i) {
-    const auto& rule = result.model.rules[i];
-    cout << "rule " << (i + 1) << ": ";
-    if (rule.terms.empty()) {
-      cout << "TRUE\n";
-      continue;
-    }
-    for (size_t t = 0; t < rule.terms.size(); ++t) {
-      if (t > 0) {
-        cout << " & ";
-      }
-      const size_t feature_idx = rule.terms[t].first;
-      const int value = rule.terms[t].second;
-      if (feature_idx < result.feature_nodes.size()) {
-        cout << trojan.node_name(result.feature_nodes[feature_idx]) << '=' << value;
-      } else {
-        cout << "f" << feature_idx << '=' << value;
-      }
-    }
-    cout << '\n';
-  }
-
-  cout << "train_pos " << result.train_pos << " train_neg " << result.train_neg << '\n';
-  cout << "train_false_neg " << result.train_false_neg
-       << " train_false_pos " << result.train_false_pos << '\n';
-
-  cout << "eval_normal " << result.eval_checked
-       << " eval_false_pos " << result.eval_false_pos;
-  if (result.eval_checked > 0) {
-    const double rate =
-        static_cast<double>(result.eval_false_pos) /
-        static_cast<double>(result.eval_checked);
-    cout << " rate " << rate;
-  }
-  cout << '\n';
-
   cout << "mis match " << stats.mismatch_patterns << '\n';
 
   std::vector<int> payload_fix_nodes;
@@ -549,88 +492,62 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    long long best_area_delta = std::numeric_limits<long long>::max();
-    long long best_level_delta = std::numeric_limits<long long>::max();
-    int best_idx = -1;
-
+    circuit patched = trojan;
     for (int fix_idx : payload_fix_nodes) {
-      std::size_t cand_area = 0;
-      std::size_t cand_level = 0;
-      if (!evaluate_fix_candidate(trojan,
-                                  result.feature_nodes,
-                                  result.model,
-                                  fix_idx,
-                                  &cand_area,
-                                  &cand_level,
-                                  &error)) {
-        cerr << "Payload fix candidate error: " << error << "\n";
-        continue;
-      }
-      const long long delta_area =
-          static_cast<long long>(cand_area) -
-          static_cast<long long>(base_area);
-      const long long delta_level =
-          static_cast<long long>(cand_level) -
-          static_cast<long long>(base_level);
-      cout << "payload_fix_candidate " << trojan.node_name(fix_idx)
-           << " area " << cand_area
-           << " level " << cand_level
-           << " area_delta " << delta_area
-           << " level_delta " << delta_level << "\n";
-
-      if (delta_level < best_level_delta ||
-          (delta_level == best_level_delta && delta_area < best_area_delta)) {
-        best_level_delta = delta_level;
-        best_area_delta = delta_area;
-        best_idx = fix_idx;
-      }
-    }
-
-    if (best_idx >= 0) {
-      circuit patched = trojan;
       const std::size_t base_nodes = patched.node_count();
-      bool used_bypass = false;
-      if (!apply_rule_patch(patched,
-                            result.feature_nodes,
-                            result.model,
-                            best_idx,
-                            base_nodes,
-                            &used_bypass,
-                            &error)) {
+      if (!apply_rule_inversion(patched,
+                                result.feature_nodes,
+                                result.model,
+                                fix_idx,
+                                base_nodes,
+                                &error)) {
         cerr << "Payload fix apply error: " << error << "\n";
         return 1;
       }
+    }
 
-      std::size_t mismatch_index = 0;
-      if (!verify_patch_groundtruth(golden,
-                                    patched,
-                                    stats.trigger_patterns,
-                                    &mismatch_index,
-                                    &error)) {
-        cerr << "Payload fix verification failed: " << error;
-        if (!stats.trigger_patterns.empty()) {
-          cerr << " pattern " << mismatch_index;
-        }
-        cerr << "\n";
-        cout << "payload_fix_apply skipped: groundtruth_verify_failed\n";
-      } else {
-        const string output_path = options.output_path.empty()
-                                       ? derive_patched_path(options.trojan_path)
-                                       : options.output_path;
-        if (!bench_io::write_bench_file(output_path, patched, &error)) {
-          cerr << "Write error: " << error << "\n";
-          return 1;
-        }
-        cout << "payload_fix_selected " << patched.node_name(best_idx)
-             << " area_delta " << best_area_delta
-             << " level_delta " << best_level_delta << "\n";
-        if (used_bypass) {
-          cout << "payload_fix_mode bypass\n";
-        }
-        cout << "payload_fix_bench " << output_path << "\n";
+    std::size_t mismatch_index = 0;
+    if (!verify_patch_groundtruth(golden,
+                                  patched,
+                                  stats.trigger_patterns,
+                                  &mismatch_index,
+                                  &error)) {
+      cerr << "Payload fix verification failed: " << error;
+      if (!stats.trigger_patterns.empty()) {
+        cerr << " pattern " << mismatch_index;
       }
+      cerr << "\n";
+      cout << "payload_fix_apply skipped: groundtruth_verify_failed\n";
     } else {
-      cout << "payload_fix_apply skipped: no viable candidate\n";
+      std::size_t patched_area = 0;
+      std::size_t patched_level = 0;
+      try {
+        patched.ensure_eval_order();
+        patched_area = patched.area();
+        patched_level = patched.level();
+      } catch (const std::exception& e) {
+        cerr << "Payload fix area/level error: " << e.what() << "\n";
+        return 1;
+      }
+
+      const long long delta_area =
+          static_cast<long long>(patched_area) -
+          static_cast<long long>(base_area);
+      const long long delta_level =
+          static_cast<long long>(patched_level) -
+          static_cast<long long>(base_level);
+
+      const string output_path = options.output_path.empty()
+                                     ? derive_patched_path(options.trojan_path)
+                                     : options.output_path;
+      if (!bench_io::write_bench_file(output_path, patched, &error)) {
+        cerr << "Write error: " << error << "\n";
+        return 1;
+      }
+      cout << "payload_fix_selected " << payload_fix_nodes.size()
+           << " area_delta " << delta_area
+           << " level_delta " << delta_level << "\n";
+      cout << "payload_fix_bench " << output_path << "\n";
     }
   } else {
     cout << "payload_fix_apply skipped: no fix nodes\n";

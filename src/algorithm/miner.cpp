@@ -622,7 +622,7 @@ bool run_mining(const circuit& golden,
     return false;
   }
 
-  const std::size_t max_trigger_patterns = 50;
+  const std::size_t max_trigger_patterns = 50000000;
   std::vector<std::vector<int>> limited_triggers;
   const std::vector<std::vector<int>>* training_triggers = &trigger_patterns;
   if (trigger_patterns.size() > max_trigger_patterns) {

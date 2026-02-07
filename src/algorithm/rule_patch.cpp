@@ -57,6 +57,37 @@ int build_or_tree(circuit& net,
   return current[0];
 }
 
+std::string make_unique_name(circuit& net, const std::string& base) {
+  std::size_t suffix = 0;
+  std::string candidate = base;
+  while (net.has_node(candidate)) {
+    candidate = base + std::to_string(suffix++);
+  }
+  return candidate;
+}
+
+bool preserve_po_name_on_replace(circuit& net,
+                                 int old_idx,
+                                 int new_idx,
+                                 std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (old_idx == new_idx) {
+    return true;
+  }
+  const std::string old_name = net.node_name(old_idx);
+  const std::string renamed =
+      make_unique_name(net, old_name + "_orig_");
+  if (!net.rename_node(old_idx, renamed, error)) {
+    return false;
+  }
+  if (!net.rename_node(new_idx, old_name, error)) {
+    return false;
+  }
+  return true;
+}
+
 int build_trigger_match_gate(circuit& net,
                              const std::vector<int>& feature_nodes,
                              const DecisionTreeModel& model,
@@ -282,8 +313,15 @@ bool apply_rule_bypass(circuit& net,
 
   net.replace_gate_inputs(fix_idx, bypass_idx, base_nodes);
   const auto& po_indices = net.po_indices();
+  bool po_renamed = false;
   for (std::size_t pos = 0; pos < po_indices.size(); ++pos) {
     if (po_indices[pos] == fix_idx) {
+      if (!po_renamed) {
+        if (!preserve_po_name_on_replace(net, fix_idx, bypass_idx, error)) {
+          return false;
+        }
+        po_renamed = true;
+      }
       net.set_po_index(pos, bypass_idx);
     }
   }
@@ -424,8 +462,15 @@ bool apply_rule_inversion(circuit& net,
   net.replace_gate_inputs(fix_idx, xor_idx, base_nodes);
 
   const auto& po_indices = net.po_indices();
+  bool po_renamed = false;
   for (std::size_t pos = 0; pos < po_indices.size(); ++pos) {
     if (po_indices[pos] == fix_idx) {
+      if (!po_renamed) {
+        if (!preserve_po_name_on_replace(net, fix_idx, xor_idx, error)) {
+          return false;
+        }
+        po_renamed = true;
+      }
       net.set_po_index(pos, xor_idx);
     }
   }
