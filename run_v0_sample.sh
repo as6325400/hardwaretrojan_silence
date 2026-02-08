@@ -7,7 +7,7 @@ BENCH_ROOT="benchmarks"
 MAIN="./bin/main"
 
 SAMPLE_N="${1:-5}"
-FLAGS=(--no-filter --include-pi --depth 10 --mine-max 0)
+FLAGS=(--no-filter --include-pi --depth 10 --cec 5 --neg-ratio 5 --mine-max 0 --no-strict)
 OUT_DIR="outputs"
 LOG_DIR="$OUT_DIR/logs"
 OUT_CSV="${OUT_CSV:-${OUT_TSV:-$OUT_DIR/v0_fix_results.csv}}"
@@ -37,7 +37,7 @@ fi
 mkdir -p "$OUT_DIR"
 mkdir -p "$LOG_DIR"
 if [[ ! -f "$OUT_CSV" ]]; then
-  printf "circuit,trojan_bench,groundtruth,gt_exists,main_exit,run_time_sec,patched_bench,cec_result,cec_detail,orig_area,orig_delay,patched_area,patched_delay\n" > "$OUT_CSV"
+  printf "circuit,trojan_bench,groundtruth,gt_exists,main_exit,run_time_sec,patched_bench,cec_result,cec_rounds_used,cec_detail,orig_area,orig_delay,patched_area,patched_delay\n" > "$OUT_CSV"
 fi
 
 csv_escape() {
@@ -55,13 +55,14 @@ append_row() {
   local run_time="$6"
   local patched="$7"
   local cec_result="$8"
-  local cec_detail="$9"
-  local orig_area="${10}"
-  local orig_delay="${11}"
-  local patched_area="${12}"
-  local patched_delay="${13}"
+  local cec_rounds_used="$9"
+  local cec_detail="${10}"
+  local orig_area="${11}"
+  local orig_delay="${12}"
+  local patched_area="${13}"
+  local patched_delay="${14}"
 
-  printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
+  printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
     "$(csv_escape "$circuit")" \
     "$(csv_escape "$trojan")" \
     "$(csv_escape "$gt")" \
@@ -70,6 +71,7 @@ append_row() {
     "$(csv_escape "$run_time")" \
     "$(csv_escape "$patched")" \
     "$(csv_escape "$cec_result")" \
+    "$(csv_escape "$cec_rounds_used")" \
     "$(csv_escape "$cec_detail")" \
     "$(csv_escape "$orig_area")" \
     "$(csv_escape "$orig_delay")" \
@@ -93,7 +95,7 @@ for dir in "$ROOT"/c*; do
   fi
 
   mapfile -t trojan_files < <(
-    find "$dir" -maxdepth 1 -type f -name "${circuit}_trojan*.bench" ! -name "*_patched.bench" | sort
+    find "$dir" -maxdepth 1 -type f -name "${circuit}_trojan*.bench" ! -name "*_patched*" | sort
   )
 
   if [[ ${#trojan_files[@]} -eq 0 ]]; then
@@ -119,7 +121,7 @@ for dir in "$ROOT"/c*; do
 
     if [[ ! -f "$gt" ]]; then
       echo "[skip] missing groundtruth: $gt" >&2
-      append_row "$circuit" "$trojan" "$gt" 0 "skip_missing" "" "" "not_run" "missing_groundtruth" "" "" "" ""
+      append_row "$circuit" "$trojan" "$gt" 0 "skip_missing" "" "" "not_run" "" "missing_groundtruth" "" "" "" ""
       continue
     fi
 
@@ -133,7 +135,7 @@ for dir in "$ROOT"/c*; do
     run_time=$((end_time - start_time))
     if [[ $main_exit -ne 0 ]]; then
       echo "[fail] main failed for $trojan" >&2
-      append_row "$circuit" "$trojan" "$gt" 1 "$main_exit" "$run_time" "" "not_run" "main_failed" "" "" "" ""
+      append_row "$circuit" "$trojan" "$gt" 1 "$main_exit" "$run_time" "" "not_run" "" "main_failed" "" "" "" ""
       continue
     fi
 
@@ -156,7 +158,7 @@ for dir in "$ROOT"/c*; do
       cec_detail="$(sanitize_detail "$cec_out")"
       if [[ $cec_status -ne 0 ]]; then
         echo "[warn] abc failed for $patched" >&2
-        append_row "$circuit" "$trojan" "$gt" 1 "$main_exit" "$patched" "abc_fail" "$cec_detail"
+        append_row "$circuit" "$trojan" "$gt" 1 "$main_exit" "$run_time" "$patched" "abc_fail" "" "$cec_detail" "" "" "" ""
         continue
       fi
 
@@ -176,10 +178,20 @@ for dir in "$ROOT"/c*; do
       else
         cec_result="unknown"
       fi
-      append_row "$circuit" "$trojan" "$gt" 1 "$main_exit" "$run_time" "$patched" "$cec_result" "$cec_detail" "$orig_area" "$orig_delay" "$patched_area" "$patched_delay"
+
+      # Extract CEC rounds used from main's log
+      cec_rounds_used="0"
+      if [[ -f "$log_path" ]]; then
+        last_round="$(grep -oP 'cec_check round \K[0-9]+' "$log_path" | tail -1)"
+        if [[ -n "$last_round" ]]; then
+          cec_rounds_used="$last_round"
+        fi
+      fi
+
+      append_row "$circuit" "$trojan" "$gt" 1 "$main_exit" "$run_time" "$patched" "$cec_result" "$cec_rounds_used" "$cec_detail" "$orig_area" "$orig_delay" "$patched_area" "$patched_delay"
     else
       echo "[warn] patched bench missing: $patched" >&2
-      append_row "$circuit" "$trojan" "$gt" 1 "$main_exit" "$run_time" "$patched" "patched_missing" "patched bench missing" "$orig_area" "$orig_delay" "" ""
+      append_row "$circuit" "$trojan" "$gt" 1 "$main_exit" "$run_time" "$patched" "patched_missing" "" "patched bench missing" "$orig_area" "$orig_delay" "" ""
     fi
   done
 done

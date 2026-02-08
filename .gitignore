@@ -8,3 +8,4 @@ abc_docs.txt
 **/*.bench
 **/__pycache__/**
 /.venv
+/outputs/logs

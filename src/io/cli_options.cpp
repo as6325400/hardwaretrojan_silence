@@ -45,7 +45,7 @@ void print_usage(const char* prog) {
                " [--patterns N] [--depth N] [--eval N] [--neg-ratio N]"
                " [--mine-rounds N] [--mine-max N]"
                " [--p1-trigger X] [--p1-notrigger Y] [--include-pi] [--no-filter]"
-               " [--force-split] [--no-strict]\n";
+               " [--force-split] [--no-strict] [--cec [N]]\n";
 }
 
 ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::string* error) {
@@ -188,6 +188,24 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
     }
     if (arg == "--no-strict") {
       out->strict_retry = false;
+      continue;
+    }
+    if (arg == "--cec") {
+      out->cec_rounds = 3;
+      if (i + 1 < argc) {
+        std::size_t val = 0;
+        if (parse_size_arg(argv[i + 1], &val)) {
+          out->cec_rounds = val;
+          ++i;
+        }
+      }
+      continue;
+    }
+    if (arg.rfind("--cec=", 0) == 0) {
+      if (!parse_size_arg(arg.substr(6), &out->cec_rounds)) {
+        arg_error = "Invalid value for --cec";
+        break;
+      }
       continue;
     }
     if (arg == "--output") {
