@@ -338,13 +338,23 @@ bool build_training_data(const circuit& golden,
                          const std::vector<int>& feature_nodes,
                          const std::vector<std::vector<int>>* extra_neg_patterns,
                          std::size_t neg_ratio,
-                         TrainingData* data) {
+                         TrainingData* data,
+                         NegSampleTrace* neg_trace) {
   data->features.data.clear();
   data->features.row_count = 0;
   data->features.feature_count = feature_nodes.size();
   data->labels.clear();
   data->pos_count = 0;
   data->neg_count = 0;
+
+  const bool use_trace =
+      neg_trace && !neg_trace->masks.empty() &&
+      neg_trace->masks.size() == neg_trace->sizes.size();
+  if (neg_trace && !use_trace) {
+    neg_trace->masks.clear();
+    neg_trace->sizes.clear();
+    neg_trace->seed = 1337;
+  }
 
   circuit golden_train = golden;
   circuit trojan_train = trojan;
@@ -466,6 +476,60 @@ bool build_training_data(const circuit& golden,
     }
   }
 
+  if (use_trace) {
+    std::mt19937 rng(neg_trace->seed);
+    std::uniform_int_distribution<int> dist(0, 1);
+    std::vector<std::size_t> selected;
+    for (std::size_t block = 0; block < neg_trace->masks.size(); ++block) {
+      const std::size_t block_size =
+          std::min<std::size_t>(packed_circuit::kWordBits,
+                                static_cast<std::size_t>(neg_trace->sizes[block]));
+      if (block_size == 0) {
+        continue;
+      }
+      std::vector<std::vector<int>> patterns;
+      patterns.reserve(block_size);
+      for (std::size_t p = 0; p < block_size; ++p) {
+        std::vector<int> pi_values;
+        pi_values.reserve(golden_train.pi_count());
+        for (std::size_t i = 0; i < golden_train.pi_count(); ++i) {
+          pi_values.push_back(dist(rng));
+        }
+        patterns.push_back(std::move(pi_values));
+      }
+
+      const PackedWord mask = packed_circuit::mask_for_count(block_size);
+      PackedWord selected_mask = neg_trace->masks[block] & mask;
+      if (selected_mask == 0) {
+        continue;
+      }
+      try {
+        trojan_packed.simulate(patterns);
+      } catch (const std::exception& e) {
+        std::cerr << "Training negative replay error: " << e.what() << "\n";
+        continue;
+      }
+      const std::vector<PackedWord> feature_bits =
+          gather_feature_bits(trojan_packed, feature_nodes);
+      selected.clear();
+      selected.reserve(popcount_word(selected_mask));
+      while (selected_mask) {
+        const std::size_t bit = ctz_word(selected_mask);
+        selected.push_back(bit);
+        selected_mask &= (selected_mask - 1);
+      }
+      append_feature_rows_from_bits_indices(feature_bits,
+                                            feature_map,
+                                            selected,
+                                            words_per_row,
+                                            &data->features,
+                                            &data->labels,
+                                            0);
+      data->neg_count += selected.size();
+    }
+    return true;
+  }
+
   const std::size_t target_negatives = data->pos_count * std::max<std::size_t>(1, neg_ratio);
 
   std::size_t attempts = 0;
@@ -492,42 +556,52 @@ bool build_training_data(const circuit& golden,
       patterns.push_back(std::move(pi_values));
     }
 
+    bool packed_ok = false;
     try {
       golden_packed.simulate(patterns);
       trojan_packed.simulate(patterns);
+      packed_ok = true;
     } catch (const std::exception&) {
-      attempts += block_size;
-      continue;
+      packed_ok = false;
     }
 
-    const PackedWord mask = packed_circuit::mask_for_count(block_size);
-    PackedWord diff_mask = 0;
-    for (std::size_t o = 0; o < golden_train.po_count(); ++o) {
-      diff_mask |= (golden_packed.po_bits(o) ^ trojan_packed.po_bits(o));
+    PackedWord selected_mask = 0;
+    if (packed_ok) {
+      const PackedWord mask = packed_circuit::mask_for_count(block_size);
+      PackedWord diff_mask = 0;
+      for (std::size_t o = 0; o < golden_train.po_count(); ++o) {
+        diff_mask |= (golden_packed.po_bits(o) ^ trojan_packed.po_bits(o));
+      }
+      diff_mask &= mask;
+      PackedWord notrigger_mask = mask & ~diff_mask;
+      if (notrigger_mask != 0) {
+        const std::size_t remaining_needed = target_negatives - data->neg_count;
+        std::vector<std::size_t> selected;
+        selected.reserve(std::min(remaining_needed, popcount_word(notrigger_mask)));
+        while (notrigger_mask && selected.size() < remaining_needed) {
+          const std::size_t bit = ctz_word(notrigger_mask);
+          selected.push_back(bit);
+          selected_mask |= (PackedWord(1) << bit);
+          notrigger_mask &= (notrigger_mask - 1);
+        }
+        if (!selected.empty()) {
+          const std::vector<PackedWord> feature_bits =
+              gather_feature_bits(trojan_packed, feature_nodes);
+          append_feature_rows_from_bits_indices(feature_bits,
+                                                feature_map,
+                                                selected,
+                                                words_per_row,
+                                                &data->features,
+                                                &data->labels,
+                                                0);
+          data->neg_count += selected.size();
+        }
+      }
     }
-    diff_mask &= mask;
-    PackedWord notrigger_mask = mask & ~diff_mask;
-    if (notrigger_mask != 0) {
-      const std::size_t remaining_needed = target_negatives - data->neg_count;
-      std::vector<std::size_t> selected;
-      selected.reserve(std::min(remaining_needed, popcount_word(notrigger_mask)));
-      while (notrigger_mask && selected.size() < remaining_needed) {
-        const std::size_t bit = ctz_word(notrigger_mask);
-        selected.push_back(bit);
-        notrigger_mask &= (notrigger_mask - 1);
-      }
-      if (!selected.empty()) {
-        const std::vector<PackedWord> feature_bits =
-            gather_feature_bits(trojan_packed, feature_nodes);
-        append_feature_rows_from_bits_indices(feature_bits,
-                                              feature_map,
-                                              selected,
-                                              words_per_row,
-                                              &data->features,
-                                              &data->labels,
-                                              0);
-        data->neg_count += selected.size();
-      }
+    if (neg_trace) {
+      neg_trace->masks.push_back(selected_mask);
+      const std::size_t size = std::min(block_size, packed_circuit::kWordBits);
+      neg_trace->sizes.push_back(static_cast<std::uint8_t>(size));
     }
     attempts += block_size;
   }
@@ -787,6 +861,7 @@ bool run_mining(const circuit& golden,
                 const MiningOptions& options,
                 double target_rate,
                 const std::vector<std::vector<int>>* extra_neg_patterns,
+                NegSampleTrace* neg_trace,
                 MiningResult* result,
                 std::string* error) {
   if (error) {
@@ -845,7 +920,8 @@ bool run_mining(const circuit& golden,
                            feature_nodes,
                            extra_neg_patterns,
                            options.neg_ratio,
-                           &data)) {
+                           &data,
+                           neg_trace)) {
     if (error) {
       *error = "Failed to build training data";
     }
@@ -882,7 +958,8 @@ bool run_mining(const circuit& golden,
                             strict_features,
                             extra_neg_patterns,
                             options.neg_ratio,
-                            &strict_data) &&
+                            &strict_data,
+                            neg_trace) &&
         run_mining_loop(golden,
                         trojan,
                         strict_features,

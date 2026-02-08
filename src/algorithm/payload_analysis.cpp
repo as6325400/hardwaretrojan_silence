@@ -753,6 +753,7 @@ bool check_pattern_fixed(circuit& trojan_eval,
                          const std::vector<int>& golden_outputs,
                          const std::vector<int>& feature_nodes,
                          const DecisionTreeModel& model,
+                         int rule_match_node_idx,
                          const std::vector<char>& flip_mask,
                          bool* rule_match_out,
                          std::string* error) {
@@ -763,9 +764,14 @@ bool check_pattern_fixed(circuit& trojan_eval,
   try {
     SimState base_state =
         simulate_with_override(trojan_eval, pattern, -1, 0);
-    const std::vector<int> features =
-        extract_features_from_values(base_state.values, feature_nodes);
-    rule_match = eval_rules(model.rules, features);
+    if (rule_match_node_idx >= 0 &&
+        static_cast<std::size_t>(rule_match_node_idx) < base_state.values.size()) {
+      rule_match = base_state.values[static_cast<std::size_t>(rule_match_node_idx)] != 0;
+    } else {
+      const std::vector<int> features =
+          extract_features_from_values(base_state.values, feature_nodes);
+      rule_match = eval_rules(model.rules, features);
+    }
     if (rule_match_out) {
       *rule_match_out = rule_match;
     }
@@ -789,6 +795,7 @@ void analyze_payload_nodes(const circuit& golden,
                            const circuit& trojan,
                            const PatternStats& stats,
                            const MiningResult& result,
+                           int rule_match_node_idx,
                            std::vector<int>* fix_nodes_out) {
   if (stats.trigger_patterns.empty()) {
     std::cout << "payload_analysis skipped: no error patterns\n";
@@ -818,6 +825,17 @@ void analyze_payload_nodes(const circuit& golden,
         }
       }
     }
+    std::vector<char> is_used_feature(node_count, 0);
+    for (std::size_t i = 0; i < feature_used.size(); ++i) {
+      if (!feature_used[i]) {
+        continue;
+      }
+      const int node_idx = result.feature_nodes[i];
+      if (node_idx >= 0 && static_cast<std::size_t>(node_idx) < node_count) {
+        is_used_feature[static_cast<std::size_t>(node_idx)] = 1;
+      }
+    }
+    std::vector<char> feeds_other(node_count, 0);
     std::vector<char> cone(node_count, 0);
     for (std::size_t i = 0; i < feature_used.size(); ++i) {
       if (!feature_used[i]) {
@@ -835,14 +853,20 @@ void analyze_payload_nodes(const circuit& golden,
           forbidden_mask[n] = 1;
         }
       }
+      for (std::size_t n = 0; n < node_count; ++n) {
+        if (cone[n] && is_used_feature[n] && n != static_cast<std::size_t>(node_idx)) {
+          feeds_other[n] = 1;
+        }
+      }
     }
     for (std::size_t i = 0; i < feature_used.size(); ++i) {
       if (!feature_used[i]) {
         continue;
       }
       const int node_idx = result.feature_nodes[i];
-      if (node_idx >= 0 && static_cast<std::size_t>(node_idx) < node_count) {
-        // Allow direct rule gates as candidates for payload fixing.
+      if (node_idx >= 0 && static_cast<std::size_t>(node_idx) < node_count &&
+          !feeds_other[static_cast<std::size_t>(node_idx)]) {
+        // Allow direct rule gates as candidates if they do not feed other rule features.
         forbidden_mask[static_cast<std::size_t>(node_idx)] = 0;
       }
     }
@@ -993,6 +1017,7 @@ void analyze_payload_nodes(const circuit& golden,
                                              golden_outputs,
                                              result.feature_nodes,
                                              result.model,
+                                             rule_match_node_idx,
                                              flip_mask,
                                              &rule_match,
                                              &error);
@@ -1002,6 +1027,7 @@ void analyze_payload_nodes(const circuit& golden,
       }
       if (!rule_match) {
         rule_miss += 1;
+        continue;
       }
       if (fixed) {
         fixed_count += 1;

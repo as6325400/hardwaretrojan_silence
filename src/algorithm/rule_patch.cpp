@@ -1,11 +1,20 @@
 #include "rule_patch.hpp"
-#include <iostream>
+
 #include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cstdio>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
 #include "../core/packed_circuit.hpp"
+#include "../io/eqn_parser.hpp"
 
 namespace {
 
@@ -30,6 +39,295 @@ struct SharedInfo {
   std::size_t gain = 0;
   int node_idx = -1;
 };
+
+std::string temp_dir() {
+  const char* tmp = std::getenv("TMPDIR");
+  if (tmp && *tmp) {
+    return tmp;
+  }
+  return "/tmp";
+}
+
+std::string make_temp_path(const std::string& suffix) {
+  static std::uint64_t counter = 0;
+  const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+  std::ostringstream oss;
+  oss << temp_dir() << "/rule_patch_" << now << "_" << counter++ << suffix;
+  return oss.str();
+}
+
+std::string make_rule_signature(const std::vector<DecisionTreeRule>& rules,
+                                std::size_t feature_count) {
+  std::ostringstream oss;
+  oss << "f" << feature_count << "|";
+  for (const auto& rule : rules) {
+    std::vector<std::pair<std::size_t, int>> terms = rule.terms;
+    std::sort(terms.begin(), terms.end());
+    oss << "[";
+    for (const auto& term : terms) {
+      oss << term.first << '=' << term.second << ',';
+    }
+    oss << "];";
+  }
+  return oss.str();
+}
+
+bool write_rules_pla(const std::vector<DecisionTreeRule>& rules,
+                     std::size_t feature_count,
+                     const std::string& path,
+                     std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  std::ofstream out(path);
+  if (!out) {
+    if (error) {
+      *error = "failed to open PLA: " + path;
+    }
+    return false;
+  }
+  out << ".i " << feature_count << "\n";
+  out << ".o 1\n";
+  out << ".ilb";
+  for (std::size_t i = 0; i < feature_count; ++i) {
+    out << " f" << i;
+  }
+  out << "\n";
+  out << ".ob F\n";
+  out << ".p " << rules.size() << "\n";
+  for (const auto& rule : rules) {
+    std::string cube(feature_count, '-');
+    for (const auto& term : rule.terms) {
+      if (term.first >= feature_count) {
+        if (error) {
+          *error = "rule term index out of range";
+        }
+        return false;
+      }
+      cube[term.first] = term.second ? '1' : '0';
+    }
+    out << cube << " 1\n";
+  }
+  out << ".e\n";
+  return true;
+}
+
+bool run_abc_optimize(const std::string& pla_path,
+                      const std::string& eqn_path,
+                      std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  const char* abc_bin = std::getenv("ABC_BIN");
+  std::string abc_cmd = (abc_bin && *abc_bin) ? abc_bin : "abc";
+  const std::string flow =
+      "strash; balance; rewrite; refactor; balance; rewrite -z; refactor -z";
+  const std::string script =
+      "read_pla '" + pla_path + "'; " + flow + "; write_eqn '" + eqn_path + "'";
+  abc_cmd += " -c \"" + script + "\"";
+  const int ret = std::system(abc_cmd.c_str());
+  if (ret != 0) {
+    if (error) {
+      *error = "ABC failed, make sure abc is in PATH or set ABC_BIN";
+    }
+    return false;
+  }
+  return true;
+}
+
+struct TempFiles {
+  std::string pla;
+  std::string eqn;
+  ~TempFiles() {
+    if (!pla.empty()) {
+      std::remove(pla.c_str());
+    }
+    if (!eqn.empty()) {
+      std::remove(eqn.c_str());
+    }
+  }
+};
+
+bool load_optimized_rule_circuit(const DecisionTreeModel& model,
+                                 std::size_t feature_count,
+                                 circuit* out,
+                                 std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (!out) {
+    if (error) {
+      *error = "optimized circuit output is null";
+    }
+    return false;
+  }
+  if (model.rules.empty()) {
+    if (error) {
+      *error = "no rules to optimize";
+    }
+    return false;
+  }
+  const std::string key = make_rule_signature(model.rules, feature_count);
+  static std::unordered_map<std::string, circuit> cache;
+  auto it = cache.find(key);
+  if (it != cache.end()) {
+    *out = it->second;
+    return true;
+  }
+
+  TempFiles tmp;
+  tmp.pla = make_temp_path(".pla");
+  tmp.eqn = make_temp_path(".eqn");
+  if (!write_rules_pla(model.rules, feature_count, tmp.pla, error)) {
+    return false;
+  }
+  if (!run_abc_optimize(tmp.pla, tmp.eqn, error)) {
+    return false;
+  }
+
+  circuit optimized;
+  if (!bench_io::parse_eqn_file(tmp.eqn, optimized, error)) {
+    return false;
+  }
+
+  cache.emplace(key, optimized);
+  *out = std::move(optimized);
+  return true;
+}
+
+bool parse_feature_index(const std::string& name, std::size_t* feature_idx) {
+  if (!feature_idx) {
+    return false;
+  }
+  if (name.size() < 2) {
+    return false;
+  }
+  if (name[0] != 'f' && name[0] != 'F') {
+    return false;
+  }
+  std::size_t value = 0;
+  for (std::size_t i = 1; i < name.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(name[i]);
+    if (!std::isdigit(c)) {
+      return false;
+    }
+    value = value * 10 + static_cast<std::size_t>(c - '0');
+  }
+  *feature_idx = value;
+  return true;
+}
+
+int instantiate_optimized_logic(circuit& net,
+                                const std::vector<int>& feature_nodes,
+                                const circuit& optimized,
+                                std::string* error) {
+  if (error) {
+    error->clear();
+  }
+
+  circuit temp = optimized;
+  try {
+    temp.ensure_eval_order();
+  } catch (const std::exception& e) {
+    if (error) {
+      *error = e.what();
+    }
+    return -1;
+  }
+
+  std::vector<int> node_map(temp.node_count(), -1);
+  std::unordered_map<std::string, int> feature_by_name;
+  feature_by_name.reserve(feature_nodes.size());
+  for (int node_idx : feature_nodes) {
+    feature_by_name.emplace(net.node_name(node_idx), node_idx);
+  }
+
+  const auto& pi_indices = temp.pi_indices();
+  std::vector<int> mapped_pi(pi_indices.size(), -1);
+  bool parsed_all = true;
+  for (std::size_t i = 0; i < pi_indices.size(); ++i) {
+    const int pi_idx = pi_indices[i];
+    const std::string& name = temp.node_name(pi_idx);
+    std::size_t feature_idx = 0;
+    if (parse_feature_index(name, &feature_idx) &&
+        feature_idx < feature_nodes.size()) {
+      mapped_pi[i] = feature_nodes[feature_idx];
+      continue;
+    }
+    auto it = feature_by_name.find(name);
+    if (it != feature_by_name.end()) {
+      mapped_pi[i] = it->second;
+      continue;
+    }
+    parsed_all = false;
+    break;
+  }
+
+  if (!parsed_all) {
+    if (pi_indices.size() != feature_nodes.size()) {
+      if (error) {
+        *error = "optimized PI names do not match features";
+      }
+      return -1;
+    }
+    for (std::size_t i = 0; i < pi_indices.size(); ++i) {
+      mapped_pi[i] = feature_nodes[i];
+    }
+  }
+
+  for (std::size_t i = 0; i < pi_indices.size(); ++i) {
+    node_map[pi_indices[i]] = mapped_pi[i];
+  }
+
+  for (std::size_t i = 0; i < temp.node_count(); ++i) {
+    const cell& c = temp.get_cell(static_cast<int>(i));
+    if (c.ctype == CType::CONST) {
+      node_map[i] = net.add_const_auto("rule_opt_const_", c.val);
+    }
+  }
+
+  for (int idx : temp.eval_order()) {
+    const cell& c = temp.get_cell(idx);
+    if (c.ctype != CType::GATE) {
+      continue;
+    }
+    std::vector<int> inputs;
+    inputs.reserve(c.inputs.size());
+    for (int input_idx : c.inputs) {
+      if (input_idx < 0 || static_cast<std::size_t>(input_idx) >= node_map.size()) {
+        if (error) {
+          *error = "optimized gate input out of range";
+        }
+        return -1;
+      }
+      const int mapped = node_map[input_idx];
+      if (mapped < 0) {
+        if (error) {
+          *error = "optimized gate input unresolved";
+        }
+        return -1;
+      }
+      inputs.push_back(mapped);
+    }
+    node_map[idx] = net.add_gate_auto("rule_opt_gate_", c.gtype, inputs);
+  }
+
+  const auto& po_indices = temp.po_indices();
+  if (po_indices.empty()) {
+    if (error) {
+      *error = "optimized logic has no outputs";
+    }
+    return -1;
+  }
+  const int out_idx = node_map[po_indices[0]];
+  if (out_idx < 0) {
+    if (error) {
+      *error = "optimized output unresolved";
+    }
+    return -1;
+  }
+  return out_idx;
+}
 
 std::string subset_key(const std::vector<LiteralKey>& literals) {
   std::string key;
@@ -390,6 +688,28 @@ int build_trigger_match_gate(circuit& net,
     return -1;
   }
 
+  if (model.rules.size() > 1U) {
+    circuit optimized;
+    std::string opt_error;
+    if (load_optimized_rule_circuit(model,
+                                    feature_nodes.size(),
+                                    &optimized,
+                                    &opt_error)) {
+      int opt_idx = instantiate_optimized_logic(net,
+                                                feature_nodes,
+                                                optimized,
+                                                &opt_error);
+      if (opt_idx >= 0) {
+        std::cout << "rule_opt_abc rules " << model.rules.size()
+                  << " nodes " << optimized.node_count() << "\n";
+        return opt_idx;
+      }
+    }
+    if (!opt_error.empty()) {
+      std::cerr << "rule_opt_abc fallback: " << opt_error << "\n";
+    }
+  }
+
   const std::size_t k_min = 2;
   const std::size_t k_max = 4;
   const std::size_t min_m = 3;
@@ -745,6 +1065,52 @@ std::string derive_patched_path(const std::string& trojan_path) {
   return dir + base + "_patched.bench";
 }
 
+std::string derive_rule_merged_path(const std::string& trojan_path) {
+  std::string dir;
+  std::string base = trojan_path;
+  const std::size_t slash = base.find_last_of("/\\");
+  if (slash != std::string::npos) {
+    dir = base.substr(0, slash + 1);
+    base = base.substr(slash + 1);
+  }
+  const std::size_t dot = base.rfind('.');
+  if (dot != std::string::npos) {
+    base = base.substr(0, dot);
+  }
+  return dir + base + "_rule_merged.bench";
+}
+
+bool append_rule_match_node(circuit& net,
+                            const std::vector<int>& feature_nodes,
+                            const DecisionTreeModel& model,
+                            int* out_idx,
+                            std::string* out_name,
+                            std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (out_idx) {
+    *out_idx = -1;
+  }
+  if (out_name) {
+    out_name->clear();
+  }
+  int match_idx = build_trigger_match_gate(net, feature_nodes, model, error);
+  if (match_idx < 0) {
+    return false;
+  }
+  const std::string name = make_unique_name(net, "rule_match_");
+  net.define_gate(name, GType::BUFF, std::vector<int>{match_idx});
+  const int created_idx = net.node_index(name);
+  if (out_idx) {
+    *out_idx = created_idx;
+  }
+  if (out_name) {
+    *out_name = name;
+  }
+  return true;
+}
+
 bool apply_rule_inversion(circuit& net,
                           const std::vector<int>& feature_nodes,
                           const DecisionTreeModel& model,
@@ -814,6 +1180,59 @@ bool apply_rule_patch(circuit& net,
   }
 
   return apply_rule_inversion(net, feature_nodes, model, fix_idx, base_nodes, error);
+}
+
+bool try_kill_simple_trigger(circuit& net,
+                             const std::vector<int>& feature_nodes,
+                             const DecisionTreeModel& model,
+                             int* trigger_idx,
+                             int* forced_value,
+                             std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (trigger_idx) {
+    *trigger_idx = -1;
+  }
+  if (forced_value) {
+    *forced_value = 0;
+  }
+  int trigger_node = -1;
+  int expected = 0;
+  std::string trigger_error;
+  if (!extract_single_literal_trigger(feature_nodes,
+                                      model,
+                                      &trigger_node,
+                                      &expected,
+                                      &trigger_error)) {
+    if (error && !trigger_error.empty()) {
+      *error = trigger_error;
+    }
+    return false;
+  }
+  if (trigger_node < 0 ||
+      static_cast<std::size_t>(trigger_node) >= net.node_count()) {
+    if (error) {
+      *error = "trigger node index out of range";
+    }
+    return false;
+  }
+  const cell& c = net.get_cell(trigger_node);
+  if (c.ctype != CType::GATE) {
+    if (error) {
+      *error = "trigger node is not a gate";
+    }
+    return false;
+  }
+  const int kill_value = expected ? 0 : 1;
+  net.force_gate_const(trigger_node, kill_value);
+  if (trigger_idx) {
+    *trigger_idx = trigger_node;
+  }
+  if (forced_value) {
+    *forced_value = kill_value;
+  }
+  return true;
 }
 
 bool evaluate_fix_candidate(const circuit& base,

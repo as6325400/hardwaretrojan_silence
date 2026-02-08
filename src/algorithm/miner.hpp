@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,12 @@ struct MiningResult {
   std::size_t rounds_used = 0;
 };
 
+struct NegSampleTrace {
+  std::uint32_t seed = 1337;
+  std::vector<PackedFeatureMatrix::word_t> masks;
+  std::vector<std::uint8_t> sizes;
+};
+
 bool run_mining(const circuit& golden,
                 const circuit& trojan,
                 const std::vector<std::vector<int>>& trigger_patterns,
@@ -40,5 +47,6 @@ bool run_mining(const circuit& golden,
                 const MiningOptions& options,
                 double target_rate,
                 const std::vector<std::vector<int>>* extra_neg_patterns,
+                NegSampleTrace* neg_trace,
                 MiningResult* result,
                 std::string* error); // Train decision tree with hard-negative mining.

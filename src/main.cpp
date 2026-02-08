@@ -340,148 +340,291 @@ int main(int argc, char** argv) {
        << " force_split " << (options.force_split ? 1 : 0)
        << " strict_retry " << (options.strict_retry ? 1 : 0) << "\n";
 
+  circuit working_trojan = trojan;
   PatternStats stats;
-  try {
-    if (!build_stats_from_groundtruth(golden, trojan, groundtruth_path, &stats, &error)) {
-      cerr << "Groundtruth error: " << error << "\n";
+  MiningResult result;
+  NegSampleTrace neg_trace;
+  bool did_rule_merge = false;
+  int merged_match_idx = -1;
+
+  while (true) {
+    try {
+      if (!build_stats_from_groundtruth(golden, working_trojan, groundtruth_path, &stats, &error)) {
+        cerr << "Groundtruth error: " << error << "\n";
+        return 1;
+      }
+    } catch (const std::exception& e) {
+      cerr << "Groundtruth parse error: " << e.what() << "\n";
       return 1;
     }
-  } catch (const std::exception& e) {
-    cerr << "Groundtruth parse error: " << e.what() << "\n";
-    return 1;
-  }
 
-  cout << "pattern_total " << stats.total_patterns << "\n";
-  cout << "trigger_patterns " << stats.trigger_patterns_total << "\n";
-  cout << "notrigger_patterns " << stats.notrigger_patterns_total << "\n";
-  const double trojan_rate = compute_trojan_rate(stats);
-  cout << "trojan_rates " << trojan_rate << '\n';
-  cout << fixed << setprecision(4);
+    cout << "pattern_total " << stats.total_patterns << "\n";
+    cout << "trigger_patterns " << stats.trigger_patterns_total << "\n";
+    cout << "notrigger_patterns " << stats.notrigger_patterns_total << "\n";
+    const double trojan_rate = compute_trojan_rate(stats);
+    cout << "trojan_rates " << trojan_rate << '\n';
+    cout << fixed << setprecision(4);
 
-  vector<CandidateInfo> candidates;
-  if (!build_candidates(stats,
-                        options.p1_trigger_threshold,
-                        options.p1_notrigger_threshold,
-                        options.no_filter,
-                        &candidates,
-                        &error)) {
-    cerr << error << "\n";
-    return 1;
-  }
+    vector<CandidateInfo> candidates;
+    if (!build_candidates(stats,
+                          options.p1_trigger_threshold,
+                          options.p1_notrigger_threshold,
+                          options.no_filter,
+                          &candidates,
+                          &error)) {
+      cerr << error << "\n";
+      return 1;
+    }
 
-  // cout << "trigger_candidates\n";
-  // for (const auto& cand : candidates) {
-  //   cout << trojan.node_name(cand.gate_idx)
-  //        << " p1_trigger=" << cand.p1_trigger
-  //        << " p1_notrigger=" << cand.p1_notrigger << '\n';
-  // }
+    vector<int> candidate_indices = candidate_gate_indices(candidates);
 
-  vector<int> candidate_indices = candidate_gate_indices(candidates);
+    bool filter_rule_opt = did_rule_merge;
+    if (!filter_rule_opt) {
+      bool has_rule_opt = false;
+      bool has_rule_match = false;
+      for (std::size_t i = 0; i < working_trojan.node_count(); ++i) {
+        const std::string& name = working_trojan.node_name(static_cast<int>(i));
+        if (!has_rule_opt && name.rfind("rule_opt_gate_", 0) == 0) {
+          has_rule_opt = true;
+        }
+        if (!has_rule_match && name.rfind("rule_match_", 0) == 0) {
+          has_rule_match = true;
+        }
+        if (has_rule_opt && has_rule_match) {
+          break;
+        }
+      }
+      filter_rule_opt = has_rule_opt && has_rule_match;
+    }
 
-  unordered_set<string> groundtruth_bits;
-  groundtruth_bits.reserve(stats.trigger_patterns.size() * 2);
-  for (const auto& pattern : stats.trigger_patterns) {
-    groundtruth_bits.insert(pi_values_to_bits(pattern));
-  }
+    if (filter_rule_opt) {
+      std::vector<int> filtered;
+      filtered.reserve(candidate_indices.size());
+      for (int idx : candidate_indices) {
+        const std::string& name = working_trojan.node_name(idx);
+        if (name.rfind("rule_opt_gate_", 0) == 0) {
+          continue;
+        }
+        filtered.push_back(idx);
+      }
+      candidate_indices.swap(filtered);
+    }
 
-  MiningResult result;
-  vector<vector<int>> sat_neg_patterns;
-  unordered_set<string> sat_seen_bits;
-  size_t sat_rounds = options.mine_rounds;
-  if (sat_rounds == 0) {
-    sat_rounds = 1;
-  }
-  const size_t sat_max_new = options.mine_max;
-  const size_t sat_max_models =
-      (options.eval_count > 0) ? options.eval_count
-                               : (sat_max_new * 20 + 1000);
+    if (merged_match_idx >= 0 &&
+        std::find(candidate_indices.begin(),
+                  candidate_indices.end(),
+                  merged_match_idx) == candidate_indices.end()) {
+      candidate_indices.push_back(merged_match_idx);
+    }
 
-  for (size_t round = 0; round < sat_rounds; ++round) {
-    MiningOptions mining_options;
-    mining_options.max_depth = options.max_depth;
-    mining_options.neg_ratio = options.neg_ratio;
-    mining_options.eval_count = 0;
-    mining_options.mine_rounds = 1;
-    mining_options.mine_max = 0;
-    mining_options.include_pi = options.include_pi;
-    mining_options.force_split = options.force_split;
-    mining_options.strict_retry = options.strict_retry;
+    unordered_set<string> groundtruth_bits;
+    groundtruth_bits.reserve(stats.trigger_patterns.size() * 2);
+    for (const auto& pattern : stats.trigger_patterns) {
+      groundtruth_bits.insert(pi_values_to_bits(pattern));
+    }
+
+    vector<vector<int>> sat_neg_patterns;
+    unordered_set<string> sat_seen_bits;
+    size_t sat_rounds = options.mine_rounds;
+    if (sat_rounds == 0) {
+      sat_rounds = 1;
+    }
+    const size_t sat_max_new = options.mine_max;
+    const size_t sat_max_models =
+        (options.eval_count > 0) ? options.eval_count
+                                 : (sat_max_new * 20 + 1000);
+
+    for (size_t round = 0; round < sat_rounds; ++round) {
+      MiningOptions mining_options;
+      mining_options.max_depth = options.max_depth;
+      mining_options.neg_ratio = options.neg_ratio;
+      mining_options.eval_count = 0;
+      mining_options.mine_rounds = 1;
+      mining_options.mine_max = 0;
+      mining_options.include_pi = options.include_pi;
+      mining_options.force_split = options.force_split;
+      mining_options.strict_retry = options.strict_retry;
 
     if (!run_mining(golden,
-                    trojan,
+                    working_trojan,
                     stats.trigger_patterns,
                     candidate_indices,
                     mining_options,
                     trojan_rate,
                     &sat_neg_patterns,
+                    &neg_trace,
                     &result,
                     &error)) {
-      if (!error.empty()) {
-        cerr << error << "\n";
+        if (!error.empty()) {
+          cerr << error << "\n";
+        }
+        return 1;
       }
-      return 1;
-    }
 
-    const size_t rules_before = result.model.rules.size();
-    simplify_rules(&result.model.rules);
-    if (result.model.rules.size() != rules_before) {
-      result.model.leaf_count = result.model.rules.size();
-      cout << "rule_simplify " << rules_before
-           << " -> " << result.model.rules.size() << "\n";
-    }
-
-    if (sat_max_new == 0 || sat_max_models == 0) {
-      cout << "sat_refine_skipped 1\n";
-      break;
-    }
-
-    cout << "sat_refine_round_start " << (round + 1)
-         << " max_models " << sat_max_models
-         << " max_new " << sat_max_new << "\n";
-
-    vector<vector<int>> new_negatives;
-    if (!collect_rule_counterexamples(golden,
-                                      trojan,
-                                      result,
-                                      round + 1,
-                                      groundtruth_bits,
-                                      &sat_seen_bits,
-                                      sat_max_models,
-                                      sat_max_new,
-                                      &new_negatives,
-                                      &error)) {
-      if (!error.empty()) {
-        cerr << "SAT rule check error: " << error << "\n";
+      const size_t rules_before = result.model.rules.size();
+      simplify_rules(&result.model.rules);
+      if (result.model.rules.size() != rules_before) {
+        result.model.leaf_count = result.model.rules.size();
+        cout << "rule_simplify " << rules_before
+             << " -> " << result.model.rules.size() << "\n";
       }
-      return 1;
-    }
 
-    if (new_negatives.empty()) {
+      if (sat_max_new == 0 || sat_max_models == 0) {
+        cout << "sat_refine_skipped 1\n";
+        break;
+      }
+
+      cout << "sat_refine_round_start " << (round + 1)
+           << " max_models " << sat_max_models
+           << " max_new " << sat_max_new << "\n";
+
+      vector<vector<int>> new_negatives;
+      if (!collect_rule_counterexamples(golden,
+                                        working_trojan,
+                                        result,
+                                        round + 1,
+                                        groundtruth_bits,
+                                        &sat_seen_bits,
+                                        sat_max_models,
+                                        sat_max_new,
+                                        &new_negatives,
+                                        &error)) {
+        if (!error.empty()) {
+          cerr << "SAT rule check error: " << error << "\n";
+        }
+        return 1;
+      }
+
+      if (new_negatives.empty()) {
+        cout << "sat_refine_round " << (round + 1)
+             << " sat_new_neg 0\n";
+        break;
+      }
+
+      for (auto& pattern : new_negatives) {
+        sat_neg_patterns.push_back(std::move(pattern));
+      }
       cout << "sat_refine_round " << (round + 1)
-           << " sat_new_neg 0\n";
-      break;
+           << " sat_new_neg " << new_negatives.size()
+           << " sat_total_neg " << sat_neg_patterns.size() << "\n";
     }
 
-    for (auto& pattern : new_negatives) {
-      sat_neg_patterns.push_back(std::move(pattern));
+    cout << "training_set pos=" << result.data_pos
+         << " neg=" << result.data_neg << '\n';
+    cout << "hard_mined " << result.hard_added
+         << " rounds " << result.rounds_used << '\n';
+
+    cout << "mis match " << stats.mismatch_patterns << '\n';
+
+    if (!did_rule_merge && result.model.rules.size() > 1U) {
+      circuit merged = working_trojan;
+      std::string merge_error;
+      int match_idx = -1;
+      std::string match_name;
+      if (append_rule_match_node(merged,
+                                 result.feature_nodes,
+                                 result.model,
+                                 &match_idx,
+                                 &match_name,
+                                 &merge_error)) {
+        const std::string merge_path = derive_rule_merged_path(options.trojan_path);
+        if (!bench_io::write_bench_file(merge_path, merged, &merge_error)) {
+          cerr << "rule_merge_write_error: " << merge_error << "\n";
+        } else {
+          cout << "rule_merge_bench " << merge_path << "\n";
+        }
+        cout << "rule_merge_node " << match_name << "\n";
+        working_trojan = std::move(merged);
+        merged_match_idx = match_idx;
+        did_rule_merge = true;
+        break;
+      }
+      if (!merge_error.empty()) {
+        cerr << "rule_merge_error: " << merge_error << "\n";
+      }
     }
-    cout << "sat_refine_round " << (round + 1)
-         << " sat_new_neg " << new_negatives.size()
-         << " sat_total_neg " << sat_neg_patterns.size() << "\n";
+    break;
   }
 
-  cout << "training_set pos=" << result.data_pos
-       << " neg=" << result.data_neg << '\n';
-  cout << "hard_mined " << result.hard_added
-       << " rounds " << result.rounds_used << '\n';
+  int kill_trigger_idx = -1;
+  int kill_value = 0;
+  std::string kill_error;
+  circuit killed = working_trojan;
+  if (try_kill_simple_trigger(killed,
+                              result.feature_nodes,
+                              result.model,
+                              &kill_trigger_idx,
+                              &kill_value,
+                              &kill_error)) {
+    std::size_t base_area = 0;
+    std::size_t base_level = 0;
+    std::size_t killed_area = 0;
+    std::size_t killed_level = 0;
+    try {
+      circuit base_eval = working_trojan;
+      base_eval.ensure_eval_order();
+      base_area = base_eval.area();
+      base_level = base_eval.level();
+      killed.ensure_eval_order();
+      killed_area = killed.area();
+      killed_level = killed.level();
+    } catch (const std::exception& e) {
+      cerr << "Payload kill area/level error: " << e.what() << "\n";
+      return 1;
+    }
 
-  cout << "mis match " << stats.mismatch_patterns << '\n';
+    cout << "payload_kill_trigger " << working_trojan.node_name(kill_trigger_idx)
+         << " forced " << kill_value << "\n";
+    cout << "payload_kill_area " << base_area << " -> " << killed_area
+         << " level " << base_level << " -> " << killed_level << "\n";
+
+    std::size_t mismatch_index = 0;
+    if (!verify_patch_groundtruth(golden,
+                                  killed,
+                                  stats.trigger_patterns,
+                                  &mismatch_index,
+                                  &error)) {
+      cerr << "Payload kill verification failed: " << error;
+      if (!stats.trigger_patterns.empty()) {
+        cerr << " pattern " << mismatch_index;
+      }
+      cerr << "\n";
+      cout << "payload_fix_apply skipped: groundtruth_verify_failed\n";
+      return 0;
+    }
+
+    const long long delta_area =
+        static_cast<long long>(killed_area) -
+        static_cast<long long>(base_area);
+    const long long delta_level =
+        static_cast<long long>(killed_level) -
+        static_cast<long long>(base_level);
+
+    const string output_path = options.output_path.empty()
+                                   ? derive_patched_path(options.trojan_path)
+                                   : options.output_path;
+    if (!bench_io::write_bench_file(output_path, killed, &error)) {
+      cerr << "Write error: " << error << "\n";
+      return 1;
+    }
+    cout << "payload_fix_selected 1 area_delta " << delta_area
+         << " level_delta " << delta_level << "\n";
+    cout << "payload_fix_bench " << output_path << "\n";
+    return 0;
+  } else if (!kill_error.empty()) {
+    cerr << "payload_kill_trigger skipped: " << kill_error << "\n";
+  }
 
   std::vector<int> payload_fix_nodes;
-  analyze_payload_nodes(golden, trojan, stats, result, &payload_fix_nodes);
+  analyze_payload_nodes(golden,
+                        working_trojan,
+                        stats,
+                        result,
+                        merged_match_idx,
+                        &payload_fix_nodes);
 
   if (!payload_fix_nodes.empty()) {
-    circuit base_eval = trojan;
+    circuit base_eval = working_trojan;
     std::size_t base_area = 0;
     std::size_t base_level = 0;
     try {
@@ -493,7 +636,7 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    circuit patched = trojan;
+    circuit patched = working_trojan;
     for (int fix_idx : payload_fix_nodes) {
       std::size_t step_area_before = 0;
       std::size_t step_level_before = 0;
@@ -534,7 +677,7 @@ int main(int argc, char** argv) {
         return 1;
       }
 
-      cout << "payload_fix_step " << trojan.node_name(fix_idx)
+      cout << "payload_fix_step " << working_trojan.node_name(fix_idx)
            << " time_ms " << elapsed_ms
            << " area " << step_area_before << " -> " << step_area_after
            << " level " << step_level_before << " -> " << step_level_after

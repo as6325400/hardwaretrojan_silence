@@ -12,6 +12,14 @@ void simplify_rules(std::vector<DecisionTreeRule>* rules);
 std::string pi_values_to_bits(const std::vector<int>& pi_values);
 
 std::string derive_patched_path(const std::string& trojan_path);
+std::string derive_rule_merged_path(const std::string& trojan_path);
+
+bool append_rule_match_node(circuit& net,
+                            const std::vector<int>& feature_nodes,
+                            const DecisionTreeModel& model,
+                            int* out_idx,
+                            std::string* out_name,
+                            std::string* error);
 
 bool apply_rule_inversion(circuit& net,
                           const std::vector<int>& feature_nodes,
@@ -27,6 +35,13 @@ bool apply_rule_patch(circuit& net,
                       std::size_t base_nodes,
                       bool* used_bypass,
                       std::string* error);
+
+bool try_kill_simple_trigger(circuit& net,
+                             const std::vector<int>& feature_nodes,
+                             const DecisionTreeModel& model,
+                             int* trigger_idx,
+                             int* forced_value,
+                             std::string* error);
 
 bool evaluate_fix_candidate(const circuit& base,
                             const std::vector<int>& feature_nodes,
