@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -494,16 +495,50 @@ int main(int argc, char** argv) {
 
     circuit patched = trojan;
     for (int fix_idx : payload_fix_nodes) {
+      std::size_t step_area_before = 0;
+      std::size_t step_level_before = 0;
+      try {
+        patched.ensure_eval_order();
+        step_area_before = patched.area();
+        step_level_before = patched.level();
+      } catch (const std::exception& e) {
+        cerr << "Payload fix step baseline error: " << e.what() << "\n";
+        return 1;
+      }
+
+      const auto start = std::chrono::steady_clock::now();
       const std::size_t base_nodes = patched.node_count();
-      if (!apply_rule_inversion(patched,
-                                result.feature_nodes,
-                                result.model,
-                                fix_idx,
-                                base_nodes,
-                                &error)) {
+      bool used_bypass = false;
+      if (!apply_rule_patch(patched,
+                            result.feature_nodes,
+                            result.model,
+                            fix_idx,
+                            base_nodes,
+                            &used_bypass,
+                            &error)) {
         cerr << "Payload fix apply error: " << error << "\n";
         return 1;
       }
+      const auto end = std::chrono::steady_clock::now();
+      const auto elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+      std::size_t step_area_after = 0;
+      std::size_t step_level_after = 0;
+      try {
+        patched.ensure_eval_order();
+        step_area_after = patched.area();
+        step_level_after = patched.level();
+      } catch (const std::exception& e) {
+        cerr << "Payload fix step area/level error: " << e.what() << "\n";
+        return 1;
+      }
+
+      cout << "payload_fix_step " << trojan.node_name(fix_idx)
+           << " time_ms " << elapsed_ms
+           << " area " << step_area_before << " -> " << step_area_after
+           << " level " << step_level_before << " -> " << step_level_after
+           << " bypass " << (used_bypass ? 1 : 0) << "\n";
     }
 
     std::size_t mismatch_index = 0;

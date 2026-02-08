@@ -879,8 +879,12 @@ void analyze_payload_nodes(const circuit& golden,
   }
 
   std::vector<char> flip_mask(node_count, 0);
+  std::vector<char> forced_mask(node_count, 0);
   std::vector<int> fix_nodes;
   fix_nodes.reserve(node_count);
+  std::vector<std::size_t> sample_pool;
+  sample_pool.reserve(remaining_indices.size());
+  std::vector<char> in_sample_pool(stats.trigger_patterns.size(), 0);
 
   std::mt19937 rng(1337);
   std::size_t round = 0;
@@ -891,19 +895,36 @@ void analyze_payload_nodes(const circuit& golden,
     std::shuffle(remaining_indices.begin(), remaining_indices.end(), rng);
     const std::size_t sample_size =
         std::min<std::size_t>(5, remaining_indices.size());
-    std::vector<std::size_t> sample_indices(
-        remaining_indices.begin(),
-        remaining_indices.begin() + sample_size);
+    std::size_t newly_sampled = 0;
+    for (std::size_t i = 0;
+         i < remaining_indices.size() && newly_sampled < sample_size;
+         ++i) {
+      const std::size_t idx = remaining_indices[i];
+      if (idx >= in_sample_pool.size()) {
+        continue;
+      }
+      if (in_sample_pool[idx]) {
+        continue;
+      }
+      in_sample_pool[idx] = 1;
+      sample_pool.push_back(idx);
+      newly_sampled += 1;
+    }
+    if (sample_pool.empty()) {
+      std::cout << "payload_maxsat_round " << round
+                << " sample 0\n";
+      break;
+    }
 
     std::string error;
     std::vector<int> candidate_nodes =
         collect_candidate_nodes(trojan,
                                 stats.trigger_patterns,
                                 golden_outputs_list,
-                                sample_indices,
+                                sample_pool,
                                 po_cones,
                                 forbidden_mask,
-                                flip_mask,
+                                forced_mask,
                                 &error);
     if (!error.empty()) {
       std::cerr << "payload_maxsat candidate error: " << error << "\n";
@@ -916,7 +937,7 @@ void analyze_payload_nodes(const circuit& golden,
     }
 
     std::cout << "payload_maxsat_round " << round
-              << " sample " << sample_size
+              << " sample " << sample_pool.size()
               << " candidates " << candidate_nodes.size()
               << " remaining " << remaining_indices.size() << "\n";
 
@@ -924,9 +945,9 @@ void analyze_payload_nodes(const circuit& golden,
     if (!solve_maxsat_batch(trojan,
                             stats.trigger_patterns,
                             golden_outputs_list,
-                            sample_indices,
+                            sample_pool,
                             candidate_nodes,
-                            flip_mask,
+                            forced_mask,
                             &batch_nodes,
                             &error)) {
       if (!error.empty()) {
@@ -935,7 +956,8 @@ void analyze_payload_nodes(const circuit& golden,
       break;
     }
 
-    std::size_t newly_added = 0;
+    std::fill(flip_mask.begin(), flip_mask.end(), 0);
+    fix_nodes.clear();
     for (int node_idx : batch_nodes) {
       if (node_idx < 0 ||
           static_cast<std::size_t>(node_idx) >= flip_mask.size()) {
@@ -946,16 +968,13 @@ void analyze_payload_nodes(const circuit& golden,
                   << trojan.node_name(node_idx) << "\n";
         continue;
       }
-      if (!flip_mask[static_cast<std::size_t>(node_idx)]) {
-        flip_mask[static_cast<std::size_t>(node_idx)] = 1;
-        fix_nodes.push_back(node_idx);
-        newly_added += 1;
-      }
+      flip_mask[static_cast<std::size_t>(node_idx)] = 1;
+      fix_nodes.push_back(node_idx);
     }
 
     std::cout << "payload_maxsat_round " << round
               << " flips " << batch_nodes.size()
-              << " new " << newly_added << "\n";
+              << " new " << fix_nodes.size() << "\n";
 
     std::vector<std::size_t> new_remaining;
     new_remaining.reserve(remaining_indices.size());
@@ -996,7 +1015,8 @@ void analyze_payload_nodes(const circuit& golden,
               << " rule_unmatched " << rule_miss
               << " remaining " << new_remaining.size() << "\n";
 
-    if (new_remaining.size() == remaining_indices.size()) {
+    if (new_remaining.size() == remaining_indices.size() &&
+        newly_sampled == 0) {
       std::cout << "payload_maxsat_stuck round " << round << "\n";
       break;
     }

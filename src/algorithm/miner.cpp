@@ -6,6 +6,7 @@
 #include <random>
 
 #include "../core/packed_circuit.hpp"
+#include "rule_patch.hpp"
 
 namespace {
 
@@ -36,6 +37,11 @@ std::vector<int> build_feature_nodes(const circuit& trojan,
 using FeatureWord = PackedFeatureMatrix::word_t;
 using PackedWord = packed_circuit::word_t;
 
+struct PackedRule {
+  std::vector<FeatureWord> must_one;
+  std::vector<FeatureWord> must_zero;
+};
+
 struct FeatureIndexMap {
   std::vector<std::size_t> word_indices;
   std::vector<FeatureWord> word_masks;
@@ -50,6 +56,174 @@ FeatureIndexMap build_feature_index_map(std::size_t feature_count) {
     map.word_masks[f] = FeatureWord(1) << (f % PackedFeatureMatrix::kWordBits);
   }
   return map;
+}
+
+std::size_t count_rule_literals(const std::vector<DecisionTreeRule>& rules) {
+  std::size_t total = 0;
+  for (const auto& rule : rules) {
+    total += rule.terms.size();
+  }
+  return total;
+}
+
+PackedRule build_packed_rule(const DecisionTreeRule& rule,
+                             std::size_t words_per_row) {
+  PackedRule packed;
+  packed.must_one.assign(words_per_row, 0);
+  packed.must_zero.assign(words_per_row, 0);
+  for (const auto& term : rule.terms) {
+    const std::size_t feature = term.first;
+    const int value = term.second;
+    const std::size_t word = feature / PackedFeatureMatrix::kWordBits;
+    const std::size_t bit = feature % PackedFeatureMatrix::kWordBits;
+    if (word >= words_per_row) {
+      continue;
+    }
+    const FeatureWord mask = FeatureWord(1) << bit;
+    if (value == 0) {
+      packed.must_zero[word] |= mask;
+    } else {
+      packed.must_one[word] |= mask;
+    }
+  }
+  return packed;
+}
+
+bool packed_rule_matches_row(const PackedRule& rule,
+                             const FeatureWord* row,
+                             std::size_t words_per_row) {
+  for (std::size_t w = 0; w < words_per_row; ++w) {
+    if ((row[w] & rule.must_one[w]) != rule.must_one[w]) {
+      return false;
+    }
+    if (((~row[w]) & rule.must_zero[w]) != rule.must_zero[w]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool rule_has_no_false_pos(const DecisionTreeRule& rule,
+                           const PackedFeatureMatrix& features,
+                           const std::vector<int>& labels,
+                           bool* has_positive_match) {
+  if (has_positive_match) {
+    *has_positive_match = false;
+  }
+  if (features.row_count == 0) {
+    return false;
+  }
+  const std::size_t words_per_row = features.words_per_row();
+  const PackedRule packed = build_packed_rule(rule, words_per_row);
+  bool positive_seen = false;
+  for (std::size_t i = 0; i < features.row_count; ++i) {
+    const FeatureWord* row = features.row_ptr(i);
+    if (!packed_rule_matches_row(packed, row, words_per_row)) {
+      continue;
+    }
+    if (labels[i] == 0) {
+      return false;
+    }
+    positive_seen = true;
+  }
+  if (has_positive_match) {
+    *has_positive_match = positive_seen;
+  }
+  return positive_seen;
+}
+
+bool try_merge_opposite_literal(const DecisionTreeRule& a,
+                                const DecisionTreeRule& b,
+                                DecisionTreeRule* merged) {
+  if (!merged) {
+    return false;
+  }
+  if (a.terms.size() != b.terms.size() || a.terms.empty()) {
+    return false;
+  }
+  std::size_t i = 0;
+  std::size_t j = 0;
+  std::size_t diff = 0;
+  merged->terms.clear();
+  while (i < a.terms.size() && j < b.terms.size()) {
+    const auto& ta = a.terms[i];
+    const auto& tb = b.terms[j];
+    if (ta.first != tb.first) {
+      return false;
+    }
+    if (ta.second == tb.second) {
+      merged->terms.push_back(ta);
+    } else {
+      diff += 1;
+      if (diff > 1) {
+        return false;
+      }
+    }
+    ++i;
+    ++j;
+  }
+  if (diff != 1) {
+    return false;
+  }
+  return true;
+}
+
+void minimize_rules_with_data(std::vector<DecisionTreeRule>* rules,
+                              const PackedFeatureMatrix& features,
+                              const std::vector<int>& labels) {
+  if (!rules || rules->empty()) {
+    return;
+  }
+  if (features.row_count == 0 || features.row_count != labels.size()) {
+    return;
+  }
+
+  for (auto& rule : *rules) {
+    std::sort(rule.terms.begin(), rule.terms.end());
+  }
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto& rule : *rules) {
+      bool rule_changed = true;
+      while (rule_changed && !rule.terms.empty()) {
+        rule_changed = false;
+        for (std::size_t t = 0; t < rule.terms.size(); ++t) {
+          DecisionTreeRule candidate = rule;
+          candidate.terms.erase(candidate.terms.begin() + static_cast<long>(t));
+          bool has_pos = false;
+          if (rule_has_no_false_pos(candidate, features, labels, &has_pos) &&
+              has_pos) {
+            rule = std::move(candidate);
+            rule_changed = true;
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+
+    for (std::size_t i = 0; i < rules->size(); ++i) {
+      for (std::size_t j = i + 1; j < rules->size(); ++j) {
+        DecisionTreeRule merged;
+        if (!try_merge_opposite_literal((*rules)[i], (*rules)[j], &merged)) {
+          continue;
+        }
+        bool has_pos = false;
+        if (rule_has_no_false_pos(merged, features, labels, &has_pos) &&
+            has_pos) {
+          (*rules)[i] = std::move(merged);
+          rules->erase(rules->begin() + static_cast<long>(j));
+          changed = true;
+          break;
+        }
+      }
+      if (changed) {
+        break;
+      }
+    }
+  }
 }
 
 std::size_t popcount_word(PackedWord value) {
@@ -538,6 +712,21 @@ bool run_mining_loop(const circuit& golden,
                      &result->train_false_neg,
                      error)) {
       return false;
+    }
+
+    const std::size_t rules_before = result->model.rules.size();
+    const std::size_t lits_before = count_rule_literals(result->model.rules);
+    simplify_rules(&result->model.rules);
+    minimize_rules_with_data(&result->model.rules, data->features, data->labels);
+    simplify_rules(&result->model.rules);
+    result->model.leaf_count = result->model.rules.size();
+    const std::size_t rules_after = result->model.rules.size();
+    const std::size_t lits_after = count_rule_literals(result->model.rules);
+    if (rules_before != rules_after || lits_before != lits_after) {
+      std::cout << "rule_minimize " << rules_before
+                << " -> " << rules_after
+                << " literals " << lits_before
+                << " -> " << lits_after << "\n";
     }
 
     const std::size_t add_cap = (round + 1 < total_rounds) ? max_add : 0;

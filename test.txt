@@ -1,0 +1,672 @@
+as6325400@lab2315080-System-Product-Name:~/hardwaretrojan_silence$ ./run_v0_sample.sh 
+=== c2670: c2670_trojan35.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c2670/c2670_trojan35_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 3290
+trigger_patterns 1645
+notrigger_patterns 1645
+trojan_rates 0.5
+train_pos 1645 train_neg 82250
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 1 leaf_count 1
+rule 1: 3857=1
+sat_refine_skipped 1
+training_set pos=1645 neg=82250
+hard_mined 0 rounds 1
+mis match 1645
+payload_forbidden_nodes 581
+payload_maxsat_round 1 sample 5 candidates 7 remaining 1645
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 1645 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 3870
+rule_factoring_rules 1 literals 1 -> 1 shared_nodes 0
+payload_fix_step 3870 time_ms 0 area 1200 -> 1201 level 36 -> 37 bypass 0
+payload_fix_selected 1 area_delta 1 level_delta 1
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c2670/c2670_trojan35_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c2670/c2670_trojan35_patched.bench
+=== c2670: c2670_trojan17.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c2670/c2670_trojan17_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 3526
+trigger_patterns 1763
+notrigger_patterns 1763
+trojan_rates 0.5
+train_pos 1763 train_neg 88150
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 1 leaf_count 1
+rule 1: 3858=1
+sat_refine_skipped 1
+training_set pos=1763 neg=88150
+hard_mined 0 rounds 1
+mis match 1763
+payload_forbidden_nodes 582
+payload_maxsat_round 1 sample 5 candidates 7 remaining 1763
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 1763 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 3870
+rule_factoring_rules 1 literals 1 -> 1 shared_nodes 0
+payload_fix_step 3870 time_ms 0 area 1201 -> 1202 level 37 -> 38 bypass 0
+payload_fix_selected 1 area_delta 1 level_delta 1
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c2670/c2670_trojan17_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c2670/c2670_trojan17_patched.bench
+=== c2670: c2670_trojan90.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c2670/c2670_trojan90_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 13432
+trigger_patterns 6716
+notrigger_patterns 6716
+trojan_rates 0.5
+train_pos 6716 train_neg 335800
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 1 leaf_count 1
+rule 1: 3875=1
+sat_refine_skipped 1
+training_set pos=6716 neg=335800
+hard_mined 0 rounds 1
+mis match 6716
+payload_forbidden_nodes 556
+payload_maxsat_round 1 sample 5 candidates 1 remaining 6716
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 6716 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 3875
+rule_factoring_rules 1 literals 1 -> 1 shared_nodes 0
+payload_fix_step 3875 time_ms 0 area 1201 -> 1202 level 33 -> 34 bypass 0
+payload_fix_selected 1 area_delta 1 level_delta 1
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c2670/c2670_trojan90_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c2670/c2670_trojan90_patched.bench
+=== c2670: c2670_trojan85.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c2670/c2670_trojan85_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 3422
+trigger_patterns 1711
+notrigger_patterns 1711
+trojan_rates 0.5
+train_pos 1711 train_neg 85550
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 1 leaf_count 1
+rule 1: 3875=1
+sat_refine_skipped 1
+training_set pos=1711 neg=85550
+hard_mined 0 rounds 1
+mis match 1711
+payload_forbidden_nodes 552
+payload_maxsat_round 1 sample 5 candidates 1 remaining 1711
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 1711 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 3875
+rule_factoring_rules 1 literals 1 -> 1 shared_nodes 0
+payload_fix_step 3875 time_ms 0 area 1198 -> 1199 level 33 -> 34 bypass 0
+payload_fix_selected 1 area_delta 1 level_delta 1
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c2670/c2670_trojan85_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c2670/c2670_trojan85_patched.bench
+=== c2670: c2670_trojan79.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c2670/c2670_trojan79_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 32466
+trigger_patterns 16233
+notrigger_patterns 16233
+trojan_rates 0.5
+train_pos 16233 train_neg 811650
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 1 leaf_count 1
+rule 1: 3875=1
+sat_refine_skipped 1
+training_set pos=16233 neg=811650
+hard_mined 0 rounds 1
+mis match 16233
+payload_forbidden_nodes 567
+payload_maxsat_round 1 sample 5 candidates 1 remaining 16233
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 16233 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 3875
+rule_factoring_rules 1 literals 1 -> 1 shared_nodes 0
+payload_fix_step 3875 time_ms 0 area 1198 -> 1199 level 33 -> 34 bypass 0
+payload_fix_selected 1 area_delta 1 level_delta 1
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c2670/c2670_trojan79_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c2670/c2670_trojan79_patched.bench
+=== c3540: c3540_trojan56.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c3540/c3540_trojan56_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 8798
+trigger_patterns 4399
+notrigger_patterns 4399
+trojan_rates 0.5
+train_pos 4399 train_neg 219950
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 1 leaf_count 1
+rule 1: new_n1704=1
+sat_refine_skipped 1
+training_set pos=4399 neg=219950
+hard_mined 0 rounds 1
+mis match 4399
+payload_forbidden_nodes 758
+payload_maxsat_round 1 sample 5 candidates 794 remaining 4399
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 4399 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n1710
+rule_factoring_rules 1 literals 1 -> 1 shared_nodes 0
+payload_fix_step new_n1710 time_ms 0 area 1645 -> 1646 level 63 -> 63 bypass 0
+payload_fix_selected 1 area_delta 1 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c3540/c3540_trojan56_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c3540/c3540_trojan56_patched.bench
+=== c3540: c3540_trojan35.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c3540/c3540_trojan35_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 933366
+trigger_patterns 466683
+notrigger_patterns 466683
+trojan_rates 0.5
+train_pos 466683 train_neg 23334150
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 2 leaf_count 1
+rule 1: 5183=1 & r1=1
+sat_refine_skipped 1
+training_set pos=466683 neg=23334150
+hard_mined 0 rounds 1
+mis match 466683
+payload_forbidden_nodes 767
+payload_maxsat_round 1 sample 5 candidates 718 remaining 466683
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 466683 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 5258
+rule_factoring_rules 1 literals 2 -> 2 shared_nodes 0
+payload_fix_step 5258 time_ms 0 area 1676 -> 1678 level 49 -> 49 bypass 0
+payload_fix_selected 1 area_delta 2 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c3540/c3540_trojan35_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c3540/c3540_trojan35_patched.bench
+=== c3540: c3540_trojan54.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c3540/c3540_trojan54_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 1067486
+trigger_patterns 533743
+notrigger_patterns 533743
+trojan_rates 0.5
+train_pos 533743 train_neg 26687150
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 1 leaf_count 1
+rule 1: new_n1700=1
+sat_refine_skipped 1
+training_set pos=533743 neg=26687150
+hard_mined 0 rounds 1
+mis match 533743
+payload_forbidden_nodes 451
+payload_maxsat_round 1 sample 5 candidates 1091 remaining 533743
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 533743 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n1717
+rule_factoring_rules 1 literals 1 -> 1 shared_nodes 0
+payload_fix_step new_n1717 time_ms 0 area 1646 -> 1647 level 62 -> 63 bypass 0
+payload_fix_selected 1 area_delta 1 level_delta 1
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c3540/c3540_trojan54_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c3540/c3540_trojan54_patched.bench
+=== c3540: c3540_trojan0.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c3540/c3540_trojan0_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 868078
+trigger_patterns 434039
+notrigger_patterns 434039
+trojan_rates 0.5
+train_pos 434039 train_neg 21701950
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 2 leaf_count 1
+rule 1: 5183=1 & r0=1
+sat_refine_skipped 1
+training_set pos=434039 neg=21701950
+hard_mined 0 rounds 1
+mis match 434039
+payload_forbidden_nodes 762
+payload_maxsat_round 1 sample 5 candidates 721 remaining 434039
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 434039 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 5205
+rule_factoring_rules 1 literals 2 -> 2 shared_nodes 0
+payload_fix_step 5205 time_ms 0 area 1675 -> 1677 level 49 -> 49 bypass 0
+payload_fix_selected 1 area_delta 2 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c3540/c3540_trojan0_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c3540/c3540_trojan0_patched.bench
+=== c3540: c3540_trojan82.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c3540/c3540_trojan82_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 245166
+trigger_patterns 122583
+notrigger_patterns 122583
+trojan_rates 0.5
+train_pos 122583 train_neg 6129150
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 1 leaf_count 1
+rule 1: new_n1704=1
+sat_refine_skipped 1
+training_set pos=122583 neg=6129150
+hard_mined 0 rounds 1
+mis match 122583
+payload_forbidden_nodes 662
+payload_maxsat_round 1 sample 5 candidates 884 remaining 122583
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 122583 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n1715
+rule_factoring_rules 1 literals 1 -> 1 shared_nodes 0
+payload_fix_step new_n1715 time_ms 0 area 1645 -> 1646 level 63 -> 63 bypass 0
+payload_fix_selected 1 area_delta 1 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c3540/c3540_trojan82_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c3540/c3540_trojan82_patched.bench
+=== c5315: c5315_trojan11.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c5315/c5315_trojan11_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 506720
+trigger_patterns 253360
+notrigger_patterns 253360
+trojan_rates 0.5
+train_pos 253360 train_neg 12668000
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 5 leaf_count 1
+rule 1: 1271=1 & 1842=0 & 2939=0 & 4956=1 & r0=1
+sat_refine_skipped 1
+training_set pos=253360 neg=12668000
+hard_mined 0 rounds 1
+mis match 253360
+payload_forbidden_nodes 191
+payload_maxsat_round 1 sample 5 candidates 936 remaining 253360
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 253360 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 7003
+rule_factoring_rules 1 literals 5 -> 5 shared_nodes 0
+payload_fix_step 7003 time_ms 0 area 2313 -> 2320 level 49 -> 49 bypass 0
+payload_fix_selected 1 area_delta 7 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c5315/c5315_trojan11_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c5315/c5315_trojan11_patched.bench
+=== c5315: c5315_trojan58.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c5315/c5315_trojan58_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 1863298
+trigger_patterns 931649
+notrigger_patterns 931649
+trojan_rates 0.5
+train_pos 931649 train_neg 46582450
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 2 leaf_count 1
+rule 1: new_n1922=1 & new_n1937=1
+sat_refine_skipped 1
+training_set pos=931649 neg=46582450
+hard_mined 0 rounds 1
+mis match 931649
+payload_forbidden_nodes 504
+payload_maxsat_round 1 sample 5 candidates 14 remaining 931649
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 931649 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n1930
+rule_factoring_rules 1 literals 2 -> 2 shared_nodes 0
+payload_fix_step new_n1930 time_ms 0 area 2561 -> 2563 level 55 -> 55 bypass 0
+payload_fix_selected 1 area_delta 2 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c5315/c5315_trojan58_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c5315/c5315_trojan58_patched.bench
+=== c5315: c5315_trojan27.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c5315/c5315_trojan27_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 2649804
+trigger_patterns 1324902
+notrigger_patterns 1324902
+trojan_rates 0.5
+train_pos 1324902 train_neg 66245100
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 5 leaf_count 1
+rule 1: 1271=1 & 1721=0 & 1842=0 & 2939=0 & r0=1
+sat_refine_skipped 1
+training_set pos=1324902 neg=66245100
+hard_mined 0 rounds 1
+mis match 1324902
+payload_forbidden_nodes 226
+payload_maxsat_round 1 sample 5 candidates 894 remaining 1324902
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 1217886 rule_unmatched 0 remaining 107016
+payload_maxsat_round 2 sample 10 candidates 894 remaining 107016
+payload_maxsat_round 2 flips 1 new 1
+payload_maxsat_round 2 fixed 107016 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 6872
+rule_factoring_rules 1 literals 5 -> 5 shared_nodes 0
+payload_fix_step 6872 time_ms 0 area 2313 -> 2321 level 49 -> 49 bypass 0
+Payload fix verification failed: groundtruth mismatch pattern 7
+payload_fix_apply skipped: groundtruth_verify_failed
+[warn] patched bench missing: trojaned_bench/V0_singleTrigger_singlePayload/c5315/c5315_trojan27_patched.bench
+=== c5315: c5315_trojan13.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c5315/c5315_trojan13_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 498140
+trigger_patterns 249070
+notrigger_patterns 249070
+trojan_rates 0.5
+train_pos 249070 train_neg 12453500
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 5 leaf_count 1
+rule 1: 1271=1 & 1839=0 & 2938=0 & 5165=1 & r0=1
+sat_refine_skipped 1
+training_set pos=249070 neg=12453500
+hard_mined 0 rounds 1
+mis match 249070
+payload_forbidden_nodes 201
+payload_maxsat_round 1 sample 5 candidates 955 remaining 249070
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 222550 rule_unmatched 0 remaining 26520
+payload_maxsat_round 2 sample 10 candidates 955 remaining 26520
+payload_maxsat_round 2 flips 1 new 1
+payload_maxsat_round 2 fixed 26520 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 7003
+rule_factoring_rules 1 literals 5 -> 5 shared_nodes 0
+payload_fix_step 7003 time_ms 0 area 2313 -> 2320 level 49 -> 49 bypass 0
+payload_fix_selected 1 area_delta 7 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c5315/c5315_trojan13_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c5315/c5315_trojan13_patched.bench
+=== c5315: c5315_trojan56.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c5315/c5315_trojan56_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 1178172
+trigger_patterns 589086
+notrigger_patterns 589086
+trojan_rates 0.5
+train_pos 589086 train_neg 29454300
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 4 leaf_count 1
+rule 1: new_n423=1 & new_n2655=1 & new_n2661=1 & new_n2666=1
+sat_refine_skipped 1
+training_set pos=589086 neg=29454300
+hard_mined 0 rounds 1
+mis match 589086
+payload_forbidden_nodes 221
+payload_maxsat_round 1 sample 5 candidates 874 remaining 589086
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 538037 rule_unmatched 0 remaining 51049
+payload_maxsat_round 2 sample 10 candidates 874 remaining 51049
+payload_maxsat_round 2 flips 1 new 1
+payload_maxsat_round 2 fixed 51049 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n2716
+rule_factoring_rules 1 literals 4 -> 4 shared_nodes 0
+payload_fix_step new_n2716 time_ms 0 area 2561 -> 2565 level 63 -> 63 bypass 0
+payload_fix_selected 1 area_delta 4 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c5315/c5315_trojan56_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c5315/c5315_trojan56_patched.bench
+[skip] missing groundtruth: groundtruth/V0_singleTrigger_singlePayload/c6288/c6288_trojan83_error_patterns.json
+[skip] missing groundtruth: groundtruth/V0_singleTrigger_singlePayload/c6288/c6288_trojan36_error_patterns.json
+[skip] missing groundtruth: groundtruth/V0_singleTrigger_singlePayload/c6288/c6288_trojan56_error_patterns.json
+[skip] missing groundtruth: groundtruth/V0_singleTrigger_singlePayload/c6288/c6288_trojan46_error_patterns.json
+[skip] missing groundtruth: groundtruth/V0_singleTrigger_singlePayload/c6288/c6288_trojan16_error_patterns.json
+=== c7552: c7552_trojan44.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c7552/c7552_trojan44_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+Groundtruth error: No pattern_bits found in groundtruth log
+[fail] main failed for trojaned_bench/V0_singleTrigger_singlePayload/c7552/c7552_trojan44.bench
+=== c7552: c7552_trojan79.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c7552/c7552_trojan79_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 363038
+trigger_patterns 181519
+notrigger_patterns 181519
+trojan_rates 0.5
+train_pos 181519 train_neg 9075950
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 2 leaf_count 1
+rule 1: new_n2042=1 & new_n2285=1
+sat_refine_skipped 1
+training_set pos=181519 neg=9075950
+hard_mined 0 rounds 1
+mis match 181519
+payload_forbidden_nodes 544
+payload_maxsat_round 1 sample 5 candidates 135 remaining 181519
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 181519 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n2066
+rule_factoring_rules 1 literals 2 -> 2 shared_nodes 0
+payload_fix_step new_n2066 time_ms 0 area 3085 -> 3087 level 49 -> 49 bypass 0
+payload_fix_selected 1 area_delta 2 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c7552/c7552_trojan79_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c7552/c7552_trojan79_patched.bench
+=== c7552: c7552_trojan77.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c7552/c7552_trojan77_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 7758
+trigger_patterns 3879
+notrigger_patterns 3879
+trojan_rates 0.5
+train_pos 3879 train_neg 193950
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 1 leaf_count 1
+rule 1: new_n2039=1
+sat_refine_skipped 1
+training_set pos=3879 neg=193950
+hard_mined 0 rounds 1
+mis match 3879
+payload_forbidden_nodes 239
+payload_maxsat_round 1 sample 5 candidates 584 remaining 3879
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 3879 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n2055
+rule_factoring_rules 1 literals 1 -> 1 shared_nodes 0
+payload_fix_step new_n2055 time_ms 0 area 3093 -> 3094 level 48 -> 48 bypass 0
+payload_fix_selected 1 area_delta 1 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c7552/c7552_trojan77_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c7552/c7552_trojan77_patched.bench
+=== c7552: c7552_trojan63.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c7552/c7552_trojan63_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 9518
+trigger_patterns 4759
+notrigger_patterns 4759
+trojan_rates 0.5
+train_pos 4759 train_neg 237950
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 2 leaf_count 1
+rule 1: new_n2062=1 & new_n2276=1
+sat_refine_skipped 1
+training_set pos=4759 neg=237950
+hard_mined 0 rounds 1
+mis match 4759
+payload_forbidden_nodes 492
+payload_maxsat_round 1 sample 5 candidates 222 remaining 4759
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 4759 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n2280
+rule_factoring_rules 1 literals 2 -> 2 shared_nodes 0
+payload_fix_step new_n2280 time_ms 0 area 3088 -> 3090 level 49 -> 49 bypass 0
+payload_fix_selected 1 area_delta 2 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c7552/c7552_trojan63_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c7552/c7552_trojan63_patched.bench
+=== c7552: c7552_trojan0.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c7552/c7552_trojan0_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 300510
+trigger_patterns 150255
+notrigger_patterns 150255
+trojan_rates 0.5
+train_pos 150255 train_neg 7512750
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 5 leaf_count 1
+rule 1: 2396=0 & 10155=1 & 10161=1 & 10307=1 & r0=1
+sat_refine_skipped 1
+training_set pos=150255 neg=7512750
+hard_mined 0 rounds 1
+mis match 150255
+payload_forbidden_nodes 473
+payload_maxsat_round 1 sample 5 candidates 108 remaining 150255
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 150255 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 9517
+rule_factoring_rules 1 literals 5 -> 5 shared_nodes 0
+payload_fix_step 9517 time_ms 0 area 3518 -> 3524 level 43 -> 43 bypass 0
+payload_fix_selected 1 area_delta 6 level_delta 0
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c7552/c7552_trojan0_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c7552/c7552_trojan0_patched.bench
+=== c880: c880_trojan28.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c880/c880_trojan28_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 21500
+trigger_patterns 10750
+notrigger_patterns 10750
+trojan_rates 0.5
+train_pos 10750 train_neg 537500
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 3 leaf_count 1
+rule 1: 332=0 & 796=0 & r1=1
+sat_refine_skipped 1
+training_set pos=10750 neg=537500
+hard_mined 0 rounds 1
+mis match 10750
+payload_forbidden_nodes 102
+payload_maxsat_round 1 sample 5 candidates 58 remaining 10750
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 10750 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 872
+rule_factoring_rules 1 literals 3 -> 3 shared_nodes 0
+payload_fix_step 872 time_ms 0 area 390 -> 395 level 24 -> 25 bypass 0
+payload_fix_selected 1 area_delta 5 level_delta 1
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c880/c880_trojan28_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c880/c880_trojan28_patched.bench
+=== c880: c880_trojan66.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c880/c880_trojan66_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 189254
+trigger_patterns 94627
+notrigger_patterns 94627
+trojan_rates 0.5
+train_pos 94627 train_neg 4731350
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 5 leaf_count 1
+rule 1: new_n103=1 & new_n473=1 & new_n590=1 & new_n621=1 & 219=1
+sat_refine_skipped 1
+training_set pos=94627 neg=4731350
+hard_mined 0 rounds 1
+mis match 94627
+payload_forbidden_nodes 179
+payload_maxsat_round 1 sample 5 candidates 57 remaining 94627
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 94627 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n597
+rule_factoring_rules 1 literals 5 -> 5 shared_nodes 0
+payload_fix_step new_n597 time_ms 0 area 566 -> 571 level 38 -> 40 bypass 0
+payload_fix_selected 1 area_delta 5 level_delta 2
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c880/c880_trojan66_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c880/c880_trojan66_patched.bench
+=== c880: c880_trojan79.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c880/c880_trojan79_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 49600
+trigger_patterns 24800
+notrigger_patterns 24800
+trojan_rates 0.5
+train_pos 24800 train_neg 1240000
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 2 leaf_count 1
+rule 1: new_n593=1 & new_n624=1
+sat_refine_skipped 1
+training_set pos=24800 neg=1240000
+hard_mined 0 rounds 1
+mis match 24800
+payload_forbidden_nodes 100
+payload_maxsat_round 1 sample 5 candidates 126 remaining 24800
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 24800 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node 879
+rule_factoring_rules 1 literals 2 -> 2 shared_nodes 0
+payload_fix_step 879 time_ms 0 area 569 -> 571 level 37 -> 38 bypass 0
+payload_fix_selected 1 area_delta 2 level_delta 1
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c880/c880_trojan79_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c880/c880_trojan79_patched.bench
+=== c880: c880_trojan97.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c880/c880_trojan97_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 100130
+trigger_patterns 50065
+notrigger_patterns 50065
+trojan_rates 0.5
+train_pos 50065 train_neg 2503250
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 4 leaf_count 1
+rule 1: new_n591=1 & new_n622=1 & new_n629=1 & new_n635=1
+sat_refine_skipped 1
+training_set pos=50065 neg=2503250
+hard_mined 0 rounds 1
+mis match 50065
+payload_forbidden_nodes 221
+payload_maxsat_round 1 sample 5 candidates 27 remaining 50065
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 50065 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n599
+rule_factoring_rules 1 literals 4 -> 4 shared_nodes 0
+payload_fix_step new_n599 time_ms 0 area 567 -> 571 level 38 -> 46 bypass 0
+payload_fix_selected 1 area_delta 4 level_delta 8
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c880/c880_trojan97_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c880/c880_trojan97_patched.bench
+=== c880: c880_trojan59.bench
+groundtruth groundtruth/V0_singleTrigger_singlePayload/c880/c880_trojan59_error_patterns.json
+patterns 1000000000 depth 10 eval 100000 neg_ratio 50 mine_rounds 15 mine_max 0
+p1_trigger 0.8 p1_notrigger 0.2 include_pi 1 no_filter 1 force_split 0 strict_retry 1
+pattern_total 856902
+trigger_patterns 428451
+notrigger_patterns 428451
+trojan_rates 0.5
+train_pos 428451 train_neg 21422550
+eval_normal 0 eval_false_pos 0
+decision_tree_rules 1 depth_used 5 leaf_count 1
+rule 1: new_n103=1 & new_n513=0 & new_n591=1 & new_n622=1 & 219=1
+sat_refine_skipped 1
+training_set pos=428451 neg=21422550
+hard_mined 0 rounds 1
+mis match 428451
+payload_forbidden_nodes 211
+payload_maxsat_round 1 sample 5 candidates 32 remaining 428451
+payload_maxsat_round 1 flips 1 new 1
+payload_maxsat_round 1 fixed 395007 rule_unmatched 0 remaining 33444
+payload_maxsat_round 2 sample 10 candidates 32 remaining 33444
+payload_maxsat_round 2 flips 1 new 1
+payload_maxsat_round 2 fixed 33444 rule_unmatched 0 remaining 0
+payload_fix_nodes 1
+payload_fix_node new_n608
+rule_factoring_rules 1 literals 5 -> 5 shared_nodes 0
+payload_fix_step new_n608 time_ms 0 area 567 -> 573 level 38 -> 39 bypass 0
+payload_fix_selected 1 area_delta 6 level_delta 1
+payload_fix_bench trojaned_bench/V0_singleTrigger_singlePayload/c880/c880_trojan59_patched.bench
+CEC: trojaned_bench/V0_singleTrigger_singlePayload/c880/c880_trojan59_patched.bench
