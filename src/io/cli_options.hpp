@@ -26,6 +26,7 @@ struct AppOptions {
   bool no_filter = false;
   bool force_split = false;
   bool strict_retry = true;
+  bool no_virtual = false;
 };
 
 ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::string* error); // Parse CLI args into AppOptions.

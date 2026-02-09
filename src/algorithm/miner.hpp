@@ -7,6 +7,7 @@
 
 #include "../core/circuit.hpp"
 #include "decision_tree.hpp"
+#include "virtual_node.hpp"
 
 struct MiningOptions {
   std::size_t max_depth = 10;
@@ -40,6 +41,11 @@ struct NegSampleTrace {
   std::vector<std::uint8_t> sizes;
 };
 
+// Train decision tree with hard-negative mining.
+// virtual_defs: optional virtual node definitions.  When provided, virtual
+// features are computed on-the-fly from simulation results (the circuit is
+// NOT modified).  Virtual features get feature indices starting at
+// len(candidate_gate_indices) + PIs.
 bool run_mining(const circuit& golden,
                 const circuit& trojan,
                 const std::vector<std::vector<int>>& trigger_patterns,
@@ -49,4 +55,5 @@ bool run_mining(const circuit& golden,
                 const std::vector<std::vector<int>>* extra_neg_patterns,
                 NegSampleTrace* neg_trace,
                 MiningResult* result,
-                std::string* error); // Train decision tree with hard-negative mining.
+                std::string* error,
+                const std::vector<VirtualNodeDef>* virtual_defs = nullptr);

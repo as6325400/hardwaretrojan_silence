@@ -7,6 +7,7 @@
 
 #include "../core/packed_circuit.hpp"
 #include "rule_patch.hpp"
+#include "virtual_node.hpp"
 
 namespace {
 
@@ -339,10 +340,13 @@ bool build_training_data(const circuit& golden,
                          const std::vector<std::vector<int>>* extra_neg_patterns,
                          std::size_t neg_ratio,
                          TrainingData* data,
-                         NegSampleTrace* neg_trace) {
+                         NegSampleTrace* neg_trace,
+                         const std::vector<VirtualNodeDef>* virtual_defs = nullptr) {
+  const std::size_t vn_count = virtual_defs ? virtual_defs->size() : 0;
+  const std::size_t total_features = feature_nodes.size() + vn_count;
   data->features.data.clear();
   data->features.row_count = 0;
-  data->features.feature_count = feature_nodes.size();
+  data->features.feature_count = total_features;
   data->labels.clear();
   data->pos_count = 0;
   data->neg_count = 0;
@@ -373,7 +377,7 @@ bool build_training_data(const circuit& golden,
       words_per_row);
   data->labels.reserve(estimated_pos + estimated_extra_neg + estimated_target_neg);
   const FeatureIndexMap feature_map =
-      build_feature_index_map(feature_nodes.size());
+      build_feature_index_map(total_features);
 
   std::size_t trigger_offset = 0;
   while (trigger_offset < trigger_patterns.size()) {
@@ -395,8 +399,13 @@ bool build_training_data(const circuit& golden,
     }
 
     if (packed_ok) {
-      const std::vector<PackedWord> feature_bits =
+      std::vector<PackedWord> feature_bits =
           gather_feature_bits(trojan_packed, feature_nodes);
+      if (virtual_defs && !virtual_defs->empty()) {
+        const auto vn_bits = compute_virtual_feature_bits(
+            trojan_packed, *virtual_defs, trojan_packed.pattern_mask());
+        feature_bits.insert(feature_bits.end(), vn_bits.begin(), vn_bits.end());
+      }
       append_feature_rows_from_bits_range(feature_bits,
                                           feature_map,
                                           block_size,
@@ -414,6 +423,20 @@ bool build_training_data(const circuit& golden,
           continue;
         }
         pack_feature_row(trojan_train, feature_nodes, words_per_row, &row_bits);
+        if (virtual_defs) {
+          for (std::size_t vi = 0; vi < virtual_defs->size(); ++vi) {
+            const int val = compute_virtual_feature_value(
+                trojan_train, (*virtual_defs)[vi]);
+            if (val) {
+              const std::size_t fi = feature_nodes.size() + vi;
+              const std::size_t word_idx = fi / PackedFeatureMatrix::kWordBits;
+              const std::size_t bit_idx = fi % PackedFeatureMatrix::kWordBits;
+              if (word_idx < row_bits.size()) {
+                row_bits[word_idx] |= (FeatureWord(1) << bit_idx);
+              }
+            }
+          }
+        }
         append_feature_row(row_bits, &data->features);
         data->labels.push_back(1);
         data->pos_count += 1;
@@ -448,8 +471,13 @@ bool build_training_data(const circuit& golden,
       }
 
       if (packed_ok) {
-        const std::vector<PackedWord> feature_bits =
+        std::vector<PackedWord> feature_bits =
             gather_feature_bits(trojan_packed, feature_nodes);
+        if (virtual_defs && !virtual_defs->empty()) {
+          const auto vn_bits = compute_virtual_feature_bits(
+              trojan_packed, *virtual_defs, trojan_packed.pattern_mask());
+          feature_bits.insert(feature_bits.end(), vn_bits.begin(), vn_bits.end());
+        }
         append_feature_rows_from_bits_range(feature_bits,
                                             feature_map,
                                             block_size,
@@ -466,6 +494,20 @@ bool build_training_data(const circuit& golden,
             continue;
           }
           pack_feature_row(trojan_train, feature_nodes, words_per_row, &row_bits);
+          if (virtual_defs) {
+            for (std::size_t vi = 0; vi < virtual_defs->size(); ++vi) {
+              const int val = compute_virtual_feature_value(
+                  trojan_train, (*virtual_defs)[vi]);
+              if (val) {
+                const std::size_t fi = feature_nodes.size() + vi;
+                const std::size_t word_idx = fi / PackedFeatureMatrix::kWordBits;
+                const std::size_t bit_idx = fi % PackedFeatureMatrix::kWordBits;
+                if (word_idx < row_bits.size()) {
+                  row_bits[word_idx] |= (FeatureWord(1) << bit_idx);
+                }
+              }
+            }
+          }
           append_feature_row(row_bits, &data->features);
           data->labels.push_back(0);
           data->neg_count += 1;
@@ -509,8 +551,13 @@ bool build_training_data(const circuit& golden,
         std::cerr << "Training negative replay error: " << e.what() << "\n";
         continue;
       }
-      const std::vector<PackedWord> feature_bits =
+      std::vector<PackedWord> feature_bits =
           gather_feature_bits(trojan_packed, feature_nodes);
+      if (virtual_defs && !virtual_defs->empty()) {
+        const auto vn_bits = compute_virtual_feature_bits(
+            trojan_packed, *virtual_defs, trojan_packed.pattern_mask());
+        feature_bits.insert(feature_bits.end(), vn_bits.begin(), vn_bits.end());
+      }
       selected.clear();
       selected.reserve(popcount_word(selected_mask));
       while (selected_mask) {
@@ -585,8 +632,13 @@ bool build_training_data(const circuit& golden,
           notrigger_mask &= (notrigger_mask - 1);
         }
         if (!selected.empty()) {
-          const std::vector<PackedWord> feature_bits =
+          std::vector<PackedWord> feature_bits =
               gather_feature_bits(trojan_packed, feature_nodes);
+          if (virtual_defs && !virtual_defs->empty()) {
+            const auto vn_bits = compute_virtual_feature_bits(
+                trojan_packed, *virtual_defs, trojan_packed.pattern_mask());
+            feature_bits.insert(feature_bits.end(), vn_bits.begin(), vn_bits.end());
+          }
           append_feature_rows_from_bits_indices(feature_bits,
                                                 feature_map,
                                                 selected,
@@ -656,7 +708,10 @@ EvalResult eval_and_mine(const circuit& golden,
                          std::size_t eval_limit,
                          std::size_t max_add,
                          TrainingData* data,
-                         std::uint32_t seed) {
+                         std::uint32_t seed,
+                         const std::vector<VirtualNodeDef>* virtual_defs = nullptr) {
+  const std::size_t total_features = feature_nodes.size() +
+      (virtual_defs ? virtual_defs->size() : 0);
   EvalResult result;
   std::size_t attempts = 0;
   const std::size_t max_attempts = eval_limit * 20 + 1000;
@@ -667,9 +722,9 @@ EvalResult eval_and_mine(const circuit& golden,
   packed_circuit golden_packed(golden_eval);
   packed_circuit trojan_packed(trojan_eval);
   const FeatureIndexMap feature_map =
-      build_feature_index_map(feature_nodes.size());
+      build_feature_index_map(total_features);
   const std::size_t words_per_row =
-      (feature_nodes.size() + PackedFeatureMatrix::kWordBits - 1) /
+      (total_features + PackedFeatureMatrix::kWordBits - 1) /
       PackedFeatureMatrix::kWordBits;
   std::vector<FeatureWord> row_bits(words_per_row, 0);
 
@@ -707,13 +762,18 @@ EvalResult eval_and_mine(const circuit& golden,
     diff_mask &= mask;
     PackedWord notrigger_mask = mask & ~diff_mask;
     if (notrigger_mask != 0) {
-      const std::vector<PackedWord> feature_bits =
+      std::vector<PackedWord> feature_bits =
           gather_feature_bits(trojan_packed, feature_nodes);
+      if (virtual_defs && !virtual_defs->empty()) {
+        const auto vn_bits = compute_virtual_feature_bits(
+            trojan_packed, *virtual_defs, trojan_packed.pattern_mask());
+        feature_bits.insert(feature_bits.end(), vn_bits.begin(), vn_bits.end());
+      }
       while (notrigger_mask && result.checked < eval_limit) {
         const std::size_t bit = ctz_word(notrigger_mask);
         std::fill(row_bits.begin(), row_bits.end(), 0);
         fill_feature_row_from_bits(feature_bits, feature_map, bit, row_bits.data());
-        if (eval_rules_packed(model.rules, row_bits.data(), feature_nodes.size())) {
+        if (eval_rules_packed(model.rules, row_bits.data(), total_features)) {
           result.false_pos += 1;
           if (data && result.added < max_add) {
             append_feature_row(row_bits, &data->features);
@@ -733,7 +793,8 @@ EvalResult eval_and_mine(const circuit& golden,
 
 void print_rules(const circuit& trojan,
                  const std::vector<int>& feature_nodes,
-                 const DecisionTreeModel& model) {
+                 const DecisionTreeModel& model,
+                 const std::vector<VirtualNodeDef>* virtual_defs = nullptr) {
   std::cout << "decision_tree_rules " << model.rules.size()
             << " depth_used " << model.max_depth_used
             << " leaf_count " << model.leaf_count << '\n';
@@ -752,6 +813,9 @@ void print_rules(const circuit& trojan,
       const int value = rule.terms[t].second;
       if (feature_idx < feature_nodes.size()) {
         std::cout << trojan.node_name(feature_nodes[feature_idx]) << '=' << value;
+      } else if (virtual_defs &&
+                 (feature_idx - feature_nodes.size()) < virtual_defs->size()) {
+        std::cout << "vf_" << (feature_idx - feature_nodes.size()) << '=' << value;
       } else {
         std::cout << "f" << feature_idx << '=' << value;
       }
@@ -770,7 +834,8 @@ bool run_mining_loop(const circuit& golden,
                      std::size_t eval_count,
                      double target_rate,
                      MiningResult* result,
-                     std::string* error) {
+                     std::string* error,
+                     const std::vector<VirtualNodeDef>* virtual_defs = nullptr) {
   const std::size_t total_rounds = std::max<std::size_t>(1, rounds);
   result->feature_nodes = feature_nodes;
   result->hard_added = 0;
@@ -811,7 +876,8 @@ bool run_mining_loop(const circuit& golden,
                                     eval_count,
                                     add_cap,
                                     data,
-                                    static_cast<std::uint32_t>(2027 + round));
+                                    static_cast<std::uint32_t>(2027 + round),
+                                    virtual_defs);
     result->eval_checked = eval.checked;
     result->eval_false_pos = eval.false_pos;
     result->hard_added += eval.added;
@@ -838,7 +904,7 @@ bool run_mining_loop(const circuit& golden,
       std::cout << " rate " << eval_rate;
     }
     std::cout << '\n';
-    print_rules(trojan, feature_nodes, result->model);
+    print_rules(trojan, feature_nodes, result->model, virtual_defs);
 
     if (result->train_false_pos == 0 && eval.checked > 0 &&
         (eval_rate <= target_rate || target_rate == 0.0)) {
@@ -863,7 +929,8 @@ bool run_mining(const circuit& golden,
                 const std::vector<std::vector<int>>* extra_neg_patterns,
                 NegSampleTrace* neg_trace,
                 MiningResult* result,
-                std::string* error) {
+                std::string* error,
+                const std::vector<VirtualNodeDef>* virtual_defs) {
   if (error) {
     error->clear();
   }
@@ -921,7 +988,8 @@ bool run_mining(const circuit& golden,
                            extra_neg_patterns,
                            options.neg_ratio,
                            &data,
-                           neg_trace)) {
+                           neg_trace,
+                           virtual_defs)) {
     if (error) {
       *error = "Failed to build training data";
     }
@@ -938,7 +1006,8 @@ bool run_mining(const circuit& golden,
                        options.eval_count,
                        target_rate,
                        result,
-                       error)) {
+                       error,
+                       virtual_defs)) {
     if (error && error->empty()) {
       *error = "Failed to run mining loop";
     }
@@ -959,7 +1028,8 @@ bool run_mining(const circuit& golden,
                             extra_neg_patterns,
                             options.neg_ratio,
                             &strict_data,
-                            neg_trace) &&
+                            neg_trace,
+                            virtual_defs) &&
         run_mining_loop(golden,
                         trojan,
                         strict_features,
@@ -970,7 +1040,8 @@ bool run_mining(const circuit& golden,
                         options.eval_count,
                         target_rate,
                         result,
-                        error)) {
+                        error,
+                        virtual_defs)) {
       std::cout << "strict_features " << strict_features.size()
                 << " strict_depth " << strict_options.max_depth << "\n";
     } else {

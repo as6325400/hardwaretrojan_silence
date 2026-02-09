@@ -18,6 +18,7 @@
 #include "algorithm/rule_patch.hpp"
 #include "algorithm/sat_refine.hpp"
 #include "algorithm/trigger_fixer.hpp"
+#include "algorithm/virtual_node.hpp"
 #include "core/circuit_compare.hpp"
 #include "core/packed_circuit.hpp"
 #include "io/bench_parser.hpp"
@@ -415,6 +416,270 @@ int main(int argc, char** argv) {
                   candidate_indices.end(),
                   merged_match_idx) == candidate_indices.end()) {
       candidate_indices.push_back(merged_match_idx);
+    }
+
+    // --- Virtual node feature preprocessing (iterative multi-pass) ---
+    // Virtual features are computed on-the-fly from simulation results.
+    // The circuit is NOT modified during the VN iteration phase.
+    // After iterations, only used VNs are inserted into the circuit.
+    std::vector<VirtualNodeDef> final_vn_defs;  // VN defs for the SAT loop.
+    if (!options.no_virtual) {
+      // Collect base candidates (exclude any previously added virtual nodes).
+      std::vector<int> base_for_vn;
+      base_for_vn.reserve(candidate_indices.size());
+      for (int idx : candidate_indices) {
+        const std::string& nm = working_trojan.node_name(idx);
+        if (nm.rfind("vn_", 0) != 0) {
+          base_for_vn.push_back(idx);
+        }
+      }
+
+      if (base_for_vn.size() >= 2) {
+        // Phase 1: Quick tree training to identify important features.
+        MiningOptions phase1_opts;
+        phase1_opts.max_depth = options.max_depth;
+        phase1_opts.neg_ratio = options.neg_ratio;
+        phase1_opts.eval_count = 0;
+        phase1_opts.mine_rounds = 1;
+        phase1_opts.mine_max = 0;
+        phase1_opts.include_pi = options.include_pi;
+        phase1_opts.force_split = options.force_split;
+        phase1_opts.strict_retry = false;
+
+        MiningResult phase1_result;
+        string phase1_error;
+        bool phase1_ok = run_mining(golden, working_trojan,
+                                     stats.trigger_patterns,
+                                     base_for_vn, phase1_opts,
+                                     trojan_rate, nullptr, nullptr,
+                                     &phase1_result, &phase1_error);
+        if (phase1_ok && !phase1_result.model.rules.empty()) {
+          // Extract circuit node indices actually used by the tree.
+          unordered_set<int> used_set;
+          for (const auto& rule : phase1_result.model.rules) {
+            for (const auto& term : rule.terms) {
+              if (term.first < phase1_result.feature_nodes.size()) {
+                used_set.insert(
+                    phase1_result.feature_nodes[term.first]);
+              }
+            }
+          }
+          vector<int> important_signals(used_set.begin(), used_set.end());
+          sort(important_signals.begin(), important_signals.end());
+
+          cout << "vn_phase1_rules " << phase1_result.model.rules.size()
+               << " important_signals " << important_signals.size()
+               << " from_candidates " << base_for_vn.size() << "\n";
+
+          // Phase 2: Generate pairwise+triple virtual nodes from important
+          // signals.
+          std::vector<VirtualNodeDef> all_vn_defs;
+          if (important_signals.size() >= 2) {
+            const std::size_t max_arity =
+                (important_signals.size() <= 12) ? 3 : 2;
+            generate_virtual_candidates(important_signals, max_arity,
+                                        &all_vn_defs);
+            cout << "vn_phase2_combo " << all_vn_defs.size()
+                 << " max_arity " << max_arity << "\n";
+          }
+
+          // Phase 2b: Mine frequent subclauses (length 3-4) from phase1 rules
+          // to create targeted higher-arity virtual nodes.
+          // first_virtual_idx=0 means no virtual features exist yet.
+          {
+            std::vector<VirtualNodeDef> subclause_defs;
+            mine_subclauses_from_rules(
+                phase1_result.feature_nodes,
+                phase1_result.model,
+                3, 4,    // min_len=3, max_len=4 (reduced from 5)
+                500,     // max_candidates (conservative)
+                all_vn_defs,  // existing VN for dedup
+                &subclause_defs,
+                0);      // no virtual features in phase1
+            if (!subclause_defs.empty()) {
+              cout << "vn_phase2_subclauses " << subclause_defs.size() << "\n";
+              for (auto& sd : subclause_defs) {
+                all_vn_defs.push_back(std::move(sd));
+              }
+            }
+          }
+
+          // Phase 3: Iterative refinement - train with virtual features
+          // (computed on-the-fly, NO circuit modification), then mine
+          // subclauses from that result.
+          if (!all_vn_defs.empty()) {
+            cout << "vn_phase2_total " << all_vn_defs.size()
+                 << " (virtual, circuit unchanged)\n";
+
+            // best_vn_defs tracks the VN set that produced the fewest rules.
+            std::vector<VirtualNodeDef> best_vn_defs = all_vn_defs;
+            std::size_t best_rules = 0;
+
+            const int max_vn_iters = 3;
+            std::size_t prev_iter_rules = 0;
+            for (int vn_iter = 0; vn_iter < max_vn_iters; ++vn_iter) {
+              // Snapshot VN defs so we can revert on regression.
+              const std::size_t vn_snapshot = all_vn_defs.size();
+
+              MiningOptions iter_opts;
+              iter_opts.max_depth = options.max_depth;
+              iter_opts.neg_ratio = options.neg_ratio;
+              iter_opts.eval_count = 0;
+              iter_opts.mine_rounds = 1;
+              iter_opts.mine_max = 0;
+              iter_opts.include_pi = options.include_pi;
+              iter_opts.force_split = options.force_split;
+              iter_opts.strict_retry = false;
+
+              // Train with base candidates + virtual features (on-the-fly).
+              MiningResult iter_result;
+              string iter_error;
+              bool iter_ok = run_mining(golden, working_trojan,
+                                         stats.trigger_patterns,
+                                         base_for_vn, iter_opts,
+                                         trojan_rate, nullptr, nullptr,
+                                         &iter_result, &iter_error,
+                                         &all_vn_defs);
+              if (!iter_ok || iter_result.model.rules.empty()) {
+                if (!iter_error.empty()) {
+                  cerr << "vn_iter" << (vn_iter + 1)
+                       << " error: " << iter_error << "\n";
+                }
+                break;
+              }
+
+              const std::size_t iter_rules = iter_result.model.rules.size();
+              cout << "vn_iter" << (vn_iter + 1)
+                   << "_rules " << iter_rules
+                   << " vn_count " << all_vn_defs.size() << "\n";
+
+              // Stop if rule count increased (regression from feature noise).
+              // Revert VN defs to before this iteration's additions.
+              if (prev_iter_rules > 0 && iter_rules >= prev_iter_rules) {
+                all_vn_defs.resize(vn_snapshot);
+                cout << "vn_iter" << (vn_iter + 1)
+                     << " stopped+reverted: rules did not decrease ("
+                     << prev_iter_rules << " -> " << iter_rules << ")\n";
+                break;
+              }
+              prev_iter_rules = iter_rules;
+              best_vn_defs = all_vn_defs;
+              best_rules = iter_rules;
+
+              // Mine subclauses of length 2-4 from this iteration's rules.
+              // Skip virtual feature terms to prevent VN-on-VN composition.
+              const std::size_t first_vn_feat = iter_result.feature_nodes.size();
+              const std::size_t sc_max =
+                  (vn_iter == 0) ? 500 : 200;
+              std::vector<VirtualNodeDef> iter_subclauses;
+              mine_subclauses_from_rules(
+                  iter_result.feature_nodes,
+                  iter_result.model,
+                  2, 4,    // min_len=2, max_len=4 (reduced from 5)
+                  sc_max,  // max_candidates (decreasing)
+                  all_vn_defs,  // dedup against all existing
+                  &iter_subclauses,
+                  first_vn_feat);  // skip virtual features
+
+              if (iter_subclauses.empty()) {
+                cout << "vn_iter" << (vn_iter + 1)
+                     << "_new_subclauses 0 (converged)\n";
+                break;
+              }
+
+              // Add new subclauses to VN defs (no circuit modification).
+              for (auto& sd : iter_subclauses) {
+                all_vn_defs.push_back(std::move(sd));
+              }
+              cout << "vn_iter" << (vn_iter + 1)
+                   << "_new_subclauses " << iter_subclauses.size()
+                   << " total_vn " << all_vn_defs.size() << "\n";
+            }
+
+            // Use the best VN set found during iterations.
+            final_vn_defs = std::move(best_vn_defs);
+            cout << "vn_best_rules " << best_rules
+                 << " vn_count " << final_vn_defs.size() << "\n";
+          }
+        } else {
+          if (!phase1_error.empty()) {
+            cerr << "virtual_node phase1 error: " << phase1_error << "\n";
+          }
+        }
+      }
+    }
+
+    // --- Insert only used virtual nodes into the circuit ---
+    // This happens BEFORE the SAT refinement loop, so the circuit
+    // has only the VNs that actually appear in the best tree rules.
+    // A final training pass determines which VNs are used.
+    if (!final_vn_defs.empty()) {
+      // Do one final training pass with the best VN set to identify
+      // which VNs are actually referenced in the rules.
+      MiningOptions final_vn_opts;
+      final_vn_opts.max_depth = options.max_depth;
+      final_vn_opts.neg_ratio = options.neg_ratio;
+      final_vn_opts.eval_count = 0;
+      final_vn_opts.mine_rounds = 1;
+      final_vn_opts.mine_max = 0;
+      final_vn_opts.include_pi = options.include_pi;
+      final_vn_opts.force_split = options.force_split;
+      final_vn_opts.strict_retry = false;
+
+      // Collect base candidates again.
+      std::vector<int> base_for_insert;
+      for (int idx : candidate_indices) {
+        const std::string& nm = working_trojan.node_name(idx);
+        if (nm.rfind("vn_", 0) != 0) {
+          base_for_insert.push_back(idx);
+        }
+      }
+
+      MiningResult final_vn_result;
+      string final_vn_error;
+      bool final_vn_ok = run_mining(golden, working_trojan,
+                                     stats.trigger_patterns,
+                                     base_for_insert, final_vn_opts,
+                                     trojan_rate, nullptr, nullptr,
+                                     &final_vn_result, &final_vn_error,
+                                     &final_vn_defs);
+
+      if (final_vn_ok && !final_vn_result.model.rules.empty()) {
+        // Find which VN indices are used in the rules.
+        const std::size_t first_vn_feat = final_vn_result.feature_nodes.size();
+        std::unordered_set<std::size_t> used_vn_set;
+        for (const auto& rule : final_vn_result.model.rules) {
+          for (const auto& term : rule.terms) {
+            if (term.first >= first_vn_feat) {
+              used_vn_set.insert(term.first - first_vn_feat);
+            }
+          }
+        }
+
+        // Collect only the used VN definitions.
+        std::vector<VirtualNodeDef> used_defs;
+        std::vector<std::size_t> used_vn_indices;
+        for (std::size_t i = 0; i < final_vn_defs.size(); ++i) {
+          if (used_vn_set.count(i)) {
+            used_vn_indices.push_back(i);
+            used_defs.push_back(final_vn_defs[i]);
+          }
+        }
+
+        if (!used_defs.empty()) {
+          // Add only used VNs to the circuit.
+          std::vector<int> vn_circuit_indices =
+              add_virtual_gates_to_circuit(working_trojan, used_defs);
+          for (int vi : vn_circuit_indices) {
+            candidate_indices.push_back(vi);
+          }
+          cout << "vn_insert_used " << used_defs.size()
+               << " from " << final_vn_defs.size()
+               << " circuit_nodes " << working_trojan.node_count() << "\n";
+        }
+        // Clear final_vn_defs since the used VNs are now in the circuit.
+        final_vn_defs.clear();
+      }
     }
 
     unordered_set<string> groundtruth_bits;
