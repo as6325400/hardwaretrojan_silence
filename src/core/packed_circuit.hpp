@@ -17,6 +17,11 @@ class packed_circuit {
   void simulate_bits(const std::vector<word_t>& pi_bits,
                      std::size_t pattern_count);
 
+  // Prepare for repeated simulate_bits calls (call once before a loop).
+  void prepare_batch();
+  // Fast simulate that skips ensure_eval_order (call prepare_batch first).
+  void simulate_bits_fast(const word_t* pi_bits, std::size_t pattern_count);
+
   std::size_t pattern_count() const { return pattern_count_; }
   word_t pattern_mask() const { return pattern_mask_; }
 

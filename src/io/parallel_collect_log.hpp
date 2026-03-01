@@ -2,44 +2,15 @@
 
 #include <cstddef>
 #include <functional>
-#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-struct JsonValue {
-  enum class Type { kNull, kBool, kNumber, kString, kArray, kObject };
+#include "../../extern/nlohmann/json.hpp"
 
-  Type type = Type::kNull;
-  bool bool_value = false;
-  double number_value = 0.0;
-  std::string string_value;
-  std::vector<JsonValue> array_value;
-  std::unordered_map<std::string, std::unique_ptr<JsonValue>> object_value;
-
-  bool IsNull() const { return type == Type::kNull; }
-  bool IsBool() const { return type == Type::kBool; }
-  bool IsNumber() const { return type == Type::kNumber; }
-  bool IsString() const { return type == Type::kString; }
-  bool IsArray() const { return type == Type::kArray; }
-  bool IsObject() const { return type == Type::kObject; }
-
-  const JsonValue* Get(const std::string& key) const {
-    if (!IsObject()) {
-      return nullptr;
-    }
-    auto it = object_value.find(key);
-    if (it == object_value.end()) {
-      return nullptr;
-    }
-    if (!it->second) {
-      return nullptr;
-    }
-    return it->second.get();
-  }
-};
+using json = nlohmann::json;
 
 struct ErrorKey {
   std::string output;
@@ -70,11 +41,6 @@ struct Summary {
 };
 
 // Reader for logs produced by run_parallel_collect.py.
-// Example usage (reads JSON from the groundtruth folder):
-// ParallelCollectLog log("groundtruth/c880_trojan0_error_patterns.json");
-// auto summary = log.summary();
-// auto bits = log.get_pattern_bits(0);
-// auto inputs = log.get_pattern_inputs(0);
 class ParallelCollectLog {
  public:
   explicit ParallelCollectLog(const std::string& path);
@@ -83,11 +49,11 @@ class ParallelCollectLog {
   std::size_t total_patterns() const { return patterns_.size(); }
   std::optional<double> elapsed_time() const { return elapsed_seconds_; }
   const std::vector<std::string>& pi_order() const { return pi_order_; }
-  const std::vector<JsonValue>& patterns() const { return patterns_; }
+  const std::vector<json>& patterns() const { return patterns_; }
   const std::optional<std::string>& origin_path() const { return origin_path_; }
   const std::optional<std::string>& trojan_path() const { return trojan_path_; }
 
-  const JsonValue& get_pattern(int index, bool one_based = false) const;
+  const json& get_pattern(int index, bool one_based = false) const;
   std::optional<std::string> get_pattern_bits(int index,
                                               bool one_based = false) const;
   std::unordered_map<std::string, int> get_pattern_inputs(
@@ -100,15 +66,15 @@ class ParallelCollectLog {
   std::size_t unique_patterns() const;
   std::size_t unique_errors() const;
   std::unordered_map<std::string, int> output_counts() const;
-  std::vector<const JsonValue*> filter_by_output(
+  std::vector<const json*> filter_by_output(
       const std::string& output) const;
-  std::vector<const JsonValue*> find_by_pattern_bits(
+  std::vector<const json*> find_by_pattern_bits(
       const std::string& pattern_bits) const;
   Summary summary() const;
 
  private:
   std::string path_;
-  std::vector<JsonValue> patterns_;
+  std::vector<json> patterns_;
   std::vector<std::string> pi_order_;
   std::optional<double> elapsed_seconds_;
   std::optional<std::string> benchmark_;

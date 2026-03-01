@@ -14,16 +14,12 @@ struct AppOptions {
   std::string trojan_path;
   std::string groundtruth_path;
   std::string output_path;
-  std::size_t pattern_count = 1000000000;
   std::size_t max_depth = 10;
-  std::size_t eval_count = 100000;
   std::size_t neg_ratio = 50;
   std::size_t mine_rounds = 15;
   std::size_t mine_max = 5000;
-  double p1_trigger_threshold = 0.8;
-  double p1_notrigger_threshold = 0.2;
-  bool include_pi = false;
-  bool no_filter = false;
+  bool include_pi = true;
+  bool no_filter = true;
   bool force_split = false;
   bool strict_retry = true;
   bool no_virtual = false;

@@ -124,11 +124,19 @@ bool run_abc_optimize(const std::string& pla_path,
       "strash; balance; rewrite; refactor; balance; rewrite -z; refactor -z";
   const std::string script =
       "read_pla '" + pla_path + "'; " + flow + "; write_eqn '" + eqn_path + "'";
-  abc_cmd += " -c \"" + script + "\"";
-  const int ret = std::system(abc_cmd.c_str());
+  abc_cmd += " -c \"" + script + "\" > /dev/null 2>&1";
+  FILE* pipe = popen(abc_cmd.c_str(), "r");
+  if (!pipe) {
+    if (error) {
+      *error = "ABC failed to launch, make sure abc is in PATH or set ABC_BIN";
+    }
+    return false;
+  }
+  const int ret = pclose(pipe);
   if (ret != 0) {
     if (error) {
-      *error = "ABC failed, make sure abc is in PATH or set ABC_BIN";
+      *error = "ABC failed (exit " + std::to_string(ret) +
+               "), make sure abc is in PATH or set ABC_BIN";
     }
     return false;
   }

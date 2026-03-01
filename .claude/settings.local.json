@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dpkg -l)",
+      "Bash(sudo apt-get update)",
+      "Bash(sudo apt-get install -y libz3-dev)",
+      "Bash(sudo -S apt-get update)",
+      "Bash(sudo -S apt-get install -y libz3-dev)",
+      "Bash(git stash)",
+      "Bash(curl -sL -o extern/nlohmann/json.hpp \"https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp\")",
+      "Bash(curl -sL -o extern/CLI11/CLI11.hpp \"https://github.com/CLIUtils/CLI11/releases/download/v2.4.1/CLI11.hpp\")",
+      "Bash(ldconfig -p)",
+      "Bash(/usr/local/cuda/bin/nvcc --version)",
+      "Bash(awk -F',' '{print NF}')",
+      "Bash(done)",
+      "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(data[0][''text'']\\)\")"
+    ]
+  }
+}

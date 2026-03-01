@@ -1,5 +1,5 @@
 CXX ?= g++
-CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pedantic -fopenmp
+CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pedantic -fopenmp -march=native -I../extern
 LDFLAGS ?= -lz3
 BUILD_DIR = ../build
 BIN_DIR = ../bin

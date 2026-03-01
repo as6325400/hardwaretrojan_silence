@@ -1,6 +1,7 @@
 #include "packed_circuit.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 
 packed_circuit::packed_circuit(circuit& base) : base_(&base) {
@@ -60,10 +61,11 @@ void packed_circuit::simulate_bits(const std::vector<word_t>& pi_bits,
   }
 
   base_->ensure_eval_order();
-  if (values_.size() != base_->node_count()) {
-    values_.assign(base_->node_count(), 0);
+  const std::size_t node_cnt = base_->node_count();
+  if (values_.size() != node_cnt) {
+    values_.assign(node_cnt, 0);
   } else {
-    std::fill(values_.begin(), values_.end(), 0);
+    std::memset(values_.data(), 0, node_cnt * sizeof(word_t));
   }
 
   pattern_count_ = pattern_count;
@@ -74,102 +76,129 @@ void packed_circuit::simulate_bits(const std::vector<word_t>& pi_bits,
     throw std::runtime_error("PI vector size mismatch");
   }
 
+  const word_t pmask = pattern_mask_;
+  word_t* const vals = values_.data();
+
   for (std::size_t i = 0; i < pi_indices.size(); ++i) {
-    const int idx = pi_indices[i];
-    ensure_node_index(idx);
-    values_[idx] = pi_bits[i] & pattern_mask_;
+    vals[pi_indices[i]] = pi_bits[i] & pmask;
   }
 
-  for (std::size_t idx = 0; idx < base_->node_count(); ++idx) {
+  for (std::size_t idx = 0; idx < node_cnt; ++idx) {
     const cell& c = base_->get_cell(static_cast<int>(idx));
     if (c.ctype == CType::CONST) {
-      values_[idx] = c.val ? pattern_mask_ : word_t(0);
+      vals[idx] = c.val ? pmask : word_t(0);
     }
   }
 
   for (int idx : base_->eval_order()) {
-    ensure_node_index(idx);
     const cell& c = base_->get_cell(idx);
     if (c.ctype != CType::GATE) {
       continue;
     }
-    if (c.inputs.empty()) {
-      throw std::runtime_error("gate with no inputs: " + base_->node_name(idx));
-    }
 
     word_t out = 0;
     switch (c.gtype) {
-      case GType::AND: {
-        out = pattern_mask_;
-        for (int input_idx : c.inputs) {
-          ensure_node_index(input_idx);
-          out &= values_[input_idx];
-        }
+      case GType::AND:
+        out = pmask;
+        for (int in : c.inputs) out &= vals[in];
         break;
-      }
-      case GType::OR: {
-        out = 0;
-        for (int input_idx : c.inputs) {
-          ensure_node_index(input_idx);
-          out |= values_[input_idx];
-        }
+      case GType::OR:
+        for (int in : c.inputs) out |= vals[in];
         break;
-      }
-      case GType::NAND: {
-        out = pattern_mask_;
-        for (int input_idx : c.inputs) {
-          ensure_node_index(input_idx);
-          out &= values_[input_idx];
-        }
-        out = (~out) & pattern_mask_;
+      case GType::NAND:
+        out = pmask;
+        for (int in : c.inputs) out &= vals[in];
+        out = (~out) & pmask;
         break;
-      }
-      case GType::NOR: {
-        out = 0;
-        for (int input_idx : c.inputs) {
-          ensure_node_index(input_idx);
-          out |= values_[input_idx];
-        }
-        out = (~out) & pattern_mask_;
+      case GType::NOR:
+        for (int in : c.inputs) out |= vals[in];
+        out = (~out) & pmask;
         break;
-      }
-      case GType::NOT: {
-        if (c.inputs.size() != 1U) {
-          throw std::runtime_error("NOT gate expects 1 input: " +
-                                   base_->node_name(idx));
-        }
-        ensure_node_index(c.inputs[0]);
-        out = (~values_[c.inputs[0]]) & pattern_mask_;
+      case GType::NOT:
+        out = (~vals[c.inputs[0]]) & pmask;
         break;
-      }
-      case GType::BUFF: {
-        if (c.inputs.size() != 1U) {
-          throw std::runtime_error("BUFF gate expects 1 input: " +
-                                   base_->node_name(idx));
-        }
-        ensure_node_index(c.inputs[0]);
-        out = values_[c.inputs[0]];
+      case GType::BUFF:
+        out = vals[c.inputs[0]];
         break;
-      }
-      case GType::XOR: {
-        out = 0;
-        for (int input_idx : c.inputs) {
-          ensure_node_index(input_idx);
-          out ^= values_[input_idx];
-        }
+      case GType::XOR:
+        for (int in : c.inputs) out ^= vals[in];
         break;
-      }
-      case GType::XNOR: {
-        out = 0;
-        for (int input_idx : c.inputs) {
-          ensure_node_index(input_idx);
-          out ^= values_[input_idx];
-        }
-        out = (~out) & pattern_mask_;
+      case GType::XNOR:
+        for (int in : c.inputs) out ^= vals[in];
+        out = (~out) & pmask;
         break;
-      }
     }
-    values_[idx] = out;
+    vals[idx] = out;
+  }
+}
+
+void packed_circuit::prepare_batch() {
+  base_->ensure_eval_order();
+  if (values_.size() != base_->node_count()) {
+    values_.assign(base_->node_count(), 0);
+  }
+}
+
+void packed_circuit::simulate_bits_fast(const word_t* pi_bits,
+                                        std::size_t pattern_count) {
+  const std::size_t node_cnt = base_->node_count();
+  std::memset(values_.data(), 0, node_cnt * sizeof(word_t));
+
+  pattern_count_ = pattern_count;
+  pattern_mask_ = mask_for_count(pattern_count);
+  const word_t pmask = pattern_mask_;
+  word_t* const vals = values_.data();
+
+  const auto& pi_indices = base_->pi_indices();
+  for (std::size_t i = 0; i < pi_indices.size(); ++i) {
+    vals[pi_indices[i]] = pi_bits[i] & pmask;
+  }
+
+  for (std::size_t idx = 0; idx < node_cnt; ++idx) {
+    const cell& c = base_->get_cell(static_cast<int>(idx));
+    if (c.ctype == CType::CONST) {
+      vals[idx] = c.val ? pmask : word_t(0);
+    }
+  }
+
+  for (int idx : base_->eval_order()) {
+    const cell& c = base_->get_cell(idx);
+    if (c.ctype != CType::GATE) {
+      continue;
+    }
+    word_t out = 0;
+    switch (c.gtype) {
+      case GType::AND:
+        out = pmask;
+        for (int in : c.inputs) out &= vals[in];
+        break;
+      case GType::OR:
+        for (int in : c.inputs) out |= vals[in];
+        break;
+      case GType::NAND:
+        out = pmask;
+        for (int in : c.inputs) out &= vals[in];
+        out = (~out) & pmask;
+        break;
+      case GType::NOR:
+        for (int in : c.inputs) out |= vals[in];
+        out = (~out) & pmask;
+        break;
+      case GType::NOT:
+        out = (~vals[c.inputs[0]]) & pmask;
+        break;
+      case GType::BUFF:
+        out = vals[c.inputs[0]];
+        break;
+      case GType::XOR:
+        for (int in : c.inputs) out ^= vals[in];
+        break;
+      case GType::XNOR:
+        for (int in : c.inputs) out ^= vals[in];
+        out = (~out) & pmask;
+        break;
+    }
+    vals[idx] = out;
   }
 }
 

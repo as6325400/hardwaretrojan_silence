@@ -240,13 +240,13 @@ std::optional<std::string> GuessGoldenFromLogPath(const std::string& log_path) {
   return guessed.string();
 }
 
-std::optional<std::string> GetStringField(const JsonValue& obj,
+std::optional<std::string> GetStringField(const json& obj,
                                           const std::string& key) {
-  const JsonValue* value = obj.Get(key);
-  if (!value || !value->IsString()) {
+  auto it = obj.find(key);
+  if (it == obj.end() || !it->is_string()) {
     return std::nullopt;
   }
-  return value->string_value;
+  return it->get<std::string>();
 }
 
 bool ResolveGoldenPath(const Options& opts,
@@ -747,7 +747,7 @@ int main(int argc, char** argv) {
 
   for (std::size_t idx : indices) {
     stats.total += 1;
-    const JsonValue& entry =
+    const json& entry =
         log.get_pattern(static_cast<int>(idx));
     auto bits_opt = log.get_pattern_bits(static_cast<int>(idx));
     if (!bits_opt) {

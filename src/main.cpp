@@ -16,7 +16,6 @@
 #include "algorithm/pattern_sampler.hpp"
 #include "algorithm/payload_analysis.hpp"
 #include "algorithm/rule_patch.hpp"
-#include "algorithm/sat_refine.hpp"
 #include "algorithm/trigger_fixer.hpp"
 #include "algorithm/virtual_node.hpp"
 #include "core/circuit_compare.hpp"
@@ -212,11 +211,14 @@ bool build_stats_from_groundtruth(const circuit& golden,
   circuit trojan_eval = trojan;
   packed_circuit golden_packed(golden_eval);
   packed_circuit trojan_eval_packed(trojan_eval);
-  mt19937 rng(1337);
-  uniform_int_distribution<int> dist(0, 1);
+  golden_packed.prepare_batch();
+  trojan_eval_packed.prepare_batch();
+  mt19937_64 rng(1337);
   size_t attempts = 0;
   const size_t max_attempts = target_notrigger * 50 + 1000;
   const size_t block_bits = packed_circuit::kWordBits;
+  const size_t stats_pi_count = golden_eval.pi_count();
+  vector<packed_circuit::word_t> stats_pi_bits(stats_pi_count);
 
   while (stats->notrigger_patterns_total < target_notrigger &&
          attempts < max_attempts) {
@@ -226,20 +228,13 @@ bool build_stats_from_groundtruth(const circuit& golden,
       break;
     }
 
-    vector<vector<int>> patterns;
-    patterns.reserve(block_size);
-    for (size_t p = 0; p < block_size; ++p) {
-      vector<int> pi_values;
-      pi_values.reserve(golden_eval.pi_count());
-      for (size_t i = 0; i < golden_eval.pi_count(); ++i) {
-        pi_values.push_back(dist(rng));
-      }
-      patterns.push_back(std::move(pi_values));
+    for (size_t i = 0; i < stats_pi_count; ++i) {
+      stats_pi_bits[i] = rng();
     }
 
     try {
-      golden_packed.simulate(patterns);
-      trojan_eval_packed.simulate(patterns);
+      golden_packed.simulate_bits_fast(stats_pi_bits.data(), block_size);
+      trojan_eval_packed.simulate_bits_fast(stats_pi_bits.data(), block_size);
     } catch (const std::exception&) {
       attempts += block_size;
       continue;
@@ -328,16 +323,10 @@ int main(int argc, char** argv) {
   const string& groundtruth_path = options.groundtruth_path;
   cout << "groundtruth " << groundtruth_path << "\n";
 
-  cout << "patterns " << options.pattern_count
-       << " depth " << options.max_depth
-       << " eval " << options.eval_count
+  cout << "depth " << options.max_depth
        << " neg_ratio " << options.neg_ratio
        << " mine_rounds " << options.mine_rounds
-       << " mine_max " << options.mine_max << "\n";
-  cout << "p1_trigger " << options.p1_trigger_threshold
-       << " p1_notrigger " << options.p1_notrigger_threshold
-       << " include_pi " << (options.include_pi ? 1 : 0)
-       << " no_filter " << (options.no_filter ? 1 : 0)
+       << " mine_max " << options.mine_max
        << " force_split " << (options.force_split ? 1 : 0)
        << " strict_retry " << (options.strict_retry ? 1 : 0) << "\n";
 
@@ -368,9 +357,6 @@ int main(int argc, char** argv) {
 
     vector<CandidateInfo> candidates;
     if (!build_candidates(stats,
-                          options.p1_trigger_threshold,
-                          options.p1_notrigger_threshold,
-                          options.no_filter,
                           &candidates,
                           &error)) {
       cerr << error << "\n";
@@ -682,24 +668,7 @@ int main(int argc, char** argv) {
       }
     }
 
-    unordered_set<string> groundtruth_bits;
-    groundtruth_bits.reserve(stats.trigger_patterns.size() * 2);
-    for (const auto& pattern : stats.trigger_patterns) {
-      groundtruth_bits.insert(pi_values_to_bits(pattern));
-    }
-
-    vector<vector<int>> sat_neg_patterns;
-    unordered_set<string> sat_seen_bits;
-    size_t sat_rounds = options.mine_rounds;
-    if (sat_rounds == 0) {
-      sat_rounds = 1;
-    }
-    const size_t sat_max_new = options.mine_max;
-    const size_t sat_max_models =
-        (options.eval_count > 0) ? options.eval_count
-                                 : (sat_max_new * 20 + 1000);
-
-    for (size_t round = 0; round < sat_rounds; ++round) {
+    {
       MiningOptions mining_options;
       mining_options.max_depth = options.max_depth;
       mining_options.neg_ratio = options.neg_ratio;
@@ -710,16 +679,16 @@ int main(int argc, char** argv) {
       mining_options.force_split = options.force_split;
       mining_options.strict_retry = options.strict_retry;
 
-    if (!run_mining(golden,
-                    working_trojan,
-                    stats.trigger_patterns,
-                    candidate_indices,
-                    mining_options,
-                    trojan_rate,
-                    &sat_neg_patterns,
-                    &neg_trace,
-                    &result,
-                    &error)) {
+      if (!run_mining(golden,
+                      working_trojan,
+                      stats.trigger_patterns,
+                      candidate_indices,
+                      mining_options,
+                      trojan_rate,
+                      nullptr,
+                      &neg_trace,
+                      &result,
+                      &error)) {
         if (!error.empty()) {
           cerr << error << "\n";
         }
@@ -733,45 +702,6 @@ int main(int argc, char** argv) {
         cout << "rule_simplify " << rules_before
              << " -> " << result.model.rules.size() << "\n";
       }
-
-      if (sat_max_new == 0 || sat_max_models == 0) {
-        cout << "sat_refine_skipped 1\n";
-        break;
-      }
-
-      cout << "sat_refine_round_start " << (round + 1)
-           << " max_models " << sat_max_models
-           << " max_new " << sat_max_new << "\n";
-
-      vector<vector<int>> new_negatives;
-      if (!collect_rule_counterexamples(golden,
-                                        working_trojan,
-                                        result,
-                                        round + 1,
-                                        groundtruth_bits,
-                                        &sat_seen_bits,
-                                        sat_max_models,
-                                        sat_max_new,
-                                        &new_negatives,
-                                        &error)) {
-        if (!error.empty()) {
-          cerr << "SAT rule check error: " << error << "\n";
-        }
-        return 1;
-      }
-
-      if (new_negatives.empty()) {
-        cout << "sat_refine_round " << (round + 1)
-             << " sat_new_neg 0\n";
-        break;
-      }
-
-      for (auto& pattern : new_negatives) {
-        sat_neg_patterns.push_back(std::move(pattern));
-      }
-      cout << "sat_refine_round " << (round + 1)
-           << " sat_new_neg " << new_negatives.size()
-           << " sat_total_neg " << sat_neg_patterns.size() << "\n";
     }
 
     cout << "training_set pos=" << result.data_pos
@@ -995,46 +925,6 @@ int main(int argc, char** argv) {
   } else {
     cout << "payload_fix_apply skipped: no fix nodes\n";
   }
-
-  // FixResult fix_result;
-  // if (!apply_rule_fix(golden,
-  //                     trojan,
-  //                     stats.trigger_patterns,
-  //                     result.feature_nodes,
-  //                     result.model,
-  //                     &fix_result,
-  //                     &error)) {
-  //   if (!error.empty()) {
-  //     cerr << "Trigger fix error: " << error << "\n";
-  //   }
-  //   return 1;
-  // }
-
-  // cout << "trigger_fix rules_total " << fix_result.rules_total
-  //      << " rules_applied " << fix_result.rules_applied
-  //      << " rules_skipped " << fix_result.rules_skipped
-  //      << " po_candidates " << fix_result.po_candidates
-  //      << " po_fixed " << fix_result.po_fixed
-  //      << " po_xor " << fix_result.po_fixed_xor
-  //      << " po_mux " << fix_result.po_fixed_mux << '\n';
-
-  // PatternStats stats_after = sample_patterns(golden, trojan, options.pattern_count, 1337);
-  // const double trojan_rate_after = compute_trojan_rate(stats_after);
-  // cout << "trigger_patterns_after " << stats_after.trigger_patterns_total << '\n';
-  // const ios_base::fmtflags prev_flags = cout.flags();
-  // const streamsize prev_precision = cout.precision();
-  // cout << defaultfloat << setprecision(6);
-  // cout << "trojan_rates_after " << trojan_rate_after << '\n';
-  // cout.flags(prev_flags);
-  // cout.precision(prev_precision);
-
-  // if (!options.output_path.empty()) {
-  //   error.clear();
-  //   if (!bench_io::write_bench_file(options.output_path, trojan, &error)) {
-  //     cerr << "Write error: " << error << "\n";
-  //     return 1;
-  //   }
-  // }
 
   return 0;
 }

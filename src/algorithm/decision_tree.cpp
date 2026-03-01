@@ -111,6 +111,41 @@ std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
   std::size_t global_best_feature = 0;
   bool global_found = false;
 
+  // Build packed sample/label masks for popcount-based split counting.
+  const std::size_t total_rows = features.row_count;
+  const std::size_t packed_words =
+      (total_rows + kPackedWordBits - 1) / kPackedWordBits;
+  std::vector<PackedWord> sample_mask(packed_words, 0);
+  std::vector<PackedWord> sample_pos_mask(packed_words, 0);
+  for (std::size_t idx : samples) {
+    const std::size_t w = idx / kPackedWordBits;
+    const PackedWord bit = PackedWord(1) << (idx % kPackedWordBits);
+    sample_mask[w] |= bit;
+    if (labels[idx] == 1) {
+      sample_pos_mask[w] |= bit;
+    }
+  }
+
+  // Transpose: extract column bitmasks for each feature.
+  const std::size_t n_features = feature_indices.size();
+  std::vector<PackedWord> col_data(n_features * packed_words, 0);
+  {
+    const PackedWord* data_ptr = features.data.data();
+    #pragma omp parallel for schedule(static)
+    for (std::size_t fi = 0; fi < n_features; ++fi) {
+      const std::size_t f = feature_indices[fi];
+      const std::size_t fw = f / kPackedWordBits;
+      const PackedWord fb = PackedWord(1) << (f % kPackedWordBits);
+      PackedWord* col_ptr = col_data.data() + fi * packed_words;
+      for (std::size_t r = 0; r < total_rows; ++r) {
+        const PackedWord* row_ptr = data_ptr + r * words_per_row;
+        if (row_ptr[fw] & fb) {
+          col_ptr[r / kPackedWordBits] |= PackedWord(1) << (r % kPackedWordBits);
+        }
+      }
+    }
+  }
+
   #pragma omp parallel
   {
     double local_best_gain = -std::numeric_limits<double>::infinity();
@@ -118,31 +153,25 @@ std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
     bool local_found = false;
 
     #pragma omp for schedule(static)
-    for (std::size_t i = 0; i < feature_indices.size(); ++i) {
-      const std::size_t f = feature_indices[i];
-      std::size_t pos0 = 0;
-      std::size_t neg0 = 0;
+    for (std::size_t fi = 0; fi < n_features; ++fi) {
+      const std::size_t f = feature_indices[fi];
+      const PackedWord* col = col_data.data() + fi * packed_words;
+
+      // Count using popcount: pos1 = popcount(col & sample_mask & sample_pos_mask)
+      std::size_t total1 = 0;
       std::size_t pos1 = 0;
-      std::size_t neg1 = 0;
-      for (std::size_t idx : samples) {
-        const int value = packed_feature_value(features, words_per_row, idx, f);
-        if (value == 1) {
-          if (labels[idx] == 1) {
-            pos1 += 1;
-          } else {
-            neg1 += 1;
-          }
-        } else {
-          if (labels[idx] == 1) {
-            pos0 += 1;
-          } else {
-            neg0 += 1;
-          }
-        }
+      for (std::size_t w = 0; w < packed_words; ++w) {
+        const PackedWord feat_in_sample = col[w] & sample_mask[w];
+        total1 += static_cast<std::size_t>(__builtin_popcountll(feat_in_sample));
+        pos1 += static_cast<std::size_t>(
+            __builtin_popcountll(feat_in_sample & sample_pos_mask[w]));
       }
 
+      const std::size_t neg1 = total1 - pos1;
+      const std::size_t pos0 = pos - pos1;
+      const std::size_t neg0 = neg - neg1;
       const std::size_t total0 = pos0 + neg0;
-      const std::size_t total1 = pos1 + neg1;
+
       if (total0 == 0 || total1 == 0) {
         continue;
       }
@@ -250,22 +279,11 @@ std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
   node->is_leaf = false;
   node->feature = best_feature;
 
-  std::unique_ptr<Node> left_node;
-  std::unique_ptr<Node> right_node;
-  #pragma omp parallel sections
-  {
-    #pragma omp section
-    {
-      left_node = build_node(features, labels, left_samples, next_features, depth + 1, options, stats);
-    }
-    #pragma omp section
-    {
-      right_node = build_node(features, labels, right_samples, next_features, depth + 1, options, stats);
-    }
-  }
-
-  node->left = std::move(left_node);
-  node->right = std::move(right_node);
+  // Call sequentially so each child gets the full thread pool for its inner
+  // parallel loops. omp parallel sections would nest parallel regions and
+  // degrade children to single-threaded (OpenMP nested parallelism off by default).
+  node->left = build_node(features, labels, left_samples, next_features, depth + 1, options, stats);
+  node->right = build_node(features, labels, right_samples, next_features, depth + 1, options, stats);
   update_max_depth(stats, depth);
   return node;
 }

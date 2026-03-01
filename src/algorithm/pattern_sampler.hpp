@@ -18,8 +18,4 @@ struct PatternStats {
   std::size_t mismatch_patterns = 0;
 };
 
-PatternStats sample_patterns(const circuit& golden,
-                             const circuit& trojan,
-                             std::size_t pattern_count,
-                             std::uint32_t base_seed = 0); // Simulate random patterns with a fixed base seed and collect gate statistics.
 double compute_trojan_rate(const PatternStats& stats); // Compute trigger rate from collected stats.

@@ -519,9 +519,10 @@ bool build_training_data(const circuit& golden,
   }
 
   if (use_trace) {
-    std::mt19937 rng(neg_trace->seed);
-    std::uniform_int_distribution<int> dist(0, 1);
+    std::mt19937_64 rng(neg_trace->seed);
     std::vector<std::size_t> selected;
+    const std::size_t trace_pi_count = golden_train.pi_count();
+    std::vector<PackedWord> trace_pi_bits(trace_pi_count);
     for (std::size_t block = 0; block < neg_trace->masks.size(); ++block) {
       const std::size_t block_size =
           std::min<std::size_t>(packed_circuit::kWordBits,
@@ -529,15 +530,8 @@ bool build_training_data(const circuit& golden,
       if (block_size == 0) {
         continue;
       }
-      std::vector<std::vector<int>> patterns;
-      patterns.reserve(block_size);
-      for (std::size_t p = 0; p < block_size; ++p) {
-        std::vector<int> pi_values;
-        pi_values.reserve(golden_train.pi_count());
-        for (std::size_t i = 0; i < golden_train.pi_count(); ++i) {
-          pi_values.push_back(dist(rng));
-        }
-        patterns.push_back(std::move(pi_values));
+      for (std::size_t i = 0; i < trace_pi_count; ++i) {
+        trace_pi_bits[i] = rng();
       }
 
       const PackedWord mask = packed_circuit::mask_for_count(block_size);
@@ -546,7 +540,7 @@ bool build_training_data(const circuit& golden,
         continue;
       }
       try {
-        trojan_packed.simulate(patterns);
+        trojan_packed.simulate_bits(trace_pi_bits, block_size);
       } catch (const std::exception& e) {
         std::cerr << "Training negative replay error: " << e.what() << "\n";
         continue;
@@ -581,9 +575,12 @@ bool build_training_data(const circuit& golden,
 
   std::size_t attempts = 0;
   const std::size_t max_attempts = target_negatives * 20 + 1000;
-  std::mt19937 rng(1337);
-  std::uniform_int_distribution<int> dist(0, 1);
+  std::mt19937_64 rng(1337);
   packed_circuit golden_packed(golden_train);
+  golden_packed.prepare_batch();
+  trojan_packed.prepare_batch();
+  const std::size_t neg_pi_count = golden_train.pi_count();
+  std::vector<PackedWord> neg_pi_bits(neg_pi_count);
 
   while (data->neg_count < target_negatives && attempts < max_attempts) {
     const std::size_t remaining_attempts = max_attempts - attempts;
@@ -592,21 +589,14 @@ bool build_training_data(const circuit& golden,
     if (block_size == 0) {
       break;
     }
-    std::vector<std::vector<int>> patterns;
-    patterns.reserve(block_size);
-    for (std::size_t p = 0; p < block_size; ++p) {
-      std::vector<int> pi_values;
-      pi_values.reserve(golden_train.pi_count());
-      for (std::size_t i = 0; i < golden_train.pi_count(); ++i) {
-        pi_values.push_back(dist(rng));
-      }
-      patterns.push_back(std::move(pi_values));
+    for (std::size_t i = 0; i < neg_pi_count; ++i) {
+      neg_pi_bits[i] = rng();
     }
 
     bool packed_ok = false;
     try {
-      golden_packed.simulate(patterns);
-      trojan_packed.simulate(patterns);
+      golden_packed.simulate_bits_fast(neg_pi_bits.data(), block_size);
+      trojan_packed.simulate_bits_fast(neg_pi_bits.data(), block_size);
       packed_ok = true;
     } catch (const std::exception&) {
       packed_ok = false;
@@ -715,18 +705,21 @@ EvalResult eval_and_mine(const circuit& golden,
   EvalResult result;
   std::size_t attempts = 0;
   const std::size_t max_attempts = eval_limit * 20 + 1000;
-  std::mt19937 rng(seed);
-  std::uniform_int_distribution<int> dist(0, 1);
+  std::mt19937_64 rng(seed);
   circuit golden_eval = golden;
   circuit trojan_eval = trojan;
   packed_circuit golden_packed(golden_eval);
   packed_circuit trojan_packed(trojan_eval);
+  golden_packed.prepare_batch();
+  trojan_packed.prepare_batch();
   const FeatureIndexMap feature_map =
       build_feature_index_map(total_features);
   const std::size_t words_per_row =
       (total_features + PackedFeatureMatrix::kWordBits - 1) /
       PackedFeatureMatrix::kWordBits;
   std::vector<FeatureWord> row_bits(words_per_row, 0);
+  const std::size_t eval_pi_count = golden_eval.pi_count();
+  std::vector<PackedWord> eval_pi_bits(eval_pi_count);
 
   while (result.checked < eval_limit && attempts < max_attempts) {
     const std::size_t remaining_attempts = max_attempts - attempts;
@@ -735,20 +728,13 @@ EvalResult eval_and_mine(const circuit& golden,
     if (block_size == 0) {
       break;
     }
-    std::vector<std::vector<int>> patterns;
-    patterns.reserve(block_size);
-    for (std::size_t p = 0; p < block_size; ++p) {
-      std::vector<int> pi_values;
-      pi_values.reserve(golden_eval.pi_count());
-      for (std::size_t i = 0; i < golden_eval.pi_count(); ++i) {
-        pi_values.push_back(dist(rng));
-      }
-      patterns.push_back(std::move(pi_values));
+    for (std::size_t i = 0; i < eval_pi_count; ++i) {
+      eval_pi_bits[i] = rng();
     }
 
     try {
-      golden_packed.simulate(patterns);
-      trojan_packed.simulate(patterns);
+      golden_packed.simulate_bits_fast(eval_pi_bits.data(), block_size);
+      trojan_packed.simulate_bits_fast(eval_pi_bits.data(), block_size);
     } catch (const std::exception&) {
       attempts += block_size;
       continue;
