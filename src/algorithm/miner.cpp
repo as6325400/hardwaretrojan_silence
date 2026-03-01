@@ -6,6 +6,10 @@
 #include <random>
 #include <sys/sysinfo.h>
 
+#ifdef __BMI2__
+#include <immintrin.h>
+#endif
+
 #include "../core/packed_circuit.hpp"
 #include "rule_patch.hpp"
 #include "virtual_node.hpp"
@@ -289,6 +293,74 @@ void append_single_sample(const PackedWord* feature_bits,
   }
   matrix->row_count += 1;
   labels->push_back(label);
+}
+
+// Portable parallel bit extract: compact bits at mask positions into contiguous low bits.
+PackedWord portable_pext(PackedWord val, PackedWord mask) {
+#ifdef __BMI2__
+  return _pext_u64(val, mask);
+#else
+  PackedWord result = 0;
+  PackedWord out_bit = 1;
+  PackedWord m = mask;
+  while (m) {
+    PackedWord lowest = m & (-m);
+    if (val & lowest) result |= out_bit;
+    out_bit <<= 1;
+    m &= m - 1;
+  }
+  return result;
+#endif
+}
+
+// Keep only the first n set bits in mask, clear the rest.
+PackedWord keep_n_set_bits(PackedWord mask, std::size_t n) {
+  PackedWord result = 0;
+  for (std::size_t i = 0; i < n && mask; ++i) {
+    PackedWord lowest = mask & (-mask);
+    result |= lowest;
+    mask &= mask - 1;
+  }
+  return result;
+}
+
+// Batch-append all patterns selected by select_mask from a single word block.
+// Uses pext to compact selected bits into contiguous positions in the matrix.
+// Returns the number of samples added (= popcount of select_mask).
+std::size_t append_word_block_selective(const PackedWord* feature_bits,
+                                        std::size_t num_features,
+                                        PackedWord select_mask,
+                                        PackedFeatureMatrix* matrix,
+                                        std::vector<int>* labels,
+                                        int label) {
+  if (select_mask == 0) return 0;
+  const std::size_t count = popcount_word(select_mask);
+  const std::size_t dst_start = matrix->row_count;
+  const std::size_t dst_w0 = dst_start / PackedFeatureMatrix::kWordBits;
+  const std::size_t dst_bit0 = dst_start % PackedFeatureMatrix::kWordBits;
+  const std::size_t pr = matrix->packed_rows();
+  auto* data = matrix->data.data();
+
+  if (dst_bit0 + count <= PackedFeatureMatrix::kWordBits) {
+    // All extracted bits fit in one word per feature.
+    for (std::size_t f = 0; f < num_features; ++f) {
+      FeatureWord extracted = static_cast<FeatureWord>(
+          portable_pext(feature_bits[f], select_mask));
+      data[f * pr + dst_w0] |= (extracted << dst_bit0);
+    }
+  } else {
+    // Extracted bits span two words per feature.
+    const std::size_t shift_r = PackedFeatureMatrix::kWordBits - dst_bit0;
+    for (std::size_t f = 0; f < num_features; ++f) {
+      FeatureWord extracted = static_cast<FeatureWord>(
+          portable_pext(feature_bits[f], select_mask));
+      data[f * pr + dst_w0]     |= (extracted << dst_bit0);
+      data[f * pr + dst_w0 + 1] |= (extracted >> shift_r);
+    }
+  }
+  matrix->row_count += count;
+  labels->insert(labels->end(), count, label);
+  return count;
 }
 
 // Pad row_count up to 64-aligned boundary (zero-feature neg samples).
@@ -658,13 +730,9 @@ bool build_training_data(const circuit& golden,
 
         for (std::size_t f = 0; f < num_feat; ++f)
           wb_feat[f] = h_feat_bits[f];
-        while (sel_mask) {
-          const std::size_t bit = ctz_word(sel_mask);
-          append_single_sample(wb_feat.data(), num_feat, bit,
-                               &data->features, &data->labels, 0);
-          data->neg_count += 1;
-          sel_mask &= (sel_mask - 1);
-        }
+        data->neg_count += append_word_block_selective(
+            wb_feat.data(), num_feat, sel_mask,
+            &data->features, &data->labels, 0);
       }
 
       // Free GPU resources and return
@@ -745,17 +813,14 @@ bool build_training_data(const circuit& golden,
         if (notrigger) {
           for (std::size_t f = 0; f < num_feat; ++f)
             wb_feat[f] = h_feat_bits[f * num_wb + wb];
-        }
-        const std::size_t cap = target_negatives - data->neg_count;
-        std::size_t added = 0;
-        while (notrigger && added < cap) {
-          const std::size_t bit = ctz_word(notrigger);
-          selected_mask_wb |= (PackedWord(1) << bit);
-          append_single_sample(wb_feat.data(), num_feat, bit,
-                               &data->features, &data->labels, 0);
-          data->neg_count += 1;
-          added += 1;
-          notrigger &= (notrigger - 1);
+          const std::size_t cap = target_negatives - data->neg_count;
+          const std::size_t available = popcount_word(notrigger);
+          selected_mask_wb = (available <= cap)
+              ? notrigger : keep_n_set_bits(notrigger, cap);
+          std::size_t added = append_word_block_selective(
+              wb_feat.data(), num_feat, selected_mask_wb,
+              &data->features, &data->labels, 0);
+          data->neg_count += added;
         }
         if (neg_trace) {
           neg_trace->masks.push_back(selected_mask_wb);
@@ -909,13 +974,9 @@ bool build_training_data(const circuit& golden,
             trojan_packed, *virtual_defs, trojan_packed.pattern_mask());
         feature_bits.insert(feature_bits.end(), vn_bits.begin(), vn_bits.end());
       }
-      while (sel_mask) {
-        const std::size_t bit = ctz_word(sel_mask);
-        append_single_sample(feature_bits.data(), total_features, bit,
-                             &data->features, &data->labels, 0);
-        data->neg_count += 1;
-        sel_mask &= (sel_mask - 1);
-      }
+      data->neg_count += append_word_block_selective(
+          feature_bits.data(), total_features, sel_mask,
+          &data->features, &data->labels, 0);
     }
     return true;
   }
@@ -983,16 +1044,12 @@ bool build_training_data(const circuit& golden,
                 trojan_packed, *virtual_defs, trojan_packed.pattern_mask());
             feature_bits.insert(feature_bits.end(), vn_bits.begin(), vn_bits.end());
           }
-          std::size_t added = 0;
-          while (notrigger_mask && added < remaining_needed) {
-            const std::size_t bit = ctz_word(notrigger_mask);
-            selected_mask |= (PackedWord(1) << bit);
-            append_single_sample(feature_bits.data(), total_features, bit,
-                                 &data->features, &data->labels, 0);
-            data->neg_count += 1;
-            added += 1;
-            notrigger_mask &= (notrigger_mask - 1);
-          }
+          const std::size_t available = popcount_word(notrigger_mask);
+          selected_mask = (available <= remaining_needed)
+              ? notrigger_mask : keep_n_set_bits(notrigger_mask, remaining_needed);
+          data->neg_count += append_word_block_selective(
+              feature_bits.data(), total_features, selected_mask,
+              &data->features, &data->labels, 0);
         }
       }
       if (neg_trace) {
