@@ -16,6 +16,11 @@
 #include "../core/packed_circuit.hpp"
 #include "../io/eqn_parser.hpp"
 
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#include "../core/gpu_circuit.cuh"
+#endif
+
 namespace {
 
 struct LiteralKey {
@@ -1232,6 +1237,24 @@ bool try_kill_simple_trigger(circuit& net,
     }
     return false;
   }
+  // Virtual nodes (vn_*) are floating gates whose output is not connected
+  // to any part of the original circuit.  Forcing them to a constant does
+  // not neutralise the trojan, so reject them here and let the caller fall
+  // through to a payload-fix approach that patches the real trigger gates.
+  const std::string& name = net.node_name(trigger_node);
+  if (name.size() >= 3 && name[0] == 'v' && name[1] == 'n' && name[2] == '_') {
+    // Report which VN was identified so the caller can expand it.
+    if (trigger_idx) {
+      *trigger_idx = trigger_node;
+    }
+    if (forced_value) {
+      *forced_value = expected ? 0 : 1;
+    }
+    if (error) {
+      *error = "trigger is a virtual node (cannot kill directly)";
+    }
+    return false;
+  }
   const int kill_value = expected ? 0 : 1;
   net.force_gate_const(trigger_node, kill_value);
   if (trigger_idx) {
@@ -1311,6 +1334,82 @@ bool verify_patch_groundtruth(const circuit& golden,
     return false;
   }
 
+#ifdef USE_CUDA
+  // ── GPU path: batch patterns into GPU word blocks ──────────────────────────
+  if (golden.node_count() >= 50000) try {
+    circuit golden_copy = golden;
+    circuit patched_copy = patched;
+    golden_copy.ensure_eval_order();
+    patched_copy.ensure_eval_order();
+
+    const std::size_t num_pis = golden.pi_count();
+    const std::size_t max_wb = gpu_compute_max_word_blocks(
+        golden_copy.node_count(), patched_copy.node_count(), num_pis, 0);
+
+    GpuCircuit gpu_golden(golden_copy, max_wb);
+    GpuCircuit gpu_patched(patched_copy, max_wb);
+
+    // Allocate device buffers for PI bits and diff_mask
+    GpuCircuit::word_t* d_pi_bits = nullptr;
+    GpuCircuit::word_t* d_diff_mask = nullptr;
+    cudaMalloc(&d_pi_bits, num_pis * max_wb * sizeof(GpuCircuit::word_t));
+    cudaMalloc(&d_diff_mask, max_wb * sizeof(GpuCircuit::word_t));
+
+    constexpr std::size_t kBits = 64;
+    const std::size_t total = patterns.size();
+    std::size_t offset = 0;
+
+    while (offset < total) {
+      const std::size_t chunk = std::min(max_wb * kBits, total - offset);
+      const std::size_t chunk_wb = (chunk + kBits - 1) / kBits;
+      const GpuCircuit::word_t pmask =
+          (chunk % kBits == 0) ? ~GpuCircuit::word_t(0)
+                               : (GpuCircuit::word_t(1) << (chunk % kBits)) - 1;
+
+      // Pack patterns into PI bit layout
+      std::vector<GpuCircuit::word_t> h_pi(num_pis * chunk_wb, 0);
+      gpu_pack_pi_patterns(patterns, offset, chunk, num_pis,
+                           h_pi.data(), chunk_wb);
+
+      cudaMemcpy(d_pi_bits, h_pi.data(),
+                 num_pis * chunk_wb * sizeof(GpuCircuit::word_t),
+                 cudaMemcpyHostToDevice);
+
+      gpu_golden.simulate(d_pi_bits, chunk_wb);
+      gpu_patched.simulate(d_pi_bits, chunk_wb);
+      gpu_compare_po(gpu_golden, gpu_patched, d_diff_mask, chunk_wb, pmask);
+
+      // Download diff_mask and check
+      std::vector<GpuCircuit::word_t> h_diff(chunk_wb);
+      cudaMemcpy(h_diff.data(), d_diff_mask,
+                 chunk_wb * sizeof(GpuCircuit::word_t),
+                 cudaMemcpyDeviceToHost);
+
+      for (std::size_t w = 0; w < chunk_wb; ++w) {
+        if (h_diff[w] != 0) {
+          const std::size_t bit = static_cast<std::size_t>(
+              __builtin_ctzll(h_diff[w]));
+          const std::size_t idx = offset + w * kBits + bit;
+          if (mismatch_index) *mismatch_index = idx;
+          if (error) *error = "groundtruth mismatch";
+          cudaFree(d_pi_bits);
+          cudaFree(d_diff_mask);
+          return false;
+        }
+      }
+
+      offset += chunk;
+    }
+
+    cudaFree(d_pi_bits);
+    cudaFree(d_diff_mask);
+    return true;
+  } catch (...) {
+    // GPU failed — fall through to CPU path
+  }
+#endif
+
+  // ── CPU fallback ───────────────────────────────────────────────────────────
   circuit golden_eval = golden;
   circuit patched_eval = patched;
   packed_circuit golden_packed(golden_eval);

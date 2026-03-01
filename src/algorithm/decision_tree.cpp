@@ -7,6 +7,12 @@
 
 #include <omp.h>
 
+#ifdef USE_CUDA
+#include "gpu_tree.cuh"
+// Use GPU when there are enough features to amortise launch overhead.
+static constexpr std::size_t kGpuSplitThreshold = 64;
+#endif
+
 namespace {
 
 using PackedWord = PackedFeatureMatrix::word_t;
@@ -47,16 +53,6 @@ double gini_impurity(std::size_t pos, std::size_t neg) {
   const double p = static_cast<double>(pos) / total;
   const double q = static_cast<double>(neg) / total;
   return 1.0 - (p * p + q * q);
-}
-
-int packed_feature_value(const PackedFeatureMatrix& features,
-                         std::size_t words_per_row,
-                         std::size_t row,
-                         std::size_t feature) {
-  const std::size_t word_idx = feature / kPackedWordBits;
-  const std::size_t bit_idx = feature % kPackedWordBits;
-  const PackedWord* row_ptr = features.data.data() + row * words_per_row;
-  return static_cast<int>((row_ptr[word_idx] >> bit_idx) & PackedWord(1));
 }
 
 std::unique_ptr<Node> make_leaf(bool label, std::size_t depth, BuildStats& stats) {
@@ -101,11 +97,7 @@ std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
     return make_leaf(true, depth, stats);
   }
 
-  const std::size_t words_per_row = features.words_per_row();
   const double parent_impurity = gini_impurity(pos, neg);
-  double best_gain = -std::numeric_limits<double>::infinity();
-  std::size_t best_feature = 0;
-  bool found = false;
 
   double global_best_gain = -std::numeric_limits<double>::infinity();
   std::size_t global_best_feature = 0;
@@ -126,25 +118,71 @@ std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
     }
   }
 
-  // Transpose: extract column bitmasks for each feature.
+  // Column data is already in column-major format in features.data.
+  // features.col_ptr(f) points to packed_rows() words for feature f.
+  // packed_rows() may be >= packed_words (if capacity > row_count),
+  // so we use the stride from features but only scan packed_words words.
   const std::size_t n_features = feature_indices.size();
-  std::vector<PackedWord> col_data(n_features * packed_words, 0);
-  {
-    const PackedWord* data_ptr = features.data.data();
+  const std::size_t col_stride = features.packed_rows();
+
+  // Build a contiguous col_data array with stride = packed_words for
+  // the GPU path and CPU split finding. Only needed when col_stride
+  // differs from packed_words (capacity > row_count).
+  const PackedWord* col_base = features.data.data();
+  std::vector<PackedWord> col_data_compact;
+  if (col_stride != packed_words) {
+    col_data_compact.resize(n_features * packed_words);
     #pragma omp parallel for schedule(static)
     for (std::size_t fi = 0; fi < n_features; ++fi) {
-      const std::size_t f = feature_indices[fi];
-      const std::size_t fw = f / kPackedWordBits;
-      const PackedWord fb = PackedWord(1) << (f % kPackedWordBits);
-      PackedWord* col_ptr = col_data.data() + fi * packed_words;
-      for (std::size_t r = 0; r < total_rows; ++r) {
-        const PackedWord* row_ptr = data_ptr + r * words_per_row;
-        if (row_ptr[fw] & fb) {
-          col_ptr[r / kPackedWordBits] |= PackedWord(1) << (r % kPackedWordBits);
-        }
+      const PackedWord* src = col_base + feature_indices[fi] * col_stride;
+      PackedWord* dst = col_data_compact.data() + fi * packed_words;
+      for (std::size_t w = 0; w < packed_words; ++w) {
+        dst[w] = src[w];
       }
     }
+    col_base = nullptr;  // signal to use compact
   }
+
+  // Helper: pointer to the column for feature index fi.
+  auto col_for_fi = [&](std::size_t fi) -> const PackedWord* {
+    if (!col_data_compact.empty()) {
+      return col_data_compact.data() + fi * packed_words;
+    }
+    return features.data.data() + feature_indices[fi] * col_stride;
+  };
+
+#ifdef USE_CUDA
+  if (n_features >= kGpuSplitThreshold) {
+    // GPU path needs contiguous col_data with stride=packed_words.
+    const PackedWord* gpu_col_data;
+    if (!col_data_compact.empty()) {
+      gpu_col_data = col_data_compact.data();
+    } else {
+      // col_stride == packed_words, but features may not be contiguous
+      // by feature_indices order. Build compact for GPU.
+      col_data_compact.resize(n_features * packed_words);
+      #pragma omp parallel for schedule(static)
+      for (std::size_t fi = 0; fi < n_features; ++fi) {
+        const PackedWord* src = features.data.data() +
+                                feature_indices[fi] * col_stride;
+        PackedWord* dst = col_data_compact.data() + fi * packed_words;
+        for (std::size_t w = 0; w < packed_words; ++w) {
+          dst[w] = src[w];
+        }
+      }
+      gpu_col_data = col_data_compact.data();
+    }
+    const GpuSplitResult gr = gpu_find_best_split(
+        gpu_col_data, sample_mask.data(), sample_pos_mask.data(),
+        packed_words, n_features,
+        samples.size(), pos, neg, parent_impurity);
+    if (gr.found) {
+      global_best_gain    = gr.best_gain;
+      global_best_feature = feature_indices[gr.best_fi];
+      global_found        = true;
+    }
+  } else {
+#endif
 
   #pragma omp parallel
   {
@@ -155,7 +193,7 @@ std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
     #pragma omp for schedule(static)
     for (std::size_t fi = 0; fi < n_features; ++fi) {
       const std::size_t f = feature_indices[fi];
-      const PackedWord* col = col_data.data() + fi * packed_words;
+      const PackedWord* col = col_for_fi(fi);
 
       // Count using popcount: pos1 = popcount(col & sample_mask & sample_pos_mask)
       std::size_t total1 = 0;
@@ -201,16 +239,15 @@ std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
     }
   }
 
-  if (global_found) {
-    best_gain = global_best_gain;
-    best_feature = global_best_feature;
-    found = true;
-  }
+#ifdef USE_CUDA
+  }  // end if (n_features < kGpuSplitThreshold)
+#endif
 
-  if (!found || (!options.force_split && best_gain <= 0.0)) {
+  if (!global_found || (!options.force_split && global_best_gain <= 0.0)) {
     return make_leaf(true, depth, stats);
   }
 
+  // Split samples by best_feature value using column-major lookup.
   const int max_threads = omp_get_max_threads();
   const std::size_t thread_count = static_cast<std::size_t>(max_threads);
   const std::size_t sample_chunk =
@@ -229,7 +266,7 @@ std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
     #pragma omp for schedule(static)
     for (std::size_t i = 0; i < samples.size(); ++i) {
       const std::size_t idx = samples[i];
-      const int value = packed_feature_value(features, words_per_row, idx, best_feature);
+      const int value = features.feature_value(idx, global_best_feature);
       if (value == 1) {
         right_local.push_back(idx);
       } else {
@@ -262,7 +299,7 @@ std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
     #pragma omp for schedule(static)
     for (std::size_t i = 0; i < feature_indices.size(); ++i) {
       const std::size_t f = feature_indices[i];
-      if (f != best_feature) {
+      if (f != global_best_feature) {
         local.push_back(f);
       }
     }
@@ -277,11 +314,8 @@ std::unique_ptr<Node> build_node(const PackedFeatureMatrix& features,
 
   auto node = std::make_unique<Node>();
   node->is_leaf = false;
-  node->feature = best_feature;
+  node->feature = global_best_feature;
 
-  // Call sequentially so each child gets the full thread pool for its inner
-  // parallel loops. omp parallel sections would nest parallel regions and
-  // degrade children to single-threaded (OpenMP nested parallelism off by default).
   node->left = build_node(features, labels, left_samples, next_features, depth + 1, options, stats);
   node->right = build_node(features, labels, right_samples, next_features, depth + 1, options, stats);
   update_max_depth(stats, depth);
@@ -340,8 +374,9 @@ DecisionTreeModel build_decision_tree(const PackedFeatureMatrix& features,
     }
     return model;
   }
-  const std::size_t words_per_row = features.words_per_row();
-  if (features.data.size() != features.row_count * words_per_row) {
+  // Validate column-major data size.
+  const std::size_t expected_size = feature_count * features.packed_rows();
+  if (features.data.size() != expected_size) {
     if (error) {
       *error = "packed feature size mismatch";
     }

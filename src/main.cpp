@@ -20,6 +20,10 @@
 #include "algorithm/virtual_node.hpp"
 #include "core/circuit_compare.hpp"
 #include "core/packed_circuit.hpp"
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#include "core/gpu_circuit.cuh"
+#endif
 #include "io/bench_parser.hpp"
 #include "io/bench_writer.hpp"
 #include "io/cli_options.hpp"
@@ -158,45 +162,12 @@ bool build_stats_from_groundtruth(const circuit& golden,
     }
   }
 
-  stats->ones_total.assign(stats->gate_indices.size(), 0);
-  stats->ones_trigger.assign(stats->gate_indices.size(), 0);
-  stats->ones_notrigger.assign(stats->gate_indices.size(), 0);
+  const std::size_t num_gates = stats->gate_indices.size();
+  stats->ones_total.assign(num_gates, 0);
+  stats->ones_trigger.assign(num_gates, 0);
+  stats->ones_notrigger.assign(num_gates, 0);
 
-  circuit trojan_trigger = trojan;
-  packed_circuit trojan_packed(trojan_trigger);
-  std::size_t trigger_offset = 0;
-  while (trigger_offset < stats->trigger_patterns.size()) {
-    const std::size_t remaining =
-        stats->trigger_patterns.size() - trigger_offset;
-    const std::size_t block_size =
-        std::min(packed_circuit::kWordBits, remaining);
-    std::vector<std::vector<int>> patterns;
-    patterns.reserve(block_size);
-    for (std::size_t p = 0; p < block_size; ++p) {
-      patterns.push_back(stats->trigger_patterns[trigger_offset + p]);
-    }
-
-    try {
-      trojan_packed.simulate(patterns);
-    } catch (const std::exception& e) {
-      if (error) {
-        *error = string("Trigger simulation error: ") + e.what();
-      }
-      return false;
-    }
-
-    #pragma omp parallel for schedule(static)
-    for (std::size_t g = 0; g < stats->gate_indices.size(); ++g) {
-      const int idx = stats->gate_indices[g];
-      const std::uint64_t ones = popcount_ull(trojan_packed.node_bits(idx));
-      stats->ones_trigger[g] += ones;
-      stats->ones_total[g] += ones;
-    }
-
-    trigger_offset += block_size;
-  }
-
-  const size_t target_notrigger = stats->trigger_patterns_total;
+  const size_t target_notrigger = stats->trigger_patterns.size();
   stats->notrigger_patterns_total = 0;
   stats->total_patterns = stats->trigger_patterns_total;
 
@@ -207,71 +178,294 @@ bool build_stats_from_groundtruth(const circuit& golden,
     return false;
   }
 
-  circuit golden_eval = golden;
-  circuit trojan_eval = trojan;
-  packed_circuit golden_packed(golden_eval);
-  packed_circuit trojan_eval_packed(trojan_eval);
-  golden_packed.prepare_batch();
-  trojan_eval_packed.prepare_batch();
-  mt19937_64 rng(1337);
-  size_t attempts = 0;
-  const size_t max_attempts = target_notrigger * 50 + 1000;
-  const size_t block_bits = packed_circuit::kWordBits;
-  const size_t stats_pi_count = golden_eval.pi_count();
-  vector<packed_circuit::word_t> stats_pi_bits(stats_pi_count);
+#ifdef USE_CUDA
+  // ── GPU path: trigger sim + random non-trigger sim ─────────────────────────
+  // Only use GPU for large circuits where overhead is amortised.
+  if (trojan.node_count() >= 50000) try {
+    constexpr std::size_t kBits = 64;
+    circuit golden_copy = golden;
+    circuit trojan_copy = trojan;
+    golden_copy.ensure_eval_order();
+    trojan_copy.ensure_eval_order();
 
-  while (stats->notrigger_patterns_total < target_notrigger &&
-         attempts < max_attempts) {
-    const size_t remaining_attempts = max_attempts - attempts;
-    const size_t block_size = min(block_bits, remaining_attempts);
-    if (block_size == 0) {
-      break;
-    }
+    const std::size_t num_pis = golden.pi_count();
+    const std::size_t max_wb = gpu_compute_max_word_blocks(
+        golden_copy.node_count(), trojan_copy.node_count(), num_pis, 0);
 
-    for (size_t i = 0; i < stats_pi_count; ++i) {
-      stats_pi_bits[i] = rng();
-    }
+    GpuCircuit gpu_golden(golden_copy, max_wb);
+    GpuCircuit gpu_trojan(trojan_copy, max_wb);
 
-    try {
-      golden_packed.simulate_bits_fast(stats_pi_bits.data(), block_size);
-      trojan_eval_packed.simulate_bits_fast(stats_pi_bits.data(), block_size);
-    } catch (const std::exception&) {
-      attempts += block_size;
-      continue;
-    }
+    // Device buffers
+    GpuCircuit::word_t* d_pi_bits = nullptr;
+    GpuCircuit::word_t* d_diff_mask = nullptr;
+    GpuCircuit::word_t* d_accept_masks = nullptr;
+    int* d_gate_indices = nullptr;
+    unsigned long long* d_accum_trigger = nullptr;
+    unsigned long long* d_accum_notrigger = nullptr;
 
-    const packed_circuit::word_t mask =
-        packed_circuit::mask_for_count(block_size);
-    packed_circuit::word_t diff_mask = 0;
-    for (size_t o = 0; o < trojan_eval.po_count(); ++o) {
-      diff_mask |= (golden_packed.po_bits(o) ^ trojan_eval_packed.po_bits(o));
-    }
-    diff_mask &= mask;
-    packed_circuit::word_t notrigger_mask = mask & ~diff_mask;
+    cudaMalloc(&d_pi_bits, num_pis * max_wb * sizeof(GpuCircuit::word_t));
+    cudaMalloc(&d_diff_mask, max_wb * sizeof(GpuCircuit::word_t));
+    cudaMalloc(&d_accept_masks, max_wb * sizeof(GpuCircuit::word_t));
+    cudaMalloc(&d_gate_indices, num_gates * sizeof(int));
+    cudaMalloc(&d_accum_trigger, num_gates * sizeof(unsigned long long));
+    cudaMalloc(&d_accum_notrigger, num_gates * sizeof(unsigned long long));
 
-    const size_t remaining_needed =
-        target_notrigger - stats->notrigger_patterns_total;
-    const size_t available = popcount_ull(notrigger_mask);
-    const size_t take = min(remaining_needed, available);
-    packed_circuit::word_t accept_mask =
-        (take == available) ? notrigger_mask
-                            : take_first_bits(notrigger_mask, take);
+    cudaMemcpy(d_gate_indices, stats->gate_indices.data(),
+               num_gates * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemset(d_accum_trigger, 0, num_gates * sizeof(unsigned long long));
+    cudaMemset(d_accum_notrigger, 0, num_gates * sizeof(unsigned long long));
 
-    if (take > 0) {
-      stats->notrigger_patterns_total += take;
-      stats->total_patterns += take;
-      #pragma omp parallel for schedule(static)
-      for (size_t g = 0; g < stats->gate_indices.size(); ++g) {
-        const int idx = stats->gate_indices[g];
-        const packed_circuit::word_t bits =
-            trojan_eval_packed.node_bits(idx) & accept_mask;
-        const std::uint64_t ones = popcount_ull(bits);
-        stats->ones_notrigger[g] += ones;
-        stats->ones_total[g] += ones;
+    // ── Phase 1: Trigger sim on GPU ──
+    {
+      const std::size_t total = stats->trigger_patterns.size();
+      std::size_t offset = 0;
+      while (offset < total) {
+        const std::size_t chunk = std::min(max_wb * kBits, total - offset);
+        const std::size_t chunk_wb = (chunk + kBits - 1) / kBits;
+        const GpuCircuit::word_t pmask =
+            (chunk % kBits == 0) ? ~GpuCircuit::word_t(0)
+                                 : (GpuCircuit::word_t(1) << (chunk % kBits)) - 1;
+
+        std::vector<GpuCircuit::word_t> h_pi(num_pis * chunk_wb, 0);
+        gpu_pack_pi_patterns(stats->trigger_patterns, offset, chunk,
+                             num_pis, h_pi.data(), chunk_wb);
+        cudaMemcpy(d_pi_bits, h_pi.data(),
+                   num_pis * chunk_wb * sizeof(GpuCircuit::word_t),
+                   cudaMemcpyHostToDevice);
+
+        gpu_trojan.simulate(d_pi_bits, chunk_wb);
+        gpu_accumulate_gate_ones(gpu_trojan.d_values(), d_gate_indices,
+                                 num_gates, chunk_wb,
+                                 gpu_trojan.num_nodes(), pmask,
+                                 d_accum_trigger);
+        offset += chunk;
       }
     }
 
-    attempts += block_size;
+    // Download trigger accum
+    std::vector<unsigned long long> h_trigger(num_gates);
+    cudaMemcpy(h_trigger.data(), d_accum_trigger,
+               num_gates * sizeof(unsigned long long),
+               cudaMemcpyDeviceToHost);
+    for (std::size_t g = 0; g < num_gates; ++g) {
+      stats->ones_trigger[g] = h_trigger[g];
+      stats->ones_total[g] = h_trigger[g];
+    }
+
+    // ── Phase 2: Random non-trigger sim on GPU ──
+    {
+      mt19937_64 rng(1337);
+      size_t attempts = 0;
+      const size_t max_attempts = target_notrigger * 50 + 1000;
+      std::vector<GpuCircuit::word_t> h_diff(max_wb);
+      std::vector<GpuCircuit::word_t> h_accept(max_wb);
+
+      while (stats->notrigger_patterns_total < target_notrigger &&
+             attempts < max_attempts) {
+        const size_t remaining_attempts = max_attempts - attempts;
+        const size_t batch = std::min(max_wb * kBits, remaining_attempts);
+        const size_t batch_wb = (batch + kBits - 1) / kBits;
+        if (batch == 0) break;
+
+        // Generate random PI on GPU
+        gpu_generate_random_pi(d_pi_bits, num_pis, batch_wb, rng());
+
+        // Simulate both circuits
+        gpu_golden.simulate(d_pi_bits, batch_wb);
+        gpu_trojan.simulate(d_pi_bits, batch_wb);
+
+        // Compare PO → diff_mask
+        const GpuCircuit::word_t pmask =
+            (batch % kBits == 0) ? ~GpuCircuit::word_t(0)
+                                 : (GpuCircuit::word_t(1) << (batch % kBits)) - 1;
+        gpu_compare_po(gpu_golden, gpu_trojan, d_diff_mask, batch_wb, pmask);
+
+        // Download diff_mask, compute accept_masks on CPU
+        cudaMemcpy(h_diff.data(), d_diff_mask,
+                   batch_wb * sizeof(GpuCircuit::word_t),
+                   cudaMemcpyDeviceToHost);
+
+        std::size_t batch_take = 0;
+        const std::size_t remaining_needed =
+            target_notrigger - stats->notrigger_patterns_total;
+        for (std::size_t w = 0; w < batch_wb; ++w) {
+          GpuCircuit::word_t wb_mask =
+              (w == batch_wb - 1) ? pmask : ~GpuCircuit::word_t(0);
+          GpuCircuit::word_t notrigger = wb_mask & ~h_diff[w];
+          const std::size_t avail = popcount_ull(notrigger);
+          const std::size_t can_take =
+              std::min(avail, remaining_needed - batch_take);
+          if (can_take < avail) {
+            notrigger = take_first_bits(notrigger, can_take);
+          }
+          h_accept[w] = notrigger;
+          batch_take += can_take;
+          if (batch_take >= remaining_needed) {
+            // Zero remaining accept masks
+            for (std::size_t w2 = w + 1; w2 < batch_wb; ++w2)
+              h_accept[w2] = 0;
+            break;
+          }
+        }
+
+        if (batch_take > 0) {
+          // Upload accept masks and accumulate
+          cudaMemcpy(d_accept_masks, h_accept.data(),
+                     batch_wb * sizeof(GpuCircuit::word_t),
+                     cudaMemcpyHostToDevice);
+          gpu_accumulate_gate_ones_masked(gpu_trojan.d_values(),
+                                          d_gate_indices, num_gates,
+                                          batch_wb, gpu_trojan.num_nodes(),
+                                          d_accept_masks, d_accum_notrigger);
+          stats->notrigger_patterns_total += batch_take;
+          stats->total_patterns += batch_take;
+        }
+
+        attempts += batch;
+      }
+    }
+
+    // Download notrigger accum
+    std::vector<unsigned long long> h_notrigger(num_gates);
+    cudaMemcpy(h_notrigger.data(), d_accum_notrigger,
+               num_gates * sizeof(unsigned long long),
+               cudaMemcpyDeviceToHost);
+    for (std::size_t g = 0; g < num_gates; ++g) {
+      stats->ones_notrigger[g] = h_notrigger[g];
+      stats->ones_total[g] += h_notrigger[g];
+    }
+
+    cudaFree(d_pi_bits);
+    cudaFree(d_diff_mask);
+    cudaFree(d_accept_masks);
+    cudaFree(d_gate_indices);
+    cudaFree(d_accum_trigger);
+    cudaFree(d_accum_notrigger);
+
+    if (stats->notrigger_patterns_total < target_notrigger) {
+      if (error) {
+        *error = "Not enough non-trigger patterns collected: " +
+                 to_string(stats->notrigger_patterns_total) + "/" +
+                 to_string(target_notrigger);
+      }
+      return false;
+    }
+    return true;
+  } catch (...) {
+    // GPU failed — fall through to CPU path
+    stats->ones_total.assign(num_gates, 0);
+    stats->ones_trigger.assign(num_gates, 0);
+    stats->ones_notrigger.assign(num_gates, 0);
+    stats->notrigger_patterns_total = 0;
+    stats->total_patterns = stats->trigger_patterns_total;
+  }
+#endif
+
+  // ── CPU fallback: trigger sim ──────────────────────────────────────────────
+  {
+    circuit trojan_trigger = trojan;
+    packed_circuit trojan_packed(trojan_trigger);
+    std::size_t trigger_offset = 0;
+    while (trigger_offset < stats->trigger_patterns.size()) {
+      const std::size_t remaining =
+          stats->trigger_patterns.size() - trigger_offset;
+      const std::size_t block_size =
+          std::min(packed_circuit::kWordBits, remaining);
+      std::vector<std::vector<int>> patterns;
+      patterns.reserve(block_size);
+      for (std::size_t p = 0; p < block_size; ++p) {
+        patterns.push_back(stats->trigger_patterns[trigger_offset + p]);
+      }
+
+      try {
+        trojan_packed.simulate(patterns);
+      } catch (const std::exception& e) {
+        if (error) {
+          *error = string("Trigger simulation error: ") + e.what();
+        }
+        return false;
+      }
+
+      #pragma omp parallel for schedule(static)
+      for (std::size_t g = 0; g < num_gates; ++g) {
+        const int idx = stats->gate_indices[g];
+        const std::uint64_t ones = popcount_ull(trojan_packed.node_bits(idx));
+        stats->ones_trigger[g] += ones;
+        stats->ones_total[g] += ones;
+      }
+
+      trigger_offset += block_size;
+    }
+  }
+
+  // ── CPU fallback: random non-trigger sim ───────────────────────────────────
+  {
+    circuit golden_eval = golden;
+    circuit trojan_eval = trojan;
+    packed_circuit golden_packed(golden_eval);
+    packed_circuit trojan_eval_packed(trojan_eval);
+    golden_packed.prepare_batch();
+    trojan_eval_packed.prepare_batch();
+    mt19937_64 rng(1337);
+    size_t attempts = 0;
+    const size_t max_attempts = target_notrigger * 50 + 1000;
+    const size_t block_bits = packed_circuit::kWordBits;
+    const size_t stats_pi_count = golden_eval.pi_count();
+    vector<packed_circuit::word_t> stats_pi_bits(stats_pi_count);
+
+    while (stats->notrigger_patterns_total < target_notrigger &&
+           attempts < max_attempts) {
+      const size_t remaining_attempts = max_attempts - attempts;
+      const size_t block_size = min(block_bits, remaining_attempts);
+      if (block_size == 0) {
+        break;
+      }
+
+      for (size_t i = 0; i < stats_pi_count; ++i) {
+        stats_pi_bits[i] = rng();
+      }
+
+      try {
+        golden_packed.simulate_bits_fast(stats_pi_bits.data(), block_size);
+        trojan_eval_packed.simulate_bits_fast(stats_pi_bits.data(), block_size);
+      } catch (const std::exception&) {
+        attempts += block_size;
+        continue;
+      }
+
+      const packed_circuit::word_t mask =
+          packed_circuit::mask_for_count(block_size);
+      packed_circuit::word_t diff_mask = 0;
+      for (size_t o = 0; o < trojan_eval.po_count(); ++o) {
+        diff_mask |= (golden_packed.po_bits(o) ^ trojan_eval_packed.po_bits(o));
+      }
+      diff_mask &= mask;
+      packed_circuit::word_t notrigger_mask = mask & ~diff_mask;
+
+      const size_t remaining_needed =
+          target_notrigger - stats->notrigger_patterns_total;
+      const size_t available = popcount_ull(notrigger_mask);
+      const size_t take = min(remaining_needed, available);
+      packed_circuit::word_t accept_mask =
+          (take == available) ? notrigger_mask
+                              : take_first_bits(notrigger_mask, take);
+
+      if (take > 0) {
+        stats->notrigger_patterns_total += take;
+        stats->total_patterns += take;
+        #pragma omp parallel for schedule(static)
+        for (size_t g = 0; g < num_gates; ++g) {
+          const int idx = stats->gate_indices[g];
+          const packed_circuit::word_t bits =
+              trojan_eval_packed.node_bits(idx) & accept_mask;
+          const std::uint64_t ones = popcount_ull(bits);
+          stats->ones_notrigger[g] += ones;
+          stats->ones_total[g] += ones;
+        }
+      }
+
+      attempts += block_size;
+    }
   }
 
   if (stats->notrigger_patterns_total < target_notrigger) {
@@ -784,30 +978,115 @@ int main(int argc, char** argv) {
         cerr << " pattern " << mismatch_index;
       }
       cerr << "\n";
-      cout << "payload_fix_apply skipped: groundtruth_verify_failed\n";
+      // Fall through to the payload-fix path instead of giving up.
+    } else {
+      const long long delta_area =
+          static_cast<long long>(killed_area) -
+          static_cast<long long>(base_area);
+      const long long delta_level =
+          static_cast<long long>(killed_level) -
+          static_cast<long long>(base_level);
+
+      const string output_path = options.output_path.empty()
+                                     ? derive_patched_path(options.trojan_path)
+                                     : options.output_path;
+      if (!bench_io::write_bench_file(output_path, killed, &error)) {
+        cerr << "Write error: " << error << "\n";
+        return 1;
+      }
+      cout << "payload_fix_selected 1 area_delta " << delta_area
+           << " level_delta " << delta_level << "\n";
+      cout << "payload_fix_bench " << output_path << "\n";
       return 0;
     }
-
-    const long long delta_area =
-        static_cast<long long>(killed_area) -
-        static_cast<long long>(base_area);
-    const long long delta_level =
-        static_cast<long long>(killed_level) -
-        static_cast<long long>(base_level);
-
-    const string output_path = options.output_path.empty()
-                                   ? derive_patched_path(options.trojan_path)
-                                   : options.output_path;
-    if (!bench_io::write_bench_file(output_path, killed, &error)) {
-      cerr << "Write error: " << error << "\n";
-      return 1;
-    }
-    cout << "payload_fix_selected 1 area_delta " << delta_area
-         << " level_delta " << delta_level << "\n";
-    cout << "payload_fix_bench " << output_path << "\n";
-    return 0;
   } else if (!kill_error.empty()) {
     cerr << "payload_kill_trigger skipped: " << kill_error << "\n";
+  }
+
+  // When the trigger is a virtual AND node, expand to its constituent real
+  // signals and try killing each one.  This avoids the expensive payload-fix
+  // path (which can OOM on large circuits like AES).
+  if (kill_trigger_idx >= 0 &&
+      kill_error == "trigger is a virtual node (cannot kill directly)") {
+    const cell& vn_cell = working_trojan.get_cell(kill_trigger_idx);
+    if (vn_cell.ctype == CType::GATE && vn_cell.gtype == GType::AND &&
+        kill_value == 0 && !vn_cell.inputs.empty()) {
+      cout << "vn_expand_kill trying " << vn_cell.inputs.size()
+           << " constituent signals of "
+           << working_trojan.node_name(kill_trigger_idx) << "\n";
+      for (int inp_idx : vn_cell.inputs) {
+        int real_node = inp_idx;
+        int real_kill = 0;  // Force AND input to 0.
+        // Trace through NOT gate if present.
+        const cell& inp_cell = working_trojan.get_cell(inp_idx);
+        if (inp_cell.ctype == CType::GATE &&
+            inp_cell.gtype == GType::NOT &&
+            inp_cell.inputs.size() == 1U) {
+          // NOT(x)=0 means x=1.
+          real_node = inp_cell.inputs[0];
+          real_kill = 1;
+        }
+        // Skip if the real node is also a virtual node.
+        const std::string& rname = working_trojan.node_name(real_node);
+        if (rname.size() >= 3 &&
+            rname[0] == 'v' && rname[1] == 'n' && rname[2] == '_') {
+          continue;
+        }
+        circuit trial = working_trojan;
+        trial.force_gate_const(real_node, real_kill);
+        std::size_t mismatch_index = 0;
+        if (verify_patch_groundtruth(golden,
+                                      trial,
+                                      stats.trigger_patterns,
+                                      &mismatch_index,
+                                      &error)) {
+          // Verification passed — compute area/level and write output.
+          std::size_t base_area = 0, base_level = 0;
+          std::size_t trial_area = 0, trial_level = 0;
+          try {
+            circuit base_eval = working_trojan;
+            base_eval.ensure_eval_order();
+            base_area = base_eval.area();
+            base_level = base_eval.level();
+            trial.ensure_eval_order();
+            trial_area = trial.area();
+            trial_level = trial.level();
+          } catch (const std::exception& e) {
+            cerr << "VN expand kill area/level error: " << e.what() << "\n";
+            return 1;
+          }
+          cout << "payload_kill_trigger "
+               << working_trojan.node_name(real_node)
+               << " forced " << real_kill
+               << " (expanded from "
+               << working_trojan.node_name(kill_trigger_idx) << ")\n";
+          cout << "payload_kill_area " << base_area << " -> " << trial_area
+               << " level " << base_level << " -> " << trial_level << "\n";
+          const long long delta_area =
+              static_cast<long long>(trial_area) -
+              static_cast<long long>(base_area);
+          const long long delta_level =
+              static_cast<long long>(trial_level) -
+              static_cast<long long>(base_level);
+          const string output_path = options.output_path.empty()
+                                         ? derive_patched_path(options.trojan_path)
+                                         : options.output_path;
+          if (!bench_io::write_bench_file(output_path, trial, &error)) {
+            cerr << "Write error: " << error << "\n";
+            return 1;
+          }
+          cout << "payload_fix_selected 1 area_delta " << delta_area
+               << " level_delta " << delta_level << "\n";
+          cout << "payload_fix_bench " << output_path << "\n";
+          return 0;
+        } else {
+          cerr << "vn_expand_kill: " << working_trojan.node_name(real_node)
+               << " forced " << real_kill << " failed: " << error
+               << " pattern " << mismatch_index << "\n";
+        }
+      }
+      cerr << "vn_expand_kill: no constituent signal passed verification\n";
+    }
   }
 
   std::vector<int> payload_fix_nodes;
