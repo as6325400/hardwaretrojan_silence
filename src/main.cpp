@@ -54,6 +54,12 @@ bool build_stats_from_groundtruth(const circuit& golden,
                                   const string& log_path,
                                   PatternStats* stats,
                                   string* error) {
+  auto t0 = std::chrono::steady_clock::now();
+  auto ms = [](auto start) {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+  };
+
   if (error) {
     error->clear();
   }
@@ -66,6 +72,8 @@ bool build_stats_from_groundtruth(const circuit& golden,
 
   *stats = PatternStats{};
   ParallelCollectLog log(log_path);
+  cerr << "[TIMING]   groundtruth_parse: " << ms(t0) << " ms\n";
+  t0 = std::chrono::steady_clock::now();
 
   const auto& log_pi_order = log.pi_order();
   if (log_pi_order.empty()) {
@@ -182,6 +190,8 @@ bool build_stats_from_groundtruth(const circuit& golden,
   // ── GPU path: trigger sim + random non-trigger sim ─────────────────────────
   // Only use GPU for large circuits where overhead is amortised.
   if (trojan.node_count() >= 50000) try {
+    cerr << "[TIMING]   pattern_build: " << ms(t0) << " ms\n";
+    t0 = std::chrono::steady_clock::now();
     constexpr std::size_t kBits = 64;
     circuit golden_copy = golden;
     circuit trojan_copy = trojan;
@@ -194,6 +204,8 @@ bool build_stats_from_groundtruth(const circuit& golden,
 
     GpuCircuit gpu_golden(golden_copy, max_wb);
     GpuCircuit gpu_trojan(trojan_copy, max_wb);
+    cerr << "[TIMING]   gpu_init (GpuCircuit x2 + malloc): " << ms(t0) << " ms\n";
+    t0 = std::chrono::steady_clock::now();
 
     // Device buffers
     GpuCircuit::word_t* d_pi_bits = nullptr;
@@ -241,6 +253,10 @@ bool build_stats_from_groundtruth(const circuit& golden,
         offset += chunk;
       }
     }
+
+    cudaDeviceSynchronize();
+    cerr << "[TIMING]   gpu_trigger_sim: " << ms(t0) << " ms\n";
+    t0 = std::chrono::steady_clock::now();
 
     // Download trigger accum
     std::vector<unsigned long long> h_trigger(num_gates);
@@ -325,6 +341,10 @@ bool build_stats_from_groundtruth(const circuit& golden,
       }
     }
 
+    cudaDeviceSynchronize();
+    cerr << "[TIMING]   gpu_notrigger_sim: " << ms(t0) << " ms\n";
+    t0 = std::chrono::steady_clock::now();
+
     // Download notrigger accum
     std::vector<unsigned long long> h_notrigger(num_gates);
     cudaMemcpy(h_notrigger.data(), d_accum_notrigger,
@@ -341,6 +361,7 @@ bool build_stats_from_groundtruth(const circuit& golden,
     cudaFree(d_gate_indices);
     cudaFree(d_accum_trigger);
     cudaFree(d_accum_notrigger);
+    cerr << "[TIMING]   gpu_download+free: " << ms(t0) << " ms\n";
 
     if (stats->notrigger_patterns_total < target_notrigger) {
       if (error) {
@@ -483,6 +504,13 @@ bool build_stats_from_groundtruth(const circuit& golden,
 }  // namespace
 
 int main(int argc, char** argv) {
+  auto t_main_start = std::chrono::steady_clock::now();
+  auto t_phase = t_main_start;
+  auto ms_since = [](auto start) {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+  };
+
   AppOptions options;
   string error;
   const ParseStatus status = parse_cli_options(argc, argv, &options, &error);
@@ -513,6 +541,8 @@ int main(int argc, char** argv) {
     cerr << "Circuit alignment error: " << error << "\n";
     return 1;
   }
+  cerr << "[TIMING] parse+align: " << ms_since(t_phase) << " ms\n";
+  t_phase = std::chrono::steady_clock::now();
 
   const string& groundtruth_path = options.groundtruth_path;
   cout << "groundtruth " << groundtruth_path << "\n";
@@ -532,6 +562,7 @@ int main(int argc, char** argv) {
   int merged_match_idx = -1;
 
   while (true) {
+    t_phase = std::chrono::steady_clock::now();
     try {
       if (!build_stats_from_groundtruth(golden, working_trojan, groundtruth_path, &stats, &error)) {
         cerr << "Groundtruth error: " << error << "\n";
@@ -541,6 +572,7 @@ int main(int argc, char** argv) {
       cerr << "Groundtruth parse error: " << e.what() << "\n";
       return 1;
     }
+    cerr << "[TIMING] build_stats (GPU sim): " << ms_since(t_phase) << " ms\n";
 
     cout << "pattern_total " << stats.total_patterns << "\n";
     cout << "trigger_patterns " << stats.trigger_patterns_total << "\n";
@@ -549,6 +581,7 @@ int main(int argc, char** argv) {
     cout << "trojan_rates " << trojan_rate << '\n';
     cout << fixed << setprecision(4);
 
+    t_phase = std::chrono::steady_clock::now();
     vector<CandidateInfo> candidates;
     if (!build_candidates(stats,
                           &candidates,
@@ -558,6 +591,7 @@ int main(int argc, char** argv) {
     }
 
     vector<int> candidate_indices = candidate_gate_indices(candidates);
+    cerr << "[TIMING] build_candidates: " << ms_since(t_phase) << " ms\n";
 
     bool filter_rule_opt = did_rule_merge;
     if (!filter_rule_opt) {
@@ -602,6 +636,7 @@ int main(int argc, char** argv) {
     // Virtual features are computed on-the-fly from simulation results.
     // The circuit is NOT modified during the VN iteration phase.
     // After iterations, only used VNs are inserted into the circuit.
+    t_phase = std::chrono::steady_clock::now();
     std::vector<VirtualNodeDef> final_vn_defs;  // VN defs for the SAT loop.
     if (!options.no_virtual) {
       // Collect base candidates (exclude any previously added virtual nodes).
@@ -862,6 +897,9 @@ int main(int argc, char** argv) {
       }
     }
 
+    cerr << "[TIMING] virtual_node: " << ms_since(t_phase) << " ms\n";
+
+    t_phase = std::chrono::steady_clock::now();
     {
       MiningOptions mining_options;
       mining_options.max_depth = options.max_depth;
@@ -897,6 +935,7 @@ int main(int argc, char** argv) {
              << " -> " << result.model.rules.size() << "\n";
       }
     }
+    cerr << "[TIMING] final_mining: " << ms_since(t_phase) << " ms\n";
 
     cout << "training_set pos=" << result.data_pos
          << " neg=" << result.data_neg << '\n';
@@ -935,6 +974,8 @@ int main(int argc, char** argv) {
     break;
   }
 
+  t_phase = std::chrono::steady_clock::now();
+  auto t_sub = std::chrono::steady_clock::now();
   int kill_trigger_idx = -1;
   int kill_value = 0;
   std::string kill_error;
@@ -968,11 +1009,13 @@ int main(int argc, char** argv) {
          << " level " << base_level << " -> " << killed_level << "\n";
 
     std::size_t mismatch_index = 0;
+    t_sub = std::chrono::steady_clock::now();
     if (!verify_patch_groundtruth(golden,
                                   killed,
                                   stats.trigger_patterns,
                                   &mismatch_index,
                                   &error)) {
+      cerr << "[TIMING]   kill_verify: " << ms_since(t_sub) << " ms (FAIL)\n";
       cerr << "Payload kill verification failed: " << error;
       if (!stats.trigger_patterns.empty()) {
         cerr << " pattern " << mismatch_index;
@@ -980,6 +1023,7 @@ int main(int argc, char** argv) {
       cerr << "\n";
       // Fall through to the payload-fix path instead of giving up.
     } else {
+      cerr << "[TIMING]   kill_verify: " << ms_since(t_sub) << " ms (PASS)\n";
       const long long delta_area =
           static_cast<long long>(killed_area) -
           static_cast<long long>(base_area);
@@ -997,11 +1041,16 @@ int main(int argc, char** argv) {
       cout << "payload_fix_selected 1 area_delta " << delta_area
            << " level_delta " << delta_level << "\n";
       cout << "payload_fix_bench " << output_path << "\n";
+      cerr << "[TIMING] kill+verify+write: " << ms_since(t_phase) << " ms\n";
+      cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
       return 0;
     }
   } else if (!kill_error.empty()) {
     cerr << "payload_kill_trigger skipped: " << kill_error << "\n";
   }
+
+  cerr << "[TIMING]   try_kill_simple: " << ms_since(t_sub) << " ms\n";
+  t_sub = std::chrono::steady_clock::now();
 
   // When the trigger is a virtual AND node, expand to its constituent real
   // signals and try killing each one.  This avoids the expensive payload-fix
@@ -1030,6 +1079,12 @@ int main(int argc, char** argv) {
         const std::string& rname = working_trojan.node_name(real_node);
         if (rname.size() >= 3 &&
             rname[0] == 'v' && rname[1] == 'n' && rname[2] == '_') {
+          continue;
+        }
+        // Skip if the real node is not a gate (e.g. PI).
+        const cell& real_cell = working_trojan.get_cell(real_node);
+        if (real_cell.ctype != CType::GATE) {
+          cerr << "vn_expand_kill: skip non-gate " << rname << "\n";
           continue;
         }
         circuit trial = working_trojan;
@@ -1078,6 +1133,8 @@ int main(int argc, char** argv) {
           cout << "payload_fix_selected 1 area_delta " << delta_area
                << " level_delta " << delta_level << "\n";
           cout << "payload_fix_bench " << output_path << "\n";
+          cerr << "[TIMING] vn_expand_kill+verify+write: " << ms_since(t_phase) << " ms\n";
+          cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
           return 0;
         } else {
           cerr << "vn_expand_kill: " << working_trojan.node_name(real_node)
@@ -1089,6 +1146,9 @@ int main(int argc, char** argv) {
     }
   }
 
+  cerr << "[TIMING]   vn_expand_kill: " << ms_since(t_sub) << " ms\n";
+  t_sub = std::chrono::steady_clock::now();
+
   std::vector<int> payload_fix_nodes;
   analyze_payload_nodes(golden,
                         working_trojan,
@@ -1096,6 +1156,7 @@ int main(int argc, char** argv) {
                         result,
                         merged_match_idx,
                         &payload_fix_nodes);
+  cerr << "[TIMING]   analyze_payload: " << ms_since(t_sub) << " ms\n";
 
   if (!payload_fix_nodes.empty()) {
     circuit base_eval = working_trojan;
@@ -1159,11 +1220,13 @@ int main(int argc, char** argv) {
     }
 
     std::size_t mismatch_index = 0;
+    t_sub = std::chrono::steady_clock::now();
     if (!verify_patch_groundtruth(golden,
                                   patched,
                                   stats.trigger_patterns,
                                   &mismatch_index,
                                   &error)) {
+      cerr << "[TIMING]   final_verify: " << ms_since(t_sub) << " ms (FAIL)\n";
       cerr << "Payload fix verification failed: " << error;
       if (!stats.trigger_patterns.empty()) {
         cerr << " pattern " << mismatch_index;
@@ -1171,6 +1234,7 @@ int main(int argc, char** argv) {
       cerr << "\n";
       cout << "payload_fix_apply skipped: groundtruth_verify_failed\n";
     } else {
+      cerr << "[TIMING]   final_verify: " << ms_since(t_sub) << " ms (PASS)\n";
       std::size_t patched_area = 0;
       std::size_t patched_level = 0;
       try {
@@ -1205,5 +1269,7 @@ int main(int argc, char** argv) {
     cout << "payload_fix_apply skipped: no fix nodes\n";
   }
 
+  cerr << "[TIMING] kill+patch+verify+write: " << ms_since(t_phase) << " ms\n";
+  cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
   return 0;
 }

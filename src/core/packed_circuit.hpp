@@ -22,9 +22,28 @@ class packed_circuit {
   // Fast simulate that skips ensure_eval_order (call prepare_batch first).
   void simulate_bits_fast(const word_t* pi_bits, std::size_t pattern_count);
 
+  // Multi-word-block simulation: processes num_wb * 64 patterns in one pass.
+  // pi_bits layout: pi_bits[pi_index * num_wb + wb]
+  // Results stored in multi_values_[node * num_wb + wb].
+  // Call prepare_batch() first.
+  void simulate_multi_fast(const word_t* pi_bits, std::size_t num_wb,
+                           word_t last_wb_mask);
+
+  // Accessors for multi-wb results.
+  word_t node_bits_multi(int node_idx, std::size_t wb) const {
+    return multi_values_[static_cast<std::size_t>(node_idx) * multi_wb_ + wb];
+  }
+  word_t po_bits_multi(std::size_t po_pos, std::size_t wb) const {
+    return multi_values_[static_cast<std::size_t>(
+        base_->po_indices()[po_pos]) * multi_wb_ + wb];
+  }
+  std::size_t multi_wb() const { return multi_wb_; }
+  const word_t* multi_values_data() const { return multi_values_.data(); }
+
   std::size_t pattern_count() const { return pattern_count_; }
   word_t pattern_mask() const { return pattern_mask_; }
 
+  const word_t* values_data() const { return values_.data(); }
   word_t node_bits(int node_idx) const;
   int node_value(int node_idx, std::size_t pattern_idx) const;
 
@@ -49,6 +68,8 @@ class packed_circuit {
 
   circuit* base_;
   std::vector<word_t> values_;
+  std::vector<word_t> multi_values_;
+  std::size_t multi_wb_ = 0;
   std::size_t pattern_count_ = 0;
   word_t pattern_mask_ = 0;
 };

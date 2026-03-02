@@ -1,6 +1,7 @@
 #include "miner.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -1506,6 +1507,12 @@ bool run_mining(const circuit& golden,
   tree_options.max_depth = options.max_depth;
   tree_options.force_split = options.force_split;
 
+  auto t_mine = std::chrono::steady_clock::now();
+  auto mine_ms = [](auto start) {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+  };
+
   std::vector<int> feature_nodes = build_feature_nodes(trojan, candidate_gate_indices, options.include_pi);
   if (feature_nodes.empty()) {
     if (error) {
@@ -1529,6 +1536,8 @@ bool run_mining(const circuit& golden,
     }
     return false;
   }
+  std::cerr << "[TIMING]     build_training_data: " << mine_ms(t_mine) << " ms\n";
+  t_mine = std::chrono::steady_clock::now();
 
   if (!run_mining_loop(golden,
                        trojan,
@@ -1547,6 +1556,7 @@ bool run_mining(const circuit& golden,
     }
     return false;
   }
+  std::cerr << "[TIMING]     run_mining_loop: " << mine_ms(t_mine) << " ms\n";
 
   if (options.strict_retry && result->train_false_pos > 0) {
     std::cout << "strict_mode 1\n";

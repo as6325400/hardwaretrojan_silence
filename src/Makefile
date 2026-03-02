@@ -22,7 +22,7 @@ ifneq ($(NVCC),)
   CUDA_HOME ?= $(shell dirname $(shell dirname $(NVCC)))
   NVCCFLAGS := -std=c++17 -O2 --gpu-architecture=native \
                -Xcompiler "-fopenmp -O2 -march=native" \
-               -I../extern -I$(CUDA_HOME)/include
+               -DUSE_CUDA -I../extern -I$(CUDA_HOME)/include
   CXXFLAGS  += -DUSE_CUDA -I$(CUDA_HOME)/include
   LDFLAGS   += -lcudart -lcurand -L$(CUDA_HOME)/lib64
   CUDA_SRCS := $(wildcard core/*.cu algorithm/*.cu)

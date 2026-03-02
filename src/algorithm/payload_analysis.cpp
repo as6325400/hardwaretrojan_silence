@@ -9,279 +9,9 @@
 
 #include <z3++.h>
 
+#include "../core/batch_simulator.hpp"
+
 namespace {
-
-struct SimState {
-  std::vector<int> values;
-  std::vector<int> outputs;
-};
-
-SimState simulate_with_override(circuit& c,
-                                const std::vector<int>& pi_values,
-                                int override_idx,
-                                int override_value) {
-  c.ensure_eval_order();
-  const auto& pi_indices = c.pi_indices();
-  if (pi_values.size() != pi_indices.size()) {
-    throw std::runtime_error("PI vector size mismatch");
-  }
-
-  SimState state;
-  state.values.assign(c.node_count(), -1);
-
-  for (std::size_t i = 0; i < c.node_count(); ++i) {
-    const cell& cell = c.get_cell(static_cast<int>(i));
-    if (cell.ctype == CType::CONST) {
-      state.values[i] = cell.val ? 1 : 0;
-    }
-  }
-
-  for (std::size_t i = 0; i < pi_indices.size(); ++i) {
-    state.values[static_cast<std::size_t>(pi_indices[i])] =
-        pi_values[i] ? 1 : 0;
-  }
-
-  if (override_idx >= 0 &&
-      static_cast<std::size_t>(override_idx) < state.values.size()) {
-    state.values[static_cast<std::size_t>(override_idx)] =
-        override_value ? 1 : 0;
-  }
-
-  for (int idx : c.eval_order()) {
-    if (override_idx == idx) {
-      continue;
-    }
-    const cell& gate = c.get_cell(idx);
-    if (gate.ctype != CType::GATE) {
-      continue;
-    }
-    if (gate.inputs.empty()) {
-      throw std::runtime_error("gate with no inputs: " + c.node_name(idx));
-    }
-    auto read_input = [&](int input_idx) -> int {
-      if (input_idx < 0 ||
-          static_cast<std::size_t>(input_idx) >= state.values.size()) {
-        throw std::runtime_error("input index out of range for node: " +
-                                 c.node_name(idx));
-      }
-      int val = state.values[static_cast<std::size_t>(input_idx)];
-      if (val < 0) {
-        throw std::runtime_error("uninitialized input for node: " +
-                                 c.node_name(idx));
-      }
-      return val ? 1 : 0;
-    };
-
-    int out = 0;
-    switch (gate.gtype) {
-      case GType::AND: {
-        out = 1;
-        for (int input_idx : gate.inputs) {
-          out &= read_input(input_idx);
-        }
-        break;
-      }
-      case GType::OR: {
-        out = 0;
-        for (int input_idx : gate.inputs) {
-          out |= read_input(input_idx);
-        }
-        break;
-      }
-      case GType::NAND: {
-        out = 1;
-        for (int input_idx : gate.inputs) {
-          out &= read_input(input_idx);
-        }
-        out = out ? 0 : 1;
-        break;
-      }
-      case GType::NOR: {
-        out = 0;
-        for (int input_idx : gate.inputs) {
-          out |= read_input(input_idx);
-        }
-        out = out ? 0 : 1;
-        break;
-      }
-      case GType::NOT: {
-        if (gate.inputs.size() != 1U) {
-          throw std::runtime_error("NOT gate expects 1 input: " +
-                                   c.node_name(idx));
-        }
-        out = read_input(gate.inputs[0]) ? 0 : 1;
-        break;
-      }
-      case GType::BUFF: {
-        if (gate.inputs.size() != 1U) {
-          throw std::runtime_error("BUFF gate expects 1 input: " +
-                                   c.node_name(idx));
-        }
-        out = read_input(gate.inputs[0]);
-        break;
-      }
-      case GType::XOR: {
-        out = 0;
-        for (int input_idx : gate.inputs) {
-          out ^= read_input(input_idx);
-        }
-        break;
-      }
-      case GType::XNOR: {
-        out = 0;
-        for (int input_idx : gate.inputs) {
-          out ^= read_input(input_idx);
-        }
-        out = out ? 0 : 1;
-        break;
-      }
-    }
-    state.values[static_cast<std::size_t>(idx)] = out;
-  }
-
-  state.outputs.reserve(c.po_count());
-  for (int idx : c.po_indices()) {
-    int val = state.values[static_cast<std::size_t>(idx)];
-    if (val < 0) {
-      throw std::runtime_error("output not evaluated: " + c.node_name(idx));
-    }
-    state.outputs.push_back(val);
-  }
-
-  return state;
-}
-
-SimState simulate_with_flips(circuit& c,
-                             const std::vector<int>& pi_values,
-                             const std::vector<char>& flip_mask) {
-  c.ensure_eval_order();
-  const auto& pi_indices = c.pi_indices();
-  if (pi_values.size() != pi_indices.size()) {
-    throw std::runtime_error("PI vector size mismatch");
-  }
-  if (flip_mask.size() != c.node_count()) {
-    throw std::runtime_error("flip mask size mismatch");
-  }
-
-  SimState state;
-  state.values.assign(c.node_count(), -1);
-
-  for (std::size_t i = 0; i < c.node_count(); ++i) {
-    const cell& cell = c.get_cell(static_cast<int>(i));
-    if (cell.ctype == CType::CONST) {
-      state.values[i] = cell.val ? 1 : 0;
-    }
-  }
-
-  for (std::size_t i = 0; i < pi_indices.size(); ++i) {
-    state.values[static_cast<std::size_t>(pi_indices[i])] =
-        pi_values[i] ? 1 : 0;
-  }
-
-  for (int idx : c.eval_order()) {
-    const cell& gate = c.get_cell(idx);
-    if (gate.ctype != CType::GATE) {
-      continue;
-    }
-    if (gate.inputs.empty()) {
-      throw std::runtime_error("gate with no inputs: " + c.node_name(idx));
-    }
-    auto read_input = [&](int input_idx) -> int {
-      if (input_idx < 0 ||
-          static_cast<std::size_t>(input_idx) >= state.values.size()) {
-        throw std::runtime_error("input index out of range for node: " +
-                                 c.node_name(idx));
-      }
-      int val = state.values[static_cast<std::size_t>(input_idx)];
-      if (val < 0) {
-        throw std::runtime_error("uninitialized input for node: " +
-                                 c.node_name(idx));
-      }
-      return val ? 1 : 0;
-    };
-
-    int out = 0;
-    switch (gate.gtype) {
-      case GType::AND: {
-        out = 1;
-        for (int input_idx : gate.inputs) {
-          out &= read_input(input_idx);
-        }
-        break;
-      }
-      case GType::OR: {
-        out = 0;
-        for (int input_idx : gate.inputs) {
-          out |= read_input(input_idx);
-        }
-        break;
-      }
-      case GType::NAND: {
-        out = 1;
-        for (int input_idx : gate.inputs) {
-          out &= read_input(input_idx);
-        }
-        out = out ? 0 : 1;
-        break;
-      }
-      case GType::NOR: {
-        out = 0;
-        for (int input_idx : gate.inputs) {
-          out |= read_input(input_idx);
-        }
-        out = out ? 0 : 1;
-        break;
-      }
-      case GType::NOT: {
-        if (gate.inputs.size() != 1U) {
-          throw std::runtime_error("NOT gate expects 1 input: " +
-                                   c.node_name(idx));
-        }
-        out = read_input(gate.inputs[0]) ? 0 : 1;
-        break;
-      }
-      case GType::BUFF: {
-        if (gate.inputs.size() != 1U) {
-          throw std::runtime_error("BUFF gate expects 1 input: " +
-                                   c.node_name(idx));
-        }
-        out = read_input(gate.inputs[0]);
-        break;
-      }
-      case GType::XOR: {
-        out = 0;
-        for (int input_idx : gate.inputs) {
-          out ^= read_input(input_idx);
-        }
-        break;
-      }
-      case GType::XNOR: {
-        out = 0;
-        for (int input_idx : gate.inputs) {
-          out ^= read_input(input_idx);
-        }
-        out = out ? 0 : 1;
-        break;
-      }
-    }
-
-    if (flip_mask[static_cast<std::size_t>(idx)]) {
-      out = out ? 0 : 1;
-    }
-    state.values[static_cast<std::size_t>(idx)] = out;
-  }
-
-  state.outputs.reserve(c.po_count());
-  for (int idx : c.po_indices()) {
-    int val = state.values[static_cast<std::size_t>(idx)];
-    if (val < 0) {
-      throw std::runtime_error("output not evaluated: " + c.node_name(idx));
-    }
-    state.outputs.push_back(val);
-  }
-
-  return state;
-}
 
 void mark_fanin_cone(const circuit& c,
                      int node_idx,
@@ -313,21 +43,6 @@ void mark_fanin_cone(const circuit& c,
       }
     }
   }
-}
-
-std::vector<int> extract_features_from_values(
-    const std::vector<int>& values,
-    const std::vector<int>& feature_nodes) {
-  std::vector<int> row;
-  row.reserve(feature_nodes.size());
-  for (int idx : feature_nodes) {
-    if (idx < 0 || static_cast<std::size_t>(idx) >= values.size()) {
-      row.push_back(0);
-    } else {
-      row.push_back(values[static_cast<std::size_t>(idx)] ? 1 : 0);
-    }
-  }
-  return row;
 }
 
 std::vector<z3::expr> make_node_vars(z3::context& ctx,
@@ -748,47 +463,6 @@ bool solve_maxsat_batch(const circuit& trojan,
   return true;
 }
 
-bool check_pattern_fixed(circuit& trojan_eval,
-                         const std::vector<int>& pattern,
-                         const std::vector<int>& golden_outputs,
-                         const std::vector<int>& feature_nodes,
-                         const DecisionTreeModel& model,
-                         int rule_match_node_idx,
-                         const std::vector<char>& flip_mask,
-                         bool* rule_match_out,
-                         std::string* error) {
-  if (error) {
-    error->clear();
-  }
-  bool rule_match = false;
-  try {
-    SimState base_state =
-        simulate_with_override(trojan_eval, pattern, -1, 0);
-    if (rule_match_node_idx >= 0 &&
-        static_cast<std::size_t>(rule_match_node_idx) < base_state.values.size()) {
-      rule_match = base_state.values[static_cast<std::size_t>(rule_match_node_idx)] != 0;
-    } else {
-      const std::vector<int> features =
-          extract_features_from_values(base_state.values, feature_nodes);
-      rule_match = eval_rules(model.rules, features);
-    }
-    if (rule_match_out) {
-      *rule_match_out = rule_match;
-    }
-    if (!rule_match) {
-      return false;
-    }
-    SimState flipped_state =
-        simulate_with_flips(trojan_eval, pattern, flip_mask);
-    return flipped_state.outputs == golden_outputs;
-  } catch (const std::exception& e) {
-    if (error) {
-      *error = e.what();
-    }
-    return false;
-  }
-}
-
 }  // namespace
 
 void analyze_payload_nodes(const circuit& golden,
@@ -879,16 +553,10 @@ void analyze_payload_nodes(const circuit& golden,
   }
   std::cout << "payload_forbidden_nodes " << forbidden_count << "\n";
 
-  std::vector<std::vector<int>> golden_outputs_list(pattern_count);
-  circuit golden_eval = golden;
-  for (std::size_t p = 0; p < pattern_count; ++p) {
-    const auto& pattern = stats.trigger_patterns[p];
-    try {
-      golden_outputs_list[p] = golden_eval.simulate(pattern);
-    } catch (const std::exception& e) {
-      std::cerr << "payload_analysis simulation error: " << e.what() << "\n";
-      return;
-    }
+  std::vector<std::vector<int>> golden_outputs_list;
+  {
+    circuit golden_eval = golden;
+    batch_compute_po(golden_eval, stats.trigger_patterns, golden_outputs_list);
   }
 
   std::vector<std::vector<char>> po_cones(
@@ -1000,39 +668,75 @@ void analyze_payload_nodes(const circuit& golden,
               << " flips " << batch_nodes.size()
               << " new " << fix_nodes.size() << "\n";
 
-    std::vector<std::size_t> new_remaining;
-    new_remaining.reserve(remaining_indices.size());
-    std::size_t fixed_count = 0;
+    // ── Phase 1: Batch simulate trojan to determine rule matches ──────────
+    std::vector<std::size_t> rule_matched;
     std::size_t rule_miss = 0;
-    for (std::size_t idx : remaining_indices) {
-      if (idx >= stats.trigger_patterns.size() ||
-          idx >= golden_outputs_list.size()) {
-        continue;
+    {
+      batch_simulator sim_t(trojan_eval);
+      const std::size_t mwb = sim_t.max_wb();
+      std::size_t off = 0;
+      while (off < remaining_indices.size()) {
+        const std::size_t cnt = std::min(mwb * batch_simulator::kBits,
+                                         remaining_indices.size() - off);
+        const std::size_t cwb = sim_t.pack_indexed_patterns(
+            stats.trigger_patterns, remaining_indices.data() + off, cnt);
+        sim_t.simulate(cwb, cnt);
+
+        for (std::size_t p = 0; p < cnt; ++p) {
+          bool match = false;
+          if (rule_match_node_idx >= 0) {
+            match = sim_t.node_value(rule_match_node_idx, p) != 0;
+          } else {
+            std::vector<int> features(result.feature_nodes.size());
+            for (std::size_t f = 0; f < result.feature_nodes.size(); ++f) {
+              features[f] = sim_t.node_value(result.feature_nodes[f], p);
+            }
+            match = eval_rules(result.model.rules, features);
+          }
+          if (match) {
+            rule_matched.push_back(remaining_indices[off + p]);
+          } else {
+            rule_miss += 1;
+          }
+        }
+        off += cnt;
       }
-      const auto& pattern = stats.trigger_patterns[idx];
-      const auto& golden_outputs = golden_outputs_list[idx];
-      bool rule_match = false;
-      const bool fixed = check_pattern_fixed(trojan_eval,
-                                             pattern,
-                                             golden_outputs,
-                                             result.feature_nodes,
-                                             result.model,
-                                             rule_match_node_idx,
-                                             flip_mask,
-                                             &rule_match,
-                                             &error);
-      if (!error.empty()) {
-        std::cerr << "payload_check error: " << error << "\n";
-        return;
+    }
+
+    // ── Phase 2: Batch simulate flipped circuit on ALL patterns ──────────
+    std::vector<std::size_t> new_remaining;
+    std::size_t fixed_count = 0;
+    if (!fix_nodes.empty()) {
+      circuit flipped = trojan;
+      for (int idx : fix_nodes) {
+        flipped.invert_gate_type(idx);
       }
-      if (!rule_match) {
-        rule_miss += 1;
-        continue;
-      }
-      if (fixed) {
-        fixed_count += 1;
-      } else {
-        new_remaining.push_back(idx);
+      batch_simulator sim_flip(flipped, golden.node_count());
+      const std::size_t mwb = sim_flip.max_wb();
+      std::size_t off = 0;
+      while (off < pattern_count) {
+        const std::size_t cnt = std::min(mwb * batch_simulator::kBits,
+                                         pattern_count - off);
+        const std::size_t cwb = sim_flip.pack_patterns(
+            stats.trigger_patterns, off, cnt);
+        sim_flip.simulate(cwb, cnt);
+
+        for (std::size_t p = 0; p < cnt; ++p) {
+          const std::size_t pat_idx = off + p;
+          const auto& golden_out = golden_outputs_list[pat_idx];
+          bool match = true;
+          for (std::size_t o = 0; o < po_count && match; ++o) {
+            if (sim_flip.po_value(o, p) != golden_out[o]) {
+              match = false;
+            }
+          }
+          if (match) {
+            fixed_count += 1;
+          } else {
+            new_remaining.push_back(pat_idx);
+          }
+        }
+        off += cnt;
       }
     }
 

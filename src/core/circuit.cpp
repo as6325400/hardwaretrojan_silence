@@ -95,6 +95,26 @@ void circuit::force_gate_const(int idx, int value) {
   gate_count_cached_ = 0;
 }
 
+void circuit::invert_gate_type(int idx) {
+  if (idx < 0 || static_cast<std::size_t>(idx) >= cells_.size()) {
+    throw std::runtime_error("node index out of range");
+  }
+  cell& c = cells_[idx];
+  if (c.ctype != CType::GATE) {
+    throw std::runtime_error("node is not a gate: " + node_name(idx));
+  }
+  switch (c.gtype) {
+    case GType::AND:  c.gtype = GType::NAND; break;
+    case GType::NAND: c.gtype = GType::AND;  break;
+    case GType::OR:   c.gtype = GType::NOR;  break;
+    case GType::NOR:  c.gtype = GType::OR;   break;
+    case GType::NOT:  c.gtype = GType::BUFF; break;
+    case GType::BUFF: c.gtype = GType::NOT;  break;
+    case GType::XOR:  c.gtype = GType::XNOR; break;
+    case GType::XNOR: c.gtype = GType::XOR;  break;
+  }
+}
+
 void circuit::add_output_name(const std::string& name) {
   po_names_.push_back(name);
 }

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -13,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../core/batch_simulator.hpp"
 #include "../core/packed_circuit.hpp"
 #include "../io/eqn_parser.hpp"
 
@@ -1312,177 +1314,8 @@ bool verify_patch_groundtruth(const circuit& golden,
                               const std::vector<std::vector<int>>& patterns,
                               std::size_t* mismatch_index,
                               std::string* error) {
-  if (error) {
-    error->clear();
-  }
-  if (mismatch_index) {
-    *mismatch_index = 0;
-  }
-  if (patterns.empty()) {
-    return true;
-  }
-  if (golden.pi_count() != patched.pi_count()) {
-    if (error) {
-      *error = "PI count mismatch";
-    }
-    return false;
-  }
-  if (golden.po_count() != patched.po_count()) {
-    if (error) {
-      *error = "PO count mismatch";
-    }
-    return false;
-  }
-
-#ifdef USE_CUDA
-  // ── GPU path: batch patterns into GPU word blocks ──────────────────────────
-  if (golden.node_count() >= 50000) try {
-    circuit golden_copy = golden;
-    circuit patched_copy = patched;
-    golden_copy.ensure_eval_order();
-    patched_copy.ensure_eval_order();
-
-    const std::size_t num_pis = golden.pi_count();
-    const std::size_t max_wb = gpu_compute_max_word_blocks(
-        golden_copy.node_count(), patched_copy.node_count(), num_pis, 0);
-
-    GpuCircuit gpu_golden(golden_copy, max_wb);
-    GpuCircuit gpu_patched(patched_copy, max_wb);
-
-    // Allocate device buffers for PI bits and diff_mask
-    GpuCircuit::word_t* d_pi_bits = nullptr;
-    GpuCircuit::word_t* d_diff_mask = nullptr;
-    cudaMalloc(&d_pi_bits, num_pis * max_wb * sizeof(GpuCircuit::word_t));
-    cudaMalloc(&d_diff_mask, max_wb * sizeof(GpuCircuit::word_t));
-
-    constexpr std::size_t kBits = 64;
-    const std::size_t total = patterns.size();
-    std::size_t offset = 0;
-
-    while (offset < total) {
-      const std::size_t chunk = std::min(max_wb * kBits, total - offset);
-      const std::size_t chunk_wb = (chunk + kBits - 1) / kBits;
-      const GpuCircuit::word_t pmask =
-          (chunk % kBits == 0) ? ~GpuCircuit::word_t(0)
-                               : (GpuCircuit::word_t(1) << (chunk % kBits)) - 1;
-
-      // Pack patterns into PI bit layout
-      std::vector<GpuCircuit::word_t> h_pi(num_pis * chunk_wb, 0);
-      gpu_pack_pi_patterns(patterns, offset, chunk, num_pis,
-                           h_pi.data(), chunk_wb);
-
-      cudaMemcpy(d_pi_bits, h_pi.data(),
-                 num_pis * chunk_wb * sizeof(GpuCircuit::word_t),
-                 cudaMemcpyHostToDevice);
-
-      gpu_golden.simulate(d_pi_bits, chunk_wb);
-      gpu_patched.simulate(d_pi_bits, chunk_wb);
-      gpu_compare_po(gpu_golden, gpu_patched, d_diff_mask, chunk_wb, pmask);
-
-      // Download diff_mask and check
-      std::vector<GpuCircuit::word_t> h_diff(chunk_wb);
-      cudaMemcpy(h_diff.data(), d_diff_mask,
-                 chunk_wb * sizeof(GpuCircuit::word_t),
-                 cudaMemcpyDeviceToHost);
-
-      for (std::size_t w = 0; w < chunk_wb; ++w) {
-        if (h_diff[w] != 0) {
-          const std::size_t bit = static_cast<std::size_t>(
-              __builtin_ctzll(h_diff[w]));
-          const std::size_t idx = offset + w * kBits + bit;
-          if (mismatch_index) *mismatch_index = idx;
-          if (error) *error = "groundtruth mismatch";
-          cudaFree(d_pi_bits);
-          cudaFree(d_diff_mask);
-          return false;
-        }
-      }
-
-      offset += chunk;
-    }
-
-    cudaFree(d_pi_bits);
-    cudaFree(d_diff_mask);
-    return true;
-  } catch (...) {
-    // GPU failed — fall through to CPU path
-  }
-#endif
-
-  // ── CPU fallback ───────────────────────────────────────────────────────────
-  circuit golden_eval = golden;
-  circuit patched_eval = patched;
-  packed_circuit golden_packed(golden_eval);
-  packed_circuit patched_packed(patched_eval);
-  std::size_t offset = 0;
-  while (offset < patterns.size()) {
-    const std::size_t remaining = patterns.size() - offset;
-    const std::size_t block_size =
-        std::min(packed_circuit::kWordBits, remaining);
-    std::vector<std::vector<int>> block;
-    block.reserve(block_size);
-    for (std::size_t p = 0; p < block_size; ++p) {
-      block.push_back(patterns[offset + p]);
-    }
-
-    bool packed_ok = false;
-    try {
-      golden_packed.simulate(block);
-      patched_packed.simulate(block);
-      packed_ok = true;
-    } catch (const std::exception& e) {
-      if (error) {
-        *error = e.what();
-      }
-    }
-
-    if (!packed_ok) {
-      for (std::size_t p = 0; p < block.size(); ++p) {
-        try {
-          const std::vector<int> g_out = golden_eval.simulate(block[p]);
-          const std::vector<int> p_out = patched_eval.simulate(block[p]);
-          if (g_out != p_out) {
-            if (mismatch_index) {
-              *mismatch_index = offset + p;
-            }
-            if (error) {
-              *error = "groundtruth mismatch";
-            }
-            return false;
-          }
-        } catch (const std::exception& e) {
-          if (mismatch_index) {
-            *mismatch_index = offset + p;
-          }
-          if (error) {
-            *error = e.what();
-          }
-          return false;
-        }
-      }
-      offset += block_size;
-      continue;
-    }
-
-    packed_circuit::word_t diff_mask = 0;
-    for (std::size_t o = 0; o < golden_eval.po_count(); ++o) {
-      diff_mask |= (golden_packed.po_bits(o) ^ patched_packed.po_bits(o));
-    }
-    diff_mask &= packed_circuit::mask_for_count(block_size);
-    if (diff_mask != 0) {
-      const std::size_t bit =
-          static_cast<std::size_t>(__builtin_ctzll(diff_mask));
-      if (mismatch_index) {
-        *mismatch_index = offset + bit;
-      }
-      if (error) {
-        *error = "groundtruth mismatch";
-      }
-      return false;
-    }
-
-    offset += block_size;
-  }
-
-  return true;
+  circuit golden_copy = golden;
+  circuit patched_copy = patched;
+  return batch_verify_po(golden_copy, patched_copy, patterns,
+                         mismatch_index, error);
 }

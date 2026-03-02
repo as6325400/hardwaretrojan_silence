@@ -202,6 +202,116 @@ void packed_circuit::simulate_bits_fast(const word_t* pi_bits,
   }
 }
 
+void packed_circuit::simulate_multi_fast(const word_t* pi_bits,
+                                         std::size_t num_wb,
+                                         word_t last_wb_mask) {
+  const std::size_t N = base_->node_count();
+  const std::size_t S = num_wb;  // stride
+  multi_wb_ = S;
+  multi_values_.resize(N * S);
+  word_t* __restrict__ const vals = multi_values_.data();
+  std::memset(vals, 0, N * S * sizeof(word_t));
+
+  // Set PI values.
+  const auto& pi_indices = base_->pi_indices();
+  for (std::size_t i = 0; i < pi_indices.size(); ++i) {
+    word_t* dst = vals + static_cast<std::size_t>(pi_indices[i]) * S;
+    const word_t* src = pi_bits + i * S;
+    for (std::size_t w = 0; w < S; ++w) dst[w] = src[w];
+    dst[S - 1] &= last_wb_mask;
+  }
+
+  // Set constants.
+  for (std::size_t idx = 0; idx < N; ++idx) {
+    const cell& c = base_->get_cell(static_cast<int>(idx));
+    if (c.ctype == CType::CONST) {
+      word_t* dst = vals + idx * S;
+      if (c.val) {
+        for (std::size_t w = 0; w < S - 1; ++w) dst[w] = ~word_t(0);
+        dst[S - 1] = last_wb_mask;
+      }
+      // else: already zeroed by memset
+    }
+  }
+
+  // Evaluate gates.
+  for (int idx : base_->eval_order()) {
+    const cell& c = base_->get_cell(idx);
+    if (c.ctype != CType::GATE) continue;
+
+    word_t* __restrict__ out = vals + static_cast<std::size_t>(idx) * S;
+    switch (c.gtype) {
+      case GType::AND: {
+        for (std::size_t w = 0; w < S - 1; ++w) out[w] = ~word_t(0);
+        out[S - 1] = last_wb_mask;
+        for (int in : c.inputs) {
+          const word_t* inp = vals + static_cast<std::size_t>(in) * S;
+          for (std::size_t w = 0; w < S; ++w) out[w] &= inp[w];
+        }
+        break;
+      }
+      case GType::OR: {
+        for (std::size_t w = 0; w < S; ++w) out[w] = 0;
+        for (int in : c.inputs) {
+          const word_t* inp = vals + static_cast<std::size_t>(in) * S;
+          for (std::size_t w = 0; w < S; ++w) out[w] |= inp[w];
+        }
+        break;
+      }
+      case GType::NAND: {
+        for (std::size_t w = 0; w < S - 1; ++w) out[w] = ~word_t(0);
+        out[S - 1] = last_wb_mask;
+        for (int in : c.inputs) {
+          const word_t* inp = vals + static_cast<std::size_t>(in) * S;
+          for (std::size_t w = 0; w < S; ++w) out[w] &= inp[w];
+        }
+        for (std::size_t w = 0; w < S - 1; ++w) out[w] = ~out[w];
+        out[S - 1] = (~out[S - 1]) & last_wb_mask;
+        break;
+      }
+      case GType::NOR: {
+        for (std::size_t w = 0; w < S; ++w) out[w] = 0;
+        for (int in : c.inputs) {
+          const word_t* inp = vals + static_cast<std::size_t>(in) * S;
+          for (std::size_t w = 0; w < S; ++w) out[w] |= inp[w];
+        }
+        for (std::size_t w = 0; w < S - 1; ++w) out[w] = ~out[w];
+        out[S - 1] = (~out[S - 1]) & last_wb_mask;
+        break;
+      }
+      case GType::NOT: {
+        const word_t* inp = vals + static_cast<std::size_t>(c.inputs[0]) * S;
+        for (std::size_t w = 0; w < S - 1; ++w) out[w] = ~inp[w];
+        out[S - 1] = (~inp[S - 1]) & last_wb_mask;
+        break;
+      }
+      case GType::BUFF: {
+        const word_t* inp = vals + static_cast<std::size_t>(c.inputs[0]) * S;
+        for (std::size_t w = 0; w < S; ++w) out[w] = inp[w];
+        break;
+      }
+      case GType::XOR: {
+        for (std::size_t w = 0; w < S; ++w) out[w] = 0;
+        for (int in : c.inputs) {
+          const word_t* inp = vals + static_cast<std::size_t>(in) * S;
+          for (std::size_t w = 0; w < S; ++w) out[w] ^= inp[w];
+        }
+        break;
+      }
+      case GType::XNOR: {
+        for (std::size_t w = 0; w < S; ++w) out[w] = 0;
+        for (int in : c.inputs) {
+          const word_t* inp = vals + static_cast<std::size_t>(in) * S;
+          for (std::size_t w = 0; w < S; ++w) out[w] ^= inp[w];
+        }
+        for (std::size_t w = 0; w < S - 1; ++w) out[w] = ~out[w];
+        out[S - 1] = (~out[S - 1]) & last_wb_mask;
+        break;
+      }
+    }
+  }
+}
+
 packed_circuit::word_t packed_circuit::node_bits(int node_idx) const {
   ensure_node_index(node_idx);
   return values_[node_idx];
