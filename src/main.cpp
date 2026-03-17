@@ -1,10 +1,12 @@
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -47,6 +49,110 @@ packed_circuit::word_t take_first_bits(packed_circuit::word_t mask,
     count -= 1;
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// run_abc_cec: call ABC CEC and optionally extract counter-example pattern.
+// Returns true if circuits are equivalent.
+// On failure, *counter_example is filled with PI values from the
+// counter-example (indexed by circuit PI position).
+// ---------------------------------------------------------------------------
+bool run_abc_cec(const string& golden_path,
+                 const string& patched_path,
+                 const circuit& golden_circuit,
+                 vector<int>* counter_example) {
+  if (counter_example) counter_example->clear();
+
+  // Locate abc binary next to the main binary's grandparent directory.
+  // In practice the test script uses $BASE/abc — we derive it from the
+  // golden_path which lives under the project root.
+  string abc_bin;
+  {
+    auto pos = golden_path.rfind('/');
+    if (pos != string::npos) {
+      abc_bin = golden_path.substr(0, pos);  // …/benchmarks -> project root
+      pos = abc_bin.rfind('/');
+      if (pos != string::npos)
+        abc_bin = abc_bin.substr(0, pos);
+    }
+    abc_bin += "/abc";
+  }
+
+  string cmd = abc_bin + " -c \"cec " + golden_path + " " + patched_path + "\" 2>&1";
+  FILE* pipe = popen(cmd.c_str(), "r");
+  if (!pipe) {
+    cerr << "cec: failed to run abc\n";
+    return false;
+  }
+
+  string output;
+  {
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), pipe)) {
+      output += buf;
+    }
+  }
+  int rc = pclose(pipe);
+  (void)rc;
+
+  if (output.find("Networks are equivalent") != string::npos) {
+    return true;
+  }
+
+  // Parse counter-example from INPUT: line.
+  // Format: INPUT: name1 = 1'h1, name2 = 1'h0, ...
+  if (!counter_example) return false;
+
+  const auto& pi_indices = golden_circuit.pi_indices();
+  unordered_map<string, size_t> pi_name_to_pos;
+  pi_name_to_pos.reserve(pi_indices.size());
+  for (size_t pos = 0; pos < pi_indices.size(); ++pos) {
+    pi_name_to_pos[golden_circuit.node_name(pi_indices[pos])] = pos;
+  }
+
+  counter_example->assign(pi_indices.size(), 0);
+
+  // Find the INPUT: section in the output.
+  auto inp_pos = output.find("INPUT:");
+  if (inp_pos == string::npos) {
+    cerr << "cec: NOT EQUIVALENT but no INPUT section found\n";
+    counter_example->clear();
+    return false;
+  }
+
+  // Extract from "INPUT:" up to ".  OUTPUT:" or end of line.
+  auto out_pos = output.find(".  OUTPUT:", inp_pos);
+  string inp_section;
+  if (out_pos != string::npos) {
+    inp_section = output.substr(inp_pos + 7, out_pos - inp_pos - 7);
+  } else {
+    auto nl = output.find('\n', inp_pos);
+    inp_section = output.substr(inp_pos + 7,
+                                (nl != string::npos ? nl : output.size()) - inp_pos - 7);
+  }
+
+  // Parse comma-separated "name = 1'hX" entries.
+  istringstream iss(inp_section);
+  string token;
+  while (getline(iss, token, ',')) {
+    // Trim whitespace.
+    auto start = token.find_first_not_of(" \t\n\r");
+    if (start == string::npos) continue;
+    token = token.substr(start);
+    // Expected: "name = 1'hX"
+    auto eq = token.find(" = ");
+    if (eq == string::npos) continue;
+    string name = token.substr(0, eq);
+    string val_str = token.substr(eq + 3);
+    int val = 0;
+    if (val_str.find("1'h1") != string::npos) val = 1;
+    auto it = pi_name_to_pos.find(name);
+    if (it != pi_name_to_pos.end()) {
+      (*counter_example)[it->second] = val;
+    }
+  }
+
+  return false;
 }
 
 bool build_stats_from_groundtruth(const circuit& golden,
@@ -554,12 +660,24 @@ int main(int argc, char** argv) {
        << " force_split " << (options.force_split ? 1 : 0)
        << " strict_retry " << (options.strict_retry ? 1 : 0) << "\n";
 
+  const int kMaxCecRounds = 5;
+  std::vector<std::vector<int>> extra_trigger_patterns;
+  int cec_round = 0;
+  string fix_output_path;
+
+  for (cec_round = 0; cec_round < kMaxCecRounds; ++cec_round) {
+
   circuit working_trojan = trojan;
   PatternStats stats;
   MiningResult result;
   NegSampleTrace neg_trace;
   bool did_rule_merge = false;
   int merged_match_idx = -1;
+  bool fix_succeeded = false;
+
+  if (cec_round > 0) {
+    cout << "cec_retry_round " << cec_round + 1 << "\n";
+  }
 
   while (true) {
     t_phase = std::chrono::steady_clock::now();
@@ -573,6 +691,17 @@ int main(int argc, char** argv) {
       return 1;
     }
     cerr << "[TIMING] build_stats (GPU sim): " << ms_since(t_phase) << " ms\n";
+
+    // Append CEC counter-example patterns from previous rounds.
+    if (!extra_trigger_patterns.empty()) {
+      for (const auto& ep : extra_trigger_patterns) {
+        stats.trigger_patterns.push_back(ep);
+      }
+      stats.trigger_patterns_total = stats.trigger_patterns.size();
+      stats.mismatch_patterns = stats.trigger_patterns_total;
+      cout << "cec_extra_patterns " << extra_trigger_patterns.size()
+           << " total_trigger " << stats.trigger_patterns_total << "\n";
+    }
 
     cout << "pattern_total " << stats.total_patterns << "\n";
     cout << "trigger_patterns " << stats.trigger_patterns_total << "\n";
@@ -1031,19 +1160,18 @@ int main(int argc, char** argv) {
           static_cast<long long>(killed_level) -
           static_cast<long long>(base_level);
 
-      const string output_path = options.output_path.empty()
-                                     ? derive_patched_path(options.trojan_path)
-                                     : options.output_path;
-      if (!bench_io::write_bench_file(output_path, killed, &error)) {
+      fix_output_path = options.output_path.empty()
+                            ? derive_patched_path(options.trojan_path)
+                            : options.output_path;
+      if (!bench_io::write_bench_file(fix_output_path, killed, &error)) {
         cerr << "Write error: " << error << "\n";
         return 1;
       }
       cout << "payload_fix_selected 1 area_delta " << delta_area
            << " level_delta " << delta_level << "\n";
-      cout << "payload_fix_bench " << output_path << "\n";
+      cout << "payload_fix_bench " << fix_output_path << "\n";
       cerr << "[TIMING] kill+verify+write: " << ms_since(t_phase) << " ms\n";
-      cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
-      return 0;
+      fix_succeeded = true;
     }
   } else if (!kill_error.empty()) {
     cerr << "payload_kill_trigger skipped: " << kill_error << "\n";
@@ -1123,153 +1251,189 @@ int main(int argc, char** argv) {
           const long long delta_level =
               static_cast<long long>(trial_level) -
               static_cast<long long>(base_level);
-          const string output_path = options.output_path.empty()
-                                         ? derive_patched_path(options.trojan_path)
-                                         : options.output_path;
-          if (!bench_io::write_bench_file(output_path, trial, &error)) {
+          fix_output_path = options.output_path.empty()
+                                ? derive_patched_path(options.trojan_path)
+                                : options.output_path;
+          if (!bench_io::write_bench_file(fix_output_path, trial, &error)) {
             cerr << "Write error: " << error << "\n";
             return 1;
           }
           cout << "payload_fix_selected 1 area_delta " << delta_area
                << " level_delta " << delta_level << "\n";
-          cout << "payload_fix_bench " << output_path << "\n";
+          cout << "payload_fix_bench " << fix_output_path << "\n";
           cerr << "[TIMING] vn_expand_kill+verify+write: " << ms_since(t_phase) << " ms\n";
-          cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
-          return 0;
+          fix_succeeded = true;
+          break;
         } else {
           cerr << "vn_expand_kill: " << working_trojan.node_name(real_node)
                << " forced " << real_kill << " failed: " << error
                << " pattern " << mismatch_index << "\n";
         }
       }
-      cerr << "vn_expand_kill: no constituent signal passed verification\n";
+      if (!fix_succeeded) {
+        cerr << "vn_expand_kill: no constituent signal passed verification\n";
+      }
     }
   }
 
   cerr << "[TIMING]   vn_expand_kill: " << ms_since(t_sub) << " ms\n";
   t_sub = std::chrono::steady_clock::now();
 
-  std::vector<int> payload_fix_nodes;
-  analyze_payload_nodes(golden,
-                        working_trojan,
-                        stats,
-                        result,
-                        merged_match_idx,
-                        &payload_fix_nodes);
-  cerr << "[TIMING]   analyze_payload: " << ms_since(t_sub) << " ms\n";
+  if (!fix_succeeded) {
+    std::vector<int> payload_fix_nodes;
+    analyze_payload_nodes(golden,
+                          working_trojan,
+                          stats,
+                          result,
+                          merged_match_idx,
+                          &payload_fix_nodes);
+    cerr << "[TIMING]   analyze_payload: " << ms_since(t_sub) << " ms\n";
 
-  if (!payload_fix_nodes.empty()) {
-    circuit base_eval = working_trojan;
-    std::size_t base_area = 0;
-    std::size_t base_level = 0;
-    try {
-      base_eval.ensure_eval_order();
-      base_area = base_eval.area();
-      base_level = base_eval.level();
-    } catch (const std::exception& e) {
-      cerr << "Payload fix baseline error: " << e.what() << "\n";
-      return 1;
-    }
-
-    circuit patched = working_trojan;
-    for (int fix_idx : payload_fix_nodes) {
-      std::size_t step_area_before = 0;
-      std::size_t step_level_before = 0;
+    if (!payload_fix_nodes.empty()) {
+      circuit base_eval = working_trojan;
+      std::size_t base_area = 0;
+      std::size_t base_level = 0;
       try {
-        patched.ensure_eval_order();
-        step_area_before = patched.area();
-        step_level_before = patched.level();
+        base_eval.ensure_eval_order();
+        base_area = base_eval.area();
+        base_level = base_eval.level();
       } catch (const std::exception& e) {
-        cerr << "Payload fix step baseline error: " << e.what() << "\n";
+        cerr << "Payload fix baseline error: " << e.what() << "\n";
         return 1;
       }
 
-      const auto start = std::chrono::steady_clock::now();
-      const std::size_t base_nodes = patched.node_count();
-      bool used_bypass = false;
-      if (!apply_rule_patch(patched,
-                            result.feature_nodes,
-                            result.model,
-                            fix_idx,
-                            base_nodes,
-                            &used_bypass,
-                            &error)) {
-        cerr << "Payload fix apply error: " << error << "\n";
-        return 1;
-      }
-      const auto end = std::chrono::steady_clock::now();
-      const auto elapsed_ms =
-          std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+      circuit patched = working_trojan;
+      for (int fix_idx : payload_fix_nodes) {
+        std::size_t step_area_before = 0;
+        std::size_t step_level_before = 0;
+        try {
+          patched.ensure_eval_order();
+          step_area_before = patched.area();
+          step_level_before = patched.level();
+        } catch (const std::exception& e) {
+          cerr << "Payload fix step baseline error: " << e.what() << "\n";
+          return 1;
+        }
 
-      std::size_t step_area_after = 0;
-      std::size_t step_level_after = 0;
-      try {
-        patched.ensure_eval_order();
-        step_area_after = patched.area();
-        step_level_after = patched.level();
-      } catch (const std::exception& e) {
-        cerr << "Payload fix step area/level error: " << e.what() << "\n";
-        return 1;
+        const auto start = std::chrono::steady_clock::now();
+        const std::size_t base_nodes = patched.node_count();
+        bool used_bypass = false;
+        if (!apply_rule_patch(patched,
+                              result.feature_nodes,
+                              result.model,
+                              fix_idx,
+                              base_nodes,
+                              &used_bypass,
+                              &error)) {
+          cerr << "Payload fix apply error: " << error << "\n";
+          return 1;
+        }
+        const auto end = std::chrono::steady_clock::now();
+        const auto elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+        std::size_t step_area_after = 0;
+        std::size_t step_level_after = 0;
+        try {
+          patched.ensure_eval_order();
+          step_area_after = patched.area();
+          step_level_after = patched.level();
+        } catch (const std::exception& e) {
+          cerr << "Payload fix step area/level error: " << e.what() << "\n";
+          return 1;
+        }
+
+        cout << "payload_fix_step " << working_trojan.node_name(fix_idx)
+             << " time_ms " << elapsed_ms
+             << " area " << step_area_before << " -> " << step_area_after
+             << " level " << step_level_before << " -> " << step_level_after
+             << " bypass " << (used_bypass ? 1 : 0) << "\n";
       }
 
-      cout << "payload_fix_step " << working_trojan.node_name(fix_idx)
-           << " time_ms " << elapsed_ms
-           << " area " << step_area_before << " -> " << step_area_after
-           << " level " << step_level_before << " -> " << step_level_after
-           << " bypass " << (used_bypass ? 1 : 0) << "\n";
-    }
+      std::size_t mismatch_index = 0;
+      t_sub = std::chrono::steady_clock::now();
+      if (!verify_patch_groundtruth(golden,
+                                    patched,
+                                    stats.trigger_patterns,
+                                    &mismatch_index,
+                                    &error)) {
+        cerr << "[TIMING]   final_verify: " << ms_since(t_sub) << " ms (FAIL)\n";
+        cerr << "Payload fix verification failed: " << error;
+        if (!stats.trigger_patterns.empty()) {
+          cerr << " pattern " << mismatch_index;
+        }
+        cerr << "\n";
+        cout << "payload_fix_apply skipped: groundtruth_verify_failed\n";
+      } else {
+        cerr << "[TIMING]   final_verify: " << ms_since(t_sub) << " ms (PASS)\n";
+        std::size_t patched_area = 0;
+        std::size_t patched_level = 0;
+        try {
+          patched.ensure_eval_order();
+          patched_area = patched.area();
+          patched_level = patched.level();
+        } catch (const std::exception& e) {
+          cerr << "Payload fix area/level error: " << e.what() << "\n";
+          return 1;
+        }
 
-    std::size_t mismatch_index = 0;
-    t_sub = std::chrono::steady_clock::now();
-    if (!verify_patch_groundtruth(golden,
-                                  patched,
-                                  stats.trigger_patterns,
-                                  &mismatch_index,
-                                  &error)) {
-      cerr << "[TIMING]   final_verify: " << ms_since(t_sub) << " ms (FAIL)\n";
-      cerr << "Payload fix verification failed: " << error;
-      if (!stats.trigger_patterns.empty()) {
-        cerr << " pattern " << mismatch_index;
+        const long long delta_area =
+            static_cast<long long>(patched_area) -
+            static_cast<long long>(base_area);
+        const long long delta_level =
+            static_cast<long long>(patched_level) -
+            static_cast<long long>(base_level);
+
+        fix_output_path = options.output_path.empty()
+                              ? derive_patched_path(options.trojan_path)
+                              : options.output_path;
+        if (!bench_io::write_bench_file(fix_output_path, patched, &error)) {
+          cerr << "Write error: " << error << "\n";
+          return 1;
+        }
+        cout << "payload_fix_selected " << payload_fix_nodes.size()
+             << " area_delta " << delta_area
+             << " level_delta " << delta_level << "\n";
+        cout << "payload_fix_bench " << fix_output_path << "\n";
+        fix_succeeded = true;
       }
-      cerr << "\n";
-      cout << "payload_fix_apply skipped: groundtruth_verify_failed\n";
     } else {
-      cerr << "[TIMING]   final_verify: " << ms_since(t_sub) << " ms (PASS)\n";
-      std::size_t patched_area = 0;
-      std::size_t patched_level = 0;
-      try {
-        patched.ensure_eval_order();
-        patched_area = patched.area();
-        patched_level = patched.level();
-      } catch (const std::exception& e) {
-        cerr << "Payload fix area/level error: " << e.what() << "\n";
-        return 1;
-      }
-
-      const long long delta_area =
-          static_cast<long long>(patched_area) -
-          static_cast<long long>(base_area);
-      const long long delta_level =
-          static_cast<long long>(patched_level) -
-          static_cast<long long>(base_level);
-
-      const string output_path = options.output_path.empty()
-                                     ? derive_patched_path(options.trojan_path)
-                                     : options.output_path;
-      if (!bench_io::write_bench_file(output_path, patched, &error)) {
-        cerr << "Write error: " << error << "\n";
-        return 1;
-      }
-      cout << "payload_fix_selected " << payload_fix_nodes.size()
-           << " area_delta " << delta_area
-           << " level_delta " << delta_level << "\n";
-      cout << "payload_fix_bench " << output_path << "\n";
+      cout << "payload_fix_apply skipped: no fix nodes\n";
     }
-  } else {
-    cout << "payload_fix_apply skipped: no fix nodes\n";
   }
 
   cerr << "[TIMING] kill+patch+verify+write: " << ms_since(t_phase) << " ms\n";
+
+  // ── CEC check ────────────────────────────────────────────────────────────
+  if (!fix_succeeded) {
+    // No fix found this round — give up.
+    break;
+  }
+
+  t_sub = std::chrono::steady_clock::now();
+  std::vector<int> cec_counter;
+  bool cec_pass = run_abc_cec(options.golden_path, fix_output_path,
+                               golden, &cec_counter);
+  cerr << "[TIMING]   abc_cec: " << ms_since(t_sub) << " ms"
+       << (cec_pass ? " (PASS)" : " (FAIL)") << "\n";
+
+  if (cec_pass) {
+    cout << "cec_rounds " << cec_round << "\n";
+    cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
+    return 0;
+  }
+
+  // CEC failed — extract counter-example and retry.
+  if (cec_counter.empty()) {
+    cerr << "cec: failed to parse counter-example, giving up\n";
+    break;
+  }
+  extra_trigger_patterns.push_back(std::move(cec_counter));
+  cout << "cec_new_pattern total_extra " << extra_trigger_patterns.size() << "\n";
+
+  }  // end CEC retry loop
+
+  cout << "cec_rounds " << std::min(cec_round, kMaxCecRounds) << "\n";
   cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
   return 0;
 }

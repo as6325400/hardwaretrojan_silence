@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-BASE="/mnt/c/Users/jason/Desktop/hardwaretrojan_silence"
+BASE="."
 BIN="$BASE/bin/main"
 BENCH="$BASE/benchmarks"
 TROJAN="$BASE/trojaned_bench/V0_singleTrigger_singlePayload"
 GT="$BASE/groundtruth/V0_singleTrigger_singlePayload"
 OUTPUT_DIR="/tmp/silence_v0_patched"
-CSV="$BASE/results_v0.csv"
-PER_TEST_TIMEOUT=3000  # 5 minutes per test
+CSV="$BASE/results_v1_add_cec_round.csv"
+PER_TEST_TIMEOUT=300  # 5 minutes per test
 
 mkdir -p "$OUTPUT_DIR"
 
 # CSV header
-echo "circuit,trojan,success,gt_verify,vn_rounds,runtime_ms,area_delta,level_delta" > "$CSV"
+echo "circuit,trojan,success,gt_verify,vn_rounds,runtime_ms,area_delta,level_delta,cec_rounds" > "$CSV"
 
 pass=0
 fail=0
@@ -32,18 +32,18 @@ for gt_file in "$GT"/*/*_error_patterns.json; do
 
     if [[ ! -f "$golden" ]]; then
         echo "SKIP $trojan_name: golden not found"
-        echo "$circuit,$trojan_name,SKIP_NO_GOLDEN,,,," >> "$CSV"
+        echo "$circuit,$trojan_name,SKIP_NO_GOLDEN,,,,," >> "$CSV"
         continue
     fi
     if [[ ! -f "$trojan_bench" ]]; then
         echo "SKIP $trojan_name: trojan bench not found"
-        echo "$circuit,$trojan_name,SKIP_NO_TROJAN,,,," >> "$CSV"
+        echo "$circuit,$trojan_name,SKIP_NO_TROJAN,,,,," >> "$CSV"
         continue
     fi
     # Skip if groundtruth has no trigger patterns
     if grep -q '"pattern_count": 0' "$gt_file" 2>/dev/null; then
         echo "SKIP $trojan_name: no trigger patterns in groundtruth"
-        echo "$circuit,$trojan_name,SKIP_NO_PATTERNS,,,," >> "$CSV"
+        echo "$circuit,$trojan_name,SKIP_NO_PATTERNS,,,,," >> "$CSV"
         continue
     fi
 
@@ -104,16 +104,20 @@ for gt_file in "$GT"/*/*_error_patterns.json; do
     runtime=${runtime:-""}
 
     # --- area_delta / level_delta ---
-    fix_line=$(grep '^payload_fix_selected ' "$tmp_out" 2>/dev/null | head -1 || true)
+    fix_line=$(grep '^payload_fix_selected ' "$tmp_out" 2>/dev/null | tail -1 || true)
     area_delta=$(echo "$fix_line" | sed -n 's/.*area_delta \(-\?[0-9]*\).*/\1/p')
     level_delta=$(echo "$fix_line" | sed -n 's/.*level_delta \(-\?[0-9]*\).*/\1/p')
     area_delta=${area_delta:-""}
     level_delta=${level_delta:-""}
 
-    # --- append to CSV ---
-    echo "$circuit,$trojan_name,$success,$gt_verify,$vn_rounds,$runtime,$area_delta,$level_delta" >> "$CSV"
+    # --- cec_rounds ---
+    cec_rounds=$(grep '^cec_rounds ' "$tmp_out" 2>/dev/null | awk '{print $2}' | head -1 || true)
+    cec_rounds=${cec_rounds:-""}
 
-    echo "$success  gt=$gt_verify  vn=$vn_rounds  time=${runtime}ms  area=$area_delta  level=$level_delta"
+    # --- append to CSV ---
+    echo "$circuit,$trojan_name,$success,$gt_verify,$vn_rounds,$runtime,$area_delta,$level_delta,$cec_rounds" >> "$CSV"
+
+    echo "$success  gt=$gt_verify  vn=$vn_rounds  cec=$cec_rounds  time=${runtime}ms  area=$area_delta  level=$level_delta"
 
     rm -f "$tmp_out" "$tmp_err"
 done
