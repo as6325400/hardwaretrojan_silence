@@ -1,161 +1,180 @@
 # Hardware Trojan Silence
 
-This repository provides a small C++ circuit toolkit that can:
-- Parse ISCAS-style `.bench` files into an internal circuit model
-- Simulate and patch a trojaned circuit based on mismatching patterns
-- Write circuits back to `.bench`
-- Run ABC-based synthesis via EQN and compare area/level
+Automatic hardware trojan detection and patching tool. Given a golden circuit and a trojaned version, the tool learns the trojan's trigger condition via decision tree mining and generates a patched circuit that is functionally equivalent to the golden.
+
+## Algorithm Overview
+
+```
+Golden + Trojan .bench
+        │
+        ▼
+  Parse & Align circuits
+        │
+        ▼
+  Groundtruth simulation (GPU/CPU)
+  ── collect trigger / non-trigger patterns
+        │
+        ▼
+  Candidate selection
+  ── pick gates with high trojan activation rate
+        │
+        ▼
+  Virtual Node generation (iterative)
+  ── Phase 1: train decision tree (unlimited depth, force split)
+  ── Phase 2: generate pairwise/triple VN from important signals
+  ── Phase 3: iterative refinement, mine subclauses, early stop
+  ── Insert only used VNs into circuit
+        │
+        ▼
+  Final mining (strict mode)
+  ── decision tree + hard-negative mining
+  ── strict retry: unlimited depth until zero false positives
+  ── rule simplification (remove redundant terms)
+        │
+        ▼
+  Fix strategy selection
+  ├─ Try trigger kill (force gate to constant 0/1)
+  ├─ Try VN expand kill (decompose virtual AND, kill constituents)
+  └─ Payload fix (MaxSAT-guided PO patching with MUX/XOR insertion)
+        │
+        ▼
+  CEC verification (ABC equivalence check)
+  ── if fail: extract counter-example, add to triggers, retry (max 5 rounds)
+        │
+        ▼
+  Output patched .bench
+```
+
+## Project Structure
+
+```
+src/
+├── main.cpp                    # Main orchestrator
+├── core/
+│   ├── circuit.hpp/cpp         # Circuit DAG representation
+│   ├── packed_circuit.hpp/cpp  # Bit-parallel simulation (64-bit words)
+│   ├── circuit_compare.hpp/cpp # Golden vs trojan alignment
+│   ├── batch_simulator.hpp/cpp # Batch pattern simulation
+│   ├── gpu_circuit.cu/cuh      # CUDA GPU simulation kernels
+├── algorithm/
+│   ├── decision_tree.hpp/cpp   # Decision tree (column-major packed matrix)
+│   ├── gpu_tree.cu/cuh         # GPU-accelerated tree training
+│   ├── miner.hpp/cpp           # Mining loop + hard-negative mining + strict retry
+│   ├── virtual_node.hpp/cpp    # Virtual node feature generation (AND/OR/XOR combos)
+│   ├── candidate_selector.hpp/cpp # Gate candidate selection by trojan rate
+│   ├── pattern_sampler.hpp/cpp # Random pattern generation
+│   ├── rule_patch.hpp/cpp      # Rule-based circuit patching (MUX/XOR insertion)
+│   ├── trigger_fixer.hpp/cpp   # Trigger kill strategies
+│   ├── payload_analysis.hpp/cpp # MaxSAT-guided payload PO identification
+│   ├── matching.hpp/cpp        # Pattern matching
+│   └── sat_refine.hpp/cpp      # SAT-based refinement (z3)
+├── io/
+│   ├── bench_parser.hpp/cpp    # ISCAS .bench file parser
+│   ├── bench_writer.hpp/cpp    # .bench file writer
+│   ├── cli_options.hpp/cpp     # CLI argument parsing (CLI11)
+│   ├── eqn_parser.hpp/cpp      # ABC EQN format parser
+│   └── parallel_collect_log.hpp/cpp # Groundtruth JSON log parser
+└── script/
+    ├── show.cpp                # Print circuit area/level
+    ├── synthesis.cpp           # ABC-based optimization
+    ├── verify_groundtruth.cpp  # Verify groundtruth patterns
+    └── packed_cmp.cpp          # Packed circuit comparison
+```
 
 ## Build
 
-Build all tools (each `src/*.cpp` becomes a binary under `bin/`):
+Requires: C++17, OpenMP, z3. Optional: CUDA (auto-detected).
 
 ```bash
-make -C src
+make -C src -j$(nproc)
 ```
 
-Clean build outputs:
+Outputs go to `bin/` (executables) and `build/` (object files).
+
+CUDA is auto-detected from `nvcc` in PATH or `/usr/local/cuda*/bin/`. When available, circuits with 50K+ gates use GPU-accelerated simulation.
+
+## Usage
+
+### `bin/main` — Trojan Patch
 
 ```bash
-make -C src clean
+bin/main <golden.bench> <trojan.bench> <groundtruth.json> [output.bench] [options]
 ```
 
-Outputs:
-- `bin/` contains the executables
-- `build/` contains object files
+**Options:**
 
-## Groundtruth / pattern collection (Docker)
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--depth N` | 10 | Max decision tree depth (non-strict phases) |
+| `--neg-ratio N` | 50 | Negative-to-positive sample ratio |
+| `--mine-rounds N` | 15 | Hard-negative mining iterations |
+| `--mine-max N` | 5000 | Max features per mining round |
+| `--include-pi` | on | Include primary inputs as features |
+| `--force-split` | off | Force tree splits even with low gain |
+| `--no-strict` | off | Disable strict retry (skip zero-FP enforcement) |
+| `--no-virtual` | off | Disable virtual node generation |
 
-This repo includes a helper script to run the `ht-collect` Docker image over many
-trojaned `.bench` files and write JSON logs with the same folder structure.
-
-### Requirements
-- Docker installed
-- `ht-collect` image available locally
-
-### Batch collection helper
-
-The script `trojan_collect_batch.py` scans a trojan root directory (recursively)
-for `.bench` files, finds the matching golden bench in `benchmarks/`, and writes
-JSON outputs under `output_root` while mirroring the trojan folder structure.
-
-Examples:
+**Example:**
 
 ```bash
-# Run all trojans and write outputs under groundtruth/V1_singleTrigger_multiPayload/...
-python3 trojan_collect_batch.py \
-  --trojan_root trojaned_bench/V1_singleTrigger_multiPayload \
-  --output_root groundtruth/V1_singleTrigger_multiPayload
-
-# Limit to a round range (runs r0 for all, then r1 for all, ...):
-python3 trojan_collect_batch.py \
-  --trojan_root trojaned_bench/V1_singleTrigger_multiPayload \
-  --output_root groundtruth/V1_singleTrigger_multiPayload \
-  --start-round 0 \
-  --end-round 2
-
-# Explicit round list:
-python3 trojan_collect_batch.py \
-  --trojan_root trojaned_bench/V1_singleTrigger_multiPayload \
-  --output_root groundtruth/V1_singleTrigger_multiPayload \
-  --rounds 0,1,2
-
-# Single trojan bench with fixed golden bench:
-python3 trojan_collect_batch.py \
-  --trojan_root trojaned_bench/V1_singleTrigger_multiPayload/c880/c880_trojan1.bench \
-  --benchmarks_root benchmarks/c880.bench \
-  --output_root groundtruth/V1_singleTrigger_multiPayload
-
-# Dry-run prints the docker command(s) without executing:
-python3 trojan_collect_batch.py \
-  --trojan_root trojaned_bench/V1_singleTrigger_multiPayload \
-  --output_root groundtruth/V1_singleTrigger_multiPayload \
-  --dry-run
+bin/main benchmarks/c7552.bench \
+  trojaned_bench/V0_singleTrigger_singlePayload/c7552/c7552_trojan4.bench \
+  groundtruth/V0_singleTrigger_singlePayload/c7552/c7552_trojan4_error_patterns.json \
+  out.bench
 ```
 
-Notes:
-- Output is written to the host `output_root` directory, which is mounted inside
-  the container as `/out`.
-- Golden bench matching uses the trojan file’s parent folder name, then falls back
-  to the filename prefix before `_trojan`.
-
-## Binaries
-
-### `bin/main`
-
-Compare golden vs trojan circuits, generate random patterns, apply fixes, and optionally write the patched trojan.
-
-```bash
-bin/main <golden_bench> <trojan_bench> [output_bench]
-```
-
-Notes:
-- Uses OpenMP; control threads via `OMP_NUM_THREADS`.
-- The default pattern count is large (see `src/main.cpp`).
-
-### `bin/show`
-
-Print area and level for a circuit.
+### `bin/show` — Circuit Stats
 
 ```bash
 bin/show <bench>
+# Output: area 3518 delay 43
 ```
 
-Example output:
-```
-area 3518 delay 43
-```
-
-### `bin/synthesis`
-
-Run ABC optimization, parse EQN back into a circuit, and write a `.bench`.
+### `bin/synthesis` — ABC Optimization
 
 ```bash
-bin/synthesis <input_bench> <output_bench> [--flow name]
-bin/synthesis <input_bench> <output_bench> --list
+bin/synthesis <input.bench> <output.bench> [--flow resyn2|area|delay]
+bin/synthesis <input.bench> <output.bench> --list   # list flows
 ```
 
-Flows (built-in):
-- `resyn2` (general purpose)
-- `area` (rewrite/refactor focused)
-- `delay` (more balance passes)
+## Groundtruth Collection (Docker)
 
-The tool prints:
-```
-original area level
-<area> <level>
-synth area level
-<area> <level>
+Collect trigger/non-trigger patterns using the `ht-collect` Docker image:
+
+```bash
+python3 trojan_collect_batch.py \
+  --trojan_root trojaned_bench/V0_singleTrigger_singlePayload \
+  --output_root groundtruth/V0_singleTrigger_singlePayload
 ```
 
-It also writes `output_bench.eqn` as an intermediate file.
+Options: `--start-round`, `--end-round`, `--rounds`, `--dry-run`.
 
-## ABC setup
+## Batch Testing
 
-Make sure `abc` is available in `PATH`, or set `ABC_BIN`:
+Run all test cases and produce a CSV report:
+
+```bash
+bash run_v0_tests.sh
+```
+
+Output CSV columns: `circuit, trojan, success, gt_verify, vn_rounds, runtime_ms, area_delta, level_delta, cec_rounds`
+
+Success is determined by ABC CEC (equivalence check) of the patched circuit against the golden.
+
+## ABC Setup
+
+Ensure `abc` binary is available in `PATH` or project root:
 
 ```bash
 export ABC_BIN=/path/to/abc
 ```
 
-Example:
-```bash
-bin/synthesis test.bench out.bench --flow resyn2
-```
+## Dependencies
 
-## Examples
-
-Show circuit stats:
-```bash
-bin/show benchmarks/c7552.bench
-```
-
-Patch a trojaned circuit and save result:
-```bash
-bin/main benchmarks/c7552.bench trojaned_bench/c7552_trojan4.bench out.bench
-```
-
-Run synthesis with the area flow:
-```bash
-bin/synthesis out.bench out_opt.bench --flow area
-```
+- **C++17** compiler (g++ or clang++)
+- **OpenMP** for CPU parallelism
+- **z3** SMT solver library
+- **CLI11** (bundled in `extern/`)
+- **nlohmann/json** (bundled in `extern/`)
+- **CUDA** (optional, for GPU acceleration)
+- **ABC** (external, for synthesis and CEC)
