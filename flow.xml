@@ -1,0 +1,450 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0" version="29.6.3">
+  <diagram name="Algorithm Flow" id="algo_flow">
+    <mxGraphModel dx="1600" dy="1600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="1500" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ================================================================ -->
+        <!-- CEC RETRY LOOP - outer border                                     -->
+        <!-- ================================================================ -->
+        <mxCell id="CEC_LOOP" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#333333;strokeWidth=3;dashed=0;" value="" vertex="1">
+          <mxGeometry x="25" y="25" width="1120" height="1260" as="geometry" />
+        </mxCell>
+        <mxCell id="CEC_LOOP_LBL" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontStyle=1;fontSize=11;fontColor=#333333;verticalAlign=bottom;" value="&lt;font style=&quot;font-size: 10px;&quot;&gt;↑ CEC RETRY LOOP (max 5 rounds) ↑&lt;/font&gt;" vertex="1">
+          <mxGeometry x="390" y="1260" width="250" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================ -->
+        <!-- ROW 1: INPUT / CANDIDATE / FINAL MINING                           -->
+        <!-- ================================================================ -->
+
+        <!-- ──── SECTION 1: INPUT & GROUNDTRUTH SIMULATION ──── -->
+        <mxCell id="S1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#c27f0a;strokeWidth=2;" value="" vertex="1">
+          <mxGeometry x="45" y="45" width="355" height="310" as="geometry" />
+        </mxCell>
+        <!-- Banner -->
+        <mxCell id="S1_BAN" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e6a817;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=10;" value="INPUT &amp; GROUNDTRUTH SIMULATION" vertex="1">
+          <mxGeometry x="45" y="45" width="355" height="25" as="geometry" />
+        </mxCell>
+        <!-- Golden -->
+        <mxCell id="S1_G" parent="1" style="shape=mxgraph.basic.document;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=8;" value="Golden&lt;br&gt;(blackbox)" vertex="1">
+          <mxGeometry x="60" y="80" width="65" height="40" as="geometry" />
+        </mxCell>
+        <!-- Trojan -->
+        <mxCell id="S1_T" parent="1" style="shape=mxgraph.basic.document;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=8;" value="Trojan&lt;br&gt;(netlist)" vertex="1">
+          <mxGeometry x="60" y="130" width="65" height="40" as="geometry" />
+        </mxCell>
+        <!-- Error Patterns -->
+        <mxCell id="S1_E" parent="1" style="shape=mxgraph.basic.document;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=8;" value="Error&lt;br&gt;Patterns" vertex="1">
+          <mxGeometry x="60" y="180" width="65" height="40" as="geometry" />
+        </mxCell>
+        <!-- Simulate box -->
+        <mxCell id="S1_SIM" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=9;" value="Simulate&lt;br&gt;Golden + Trojan" vertex="1">
+          <mxGeometry x="160" y="95" width="100" height="45" as="geometry" />
+        </mxCell>
+        <!-- Arrows to sim -->
+        <mxCell id="S1_a1" parent="1" style="endArrow=classic;html=1;rounded=0;fontSize=8;" edge="1" source="S1_G" target="S1_SIM">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S1_a2" parent="1" style="endArrow=classic;html=1;rounded=0;fontSize=8;" edge="1" source="S1_T" target="S1_SIM">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S1_a3" parent="1" style="endArrow=classic;html=1;rounded=0;fontSize=8;" edge="1" source="S1_E" target="S1_SIM">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- Positive / Negative outputs -->
+        <mxCell id="S1_POS" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;" value="TRIGGER&lt;br&gt;patterns&lt;br&gt;(positive)" vertex="1">
+          <mxGeometry x="290" y="80" width="90" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="S1_NEG" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=8;" value="NON-TRIGGER&lt;br&gt;patterns&lt;br&gt;(negative)" vertex="1">
+          <mxGeometry x="290" y="135" width="90" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="S1_a4" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S1_SIM" target="S1_POS">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S1_a5" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S1_SIM" target="S1_NEG">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- Feature matrix -->
+        <mxCell id="S1_FM" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=8;" value="Feature Matrix&lt;br&gt;(column-major bit-packed)&lt;br&gt;gate values as features" vertex="1">
+          <mxGeometry x="150" y="200" width="230" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="S1_a6" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S1_POS" target="S1_FM">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S1_a7" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S1_NEG" target="S1_FM">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- CEC counter-example note -->
+        <mxCell id="S1_CEC" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=7;dashed=1;" value="+ CEC counter-example&lt;br&gt;patterns (if retry)" vertex="1">
+          <mxGeometry x="60" y="240" width="120" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="S1_a8" parent="1" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#b85450;" edge="1" source="S1_CEC" target="S1_FM">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- trojan rate -->
+        <mxCell id="S1_TR" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=7;fontColor=#666666;" value="trojan_rate = trigger / total" vertex="1">
+          <mxGeometry x="150" y="250" width="140" height="15" as="geometry" />
+        </mxCell>
+        <!-- candidate_indices -->
+        <mxCell id="S1_CI" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=8;fontStyle=1;" value="candidate_indices&lt;br&gt;(all gates + PI)" vertex="1">
+          <mxGeometry x="150" y="278" width="230" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="S1_a9" parent="1" style="endArrow=classic;html=1;rounded=0;fontSize=7;" edge="1" source="S1_FM" target="S1_CI">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ──── SECTION 4: FINAL MINING ──── -->
+        <mxCell id="S4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#7a3e93;strokeWidth=2;" value="" vertex="1">
+          <mxGeometry x="420" y="45" width="335" height="310" as="geometry" />
+        </mxCell>
+        <mxCell id="S4_BAN" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#9673a6;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=10;" value="FINAL MINING" vertex="1">
+          <mxGeometry x="420" y="45" width="335" height="25" as="geometry" />
+        </mxCell>
+        <!-- DT Training -->
+        <mxCell id="S4_DT" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=9;" value="Decision Tree Training&lt;br&gt;(CART, max info gain)" vertex="1">
+          <mxGeometry x="440" y="80" width="170" height="40" as="geometry" />
+        </mxCell>
+        <!-- Rules output -->
+        <mxCell id="S4_RULES" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=7;align=left;" value="rule = AND of literals&lt;br&gt;trigger = rule₁ OR rule₂ OR ... OR rule_N" vertex="1">
+          <mxGeometry x="440" y="122" width="180" height="22" as="geometry" />
+        </mxCell>
+        <!-- Hard-negative mining -->
+        <mxCell id="S4_HN" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=9;" value="Hard-Negative Mining&lt;br&gt;(max 15 rounds)" vertex="1">
+          <mxGeometry x="440" y="150" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="S4_a1" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S4_DT" target="S4_HN">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- HN detail -->
+        <mxCell id="S4_HND" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=7;align=left;" value="1. Random PI → simulate&lt;br&gt;2. Check rules → find false positives&lt;br&gt;3. Add hard negatives to training&lt;br&gt;4. Retrain until 0 FP" vertex="1">
+          <mxGeometry x="620" y="80" width="125" height="55" as="geometry" />
+        </mxCell>
+        <!-- Loop arrow for HN -->
+        <mxCell id="S4_HNL" parent="1" style="endArrow=classic;html=1;rounded=1;curved=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#9673a6;dashed=1;" edge="1" source="S4_HN" target="S4_DT">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="625" y="170" />
+              <mxPoint x="625" y="100" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <!-- Strict Retry -->
+        <mxCell id="S4_SR" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=9;" value="Strict Retry&lt;br&gt;(unlimited depth, force split)" vertex="1">
+          <mxGeometry x="440" y="200" width="170" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="S4_a2" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S4_HN" target="S4_SR">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S4_SRD" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=7;align=left;" value="if FP &amp;gt; 0:&lt;br&gt;  depth = unlimited&lt;br&gt;  + all PI features" vertex="1">
+          <mxGeometry x="620" y="200" width="110" height="38" as="geometry" />
+        </mxCell>
+        <!-- Rule Simplification -->
+        <mxCell id="S4_RS" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=9;" value="Rule Simplification" vertex="1">
+          <mxGeometry x="440" y="250" width="170" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="S4_a3" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S4_SR" target="S4_RS">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- Trigger Rule Table -->
+        <mxCell id="S4_OUT" parent="1" style="shape=hexagon;perimeter=hexagonPerimeter2;whiteSpace=wrap;html=1;fixedSize=1;fontSize=9;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;" value="Trigger Rule Table" vertex="1">
+          <mxGeometry x="445" y="295" width="160" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="S4_a4" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S4_RS" target="S4_OUT">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: Feature Matrix → DT Training -->
+        <mxCell id="R1_a1" parent="1" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" source="S1_FM" target="S4_DT">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ──── SECTION 5: HARD-NEGATIVE detail (inside S4 already) ──── -->
+
+        <!-- ================================================================ -->
+        <!-- ROW 2: VIRTUAL NODE GENERATION                                    -->
+        <!-- ================================================================ -->
+        <mxCell id="S3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#2d6ca2;strokeWidth=2;" value="" vertex="1">
+          <mxGeometry x="45" y="375" width="710" height="310" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_BAN" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#3b7fc4;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=10;" value="VIRTUAL NODE GENERATION" vertex="1">
+          <mxGeometry x="45" y="375" width="710" height="25" as="geometry" />
+        </mxCell>
+        <!-- Phase 1 -->
+        <mxCell id="S3_P1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=9;" value="Phase 1:&lt;br&gt;Quick Decision Tree&lt;br&gt;(depth=10)" vertex="1">
+          <mxGeometry x="60" y="415" width="130" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_IS" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=9;fontStyle=1;" value="Important&lt;br&gt;Signals" vertex="1">
+          <mxGeometry x="60" y="480" width="130" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_a1" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S3_P1" target="S3_IS">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- Phase 2: Generate VN Candidates -->
+        <mxCell id="S3_GEN" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#6c8ebf;fontSize=9;" value="" vertex="1">
+          <mxGeometry x="220" y="410" width="175" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_GT" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontStyle=1;fontSize=9;" value="Generate VN Candidates" vertex="1">
+          <mxGeometry x="225" y="412" width="165" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_PW" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=8;" value="Pairwise: A∧B, A∧¬B, ¬A∧B" vertex="1">
+          <mxGeometry x="230" y="435" width="155" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_TR" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=8;" value="Triple: A∧B∧C (if signals ≤ 12)" vertex="1">
+          <mxGeometry x="230" y="462" width="155" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_SC" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=8;" value="Subclause Mining (3-4 literals)" vertex="1">
+          <mxGeometry x="230" y="489" width="155" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_a2" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S3_IS" target="S3_GEN">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- Iterative Refinement -->
+        <mxCell id="S3_IR" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=9;" value="Retrain DT&lt;br&gt;with VN features" vertex="1">
+          <mxGeometry x="430" y="420" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_a3" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S3_GEN" target="S3_IR">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- Reduce Rule? -->
+        <mxCell id="S3_RD" parent="1" style="rhombus;whiteSpace=wrap;html=1;fontSize=8;fillColor=#fff2cc;strokeColor=#d6b656;" value="Rule Count&lt;br&gt;Reduced?" vertex="1">
+          <mxGeometry x="440" y="480" width="100" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_a4" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S3_IR" target="S3_RD">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- Yes → loop back -->
+        <mxCell id="S3_a5" parent="1" style="endArrow=classic;html=1;rounded=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;curved=1;" edge="1" source="S3_RD" target="S3_GEN">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="307" y="545" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="S3_L1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=8;" value="Yes" vertex="1">
+          <mxGeometry x="405" y="500" width="25" height="15" as="geometry" />
+        </mxCell>
+        <!-- No → Insert VN -->
+        <mxCell id="S3_IVN" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=9;fontStyle=1;" value="Insert Only&lt;br&gt;Used VN Gates" vertex="1">
+          <mxGeometry x="580" y="420" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="S3_a6" parent="1" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" source="S3_RD" target="S3_IVN">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="640" y="508" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="S3_L2" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=8;" value="No&lt;br&gt;(converged)" vertex="1">
+          <mxGeometry x="545" y="495" width="55" height="22" as="geometry" />
+        </mxCell>
+        <!-- VN detail -->
+        <mxCell id="S3_D1" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=7;fontColor=#666666;" value="e.g. 24,044 candidates → 7 used" vertex="1">
+          <mxGeometry x="570" y="462" width="145" height="15" as="geometry" />
+        </mxCell>
+        <!-- max rounds note -->
+        <mxCell id="S3_MR" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=8;fontStyle=2;fontColor=#999999;" value="(max 3 iterations)" vertex="1">
+          <mxGeometry x="290" y="540" width="90" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: Insert VN → Final Mining (feeds VN features into DT) -->
+        <mxCell id="VN_FM" parent="1" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=1;entryDx=0;entryDy=0;strokeColor=#2d6ca2;strokeWidth=2;" edge="1" source="S3_IVN" target="S4_DT">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="640" y="395" />
+              <mxPoint x="420" y="330" />
+              <mxPoint x="420" y="115" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="VN_FM_L" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=7;fontColor=#2d6ca2;" value="+ VN features" vertex="1">
+          <mxGeometry x="415" y="310" width="65" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================ -->
+        <!-- ROW 3: RECTIFICATION STRATEGY                                     -->
+        <!-- ================================================================ -->
+        <mxCell id="S6" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#ae4132;strokeWidth=2;" value="" vertex="1">
+          <mxGeometry x="45" y="705" width="1080" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_BAN" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#c0392b;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=10;" value="RECTIFICATION STRATEGY" vertex="1">
+          <mxGeometry x="45" y="705" width="1080" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: Trigger Rules → Rectification -->
+        <mxCell id="R3_a1" parent="1" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;strokeWidth=2;" edge="1" source="S4_OUT">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="525" y="705" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="525" y="370" />
+              <mxPoint x="525" y="700" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Strategy A: Trigger Kill -->
+        <mxCell id="S6_A" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="" vertex="1">
+          <mxGeometry x="60" y="745" width="200" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_AT" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontStyle=1;fontSize=10;" value="A. Trigger Kill" vertex="1">
+          <mxGeometry x="65" y="747" width="130" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_AD" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=8;align=left;" value="Find gate in ALL rules.&lt;br&gt;Force to constant 0/1.&lt;br&gt;Almost zero area overhead.&lt;br&gt;Only works for simple triggers." vertex="1">
+          <mxGeometry x="65" y="768" width="190" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Strategy B: VN Expand Kill -->
+        <mxCell id="S6_B" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="" vertex="1">
+          <mxGeometry x="280" y="745" width="200" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_BT" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontStyle=1;fontSize=10;" value="B. VN Expand Kill" vertex="1">
+          <mxGeometry x="285" y="747" width="140" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_BD" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=8;align=left;" value="If kill target is VN gate:&lt;br&gt;Decompose VN → components.&lt;br&gt;Try killing each signal.&lt;br&gt;Track NOT inversions." vertex="1">
+          <mxGeometry x="285" y="768" width="190" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Strategy C: Payload Fix -->
+        <mxCell id="S6_C" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" value="" vertex="1">
+          <mxGeometry x="500" y="745" width="610" height="195" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_CT" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontStyle=1;fontSize=10;" value="C. Payload Fix (MaxSAT + MUX Insertion)" vertex="1">
+          <mxGeometry x="505" y="747" width="270" height="18" as="geometry" />
+        </mxCell>
+        <!-- MaxSAT sub-steps -->
+        <mxCell id="S6_C1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=8;fillColor=#fff2cc;strokeColor=#d6b656;" value="Build Forbidden&lt;br&gt;Mask (fanin cone&lt;br&gt;of rule gates)" vertex="1">
+          <mxGeometry x="510" y="775" width="100" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_C2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=8;fillColor=#fff2cc;strokeColor=#d6b656;" value="Collect Candidates&lt;br&gt;(error PO fanin&lt;br&gt;cone - forbidden)" vertex="1">
+          <mxGeometry x="625" y="775" width="105" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_C3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=8;fillColor=#fff2cc;strokeColor=#d6b656;" value="Z3 MaxSAT&lt;br&gt;minimize Σflip_i&lt;br&gt;(At-Most-K)" vertex="1">
+          <mxGeometry x="745" y="775" width="100" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_ca1" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S6_C1" target="S6_C2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_ca2" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S6_C2" target="S6_C3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- MUX insertion -->
+        <mxCell id="S6_MUX" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=8;fillColor=#f8cecc;strokeColor=#b85450;" value="MUX Insertion&lt;br&gt;out = trigger_cond ?&lt;br&gt;golden : trojan" vertex="1">
+          <mxGeometry x="860" y="775" width="110" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_ca3" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S6_C3" target="S6_MUX">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- ABC opt -->
+        <mxCell id="S6_ABC" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=8;fillColor=#e1d5e7;strokeColor=#9673a6;" value="ABC Synthesis&lt;br&gt;(optimize trigger_cond)" vertex="1">
+          <mxGeometry x="745" y="830" width="110" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_ca4" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S6_C3" target="S6_ABC">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- XOR bypass -->
+        <mxCell id="S6_XOR" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=7;fontColor=#666666;" value="XOR bypass if golden = NOT(trojan)" vertex="1">
+          <mxGeometry x="860" y="830" width="145" height="15" as="geometry" />
+        </mxCell>
+        <!-- Verify -->
+        <mxCell id="S6_VER" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=8;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" value="Verify: simulate all&lt;br&gt;trigger patterns ✓" vertex="1">
+          <mxGeometry x="510" y="900" width="140" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Fallback arrows -->
+        <mxCell id="S6_f1" parent="1" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#999999;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" source="S6_A" target="S6_B">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_f1l" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=7;fontColor=#999999;" value="fail" vertex="1">
+          <mxGeometry x="262" y="780" width="20" height="12" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_f2" parent="1" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#999999;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" edge="1" source="S6_B" target="S6_C">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S6_f2l" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=7;fontColor=#999999;" value="fail" vertex="1">
+          <mxGeometry x="483" y="780" width="20" height="12" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================ -->
+        <!-- ROW 4: CEC VERIFICATION                                           -->
+        <!-- ================================================================ -->
+        <mxCell id="S7" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#555555;strokeWidth=2;" value="" vertex="1">
+          <mxGeometry x="45" y="975" width="1080" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="S7_BAN" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#555555;strokeColor=none;fontColor=#FFFFFF;fontStyle=1;fontSize=10;" value="CEC VERIFICATION (Combinational Equivalence Check)" vertex="1">
+          <mxGeometry x="45" y="975" width="1080" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- Arrow: Fix → CEC -->
+        <mxCell id="R4_a1" parent="1" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" source="S6_VER">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="580" y="975" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Patched circuit doc -->
+        <mxCell id="S7_PC" parent="1" style="shape=mxgraph.basic.document;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;" value="Patched&lt;br&gt;Circuit" vertex="1">
+          <mxGeometry x="100" y="1015" width="70" height="40" as="geometry" />
+        </mxCell>
+        <!-- Golden doc -->
+        <mxCell id="S7_GC" parent="1" style="shape=mxgraph.basic.document;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=8;" value="Golden&lt;br&gt;Circuit" vertex="1">
+          <mxGeometry x="100" y="1065" width="70" height="40" as="geometry" />
+        </mxCell>
+        <!-- ABC CEC -->
+        <mxCell id="S7_ABC" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=9;" value="ABC&lt;br&gt;&lt;b&gt;cec&lt;/b&gt; golden patched" vertex="1">
+          <mxGeometry x="220" y="1025" width="130" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="S7_a1" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S7_PC" target="S7_ABC">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S7_a2" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S7_GC" target="S7_ABC">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- EQUIVALENT? diamond -->
+        <mxCell id="S7_EQ" parent="1" style="rhombus;whiteSpace=wrap;html=1;fontSize=9;fillColor=#fff2cc;strokeColor=#d6b656;" value="EQUIVALENT?" vertex="1">
+          <mxGeometry x="400" y="1020" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="S7_a3" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="S7_ABC" target="S7_EQ">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- PASS → Output -->
+        <mxCell id="S7_PASS" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;fontStyle=1;strokeWidth=2;" value="OUTPUT:&lt;br&gt;Patched Circuit ✓" vertex="1">
+          <mxGeometry x="570" y="1020" width="160" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="S7_a4" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#82b366;strokeWidth=2;" edge="1" source="S7_EQ" target="S7_PASS">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S7_PL" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=9;fontStyle=1;fontColor=#82b366;" value="YES" vertex="1">
+          <mxGeometry x="525" y="1025" width="30" height="15" as="geometry" />
+        </mxCell>
+        <!-- FAIL → counter-example -->
+        <mxCell id="S7_CE" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=8;" value="Extract&lt;br&gt;counter-example&lt;br&gt;(PI values from ABC)" vertex="1">
+          <mxGeometry x="400" y="1090" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="S7_a5" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#b85450;strokeWidth=2;" edge="1" source="S7_EQ" target="S7_CE">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="S7_FL" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=9;fontStyle=1;fontColor=#b85450;" value="NO" vertex="1">
+          <mxGeometry x="445" y="1075" width="25" height="15" as="geometry" />
+        </mxCell>
+        <!-- Retry arrow back to top -->
+        <mxCell id="S7_RETRY" parent="1" style="endArrow=classic;html=1;rounded=1;strokeColor=#b85450;strokeWidth=2;dashed=1;dashPattern=8 4;curved=1;" edge="1" source="S7_CE">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="200" y="1110" />
+              <mxPoint x="40" y="1000" />
+              <mxPoint x="30" y="500" />
+              <mxPoint x="35" y="170" />
+            </Array>
+            <mxPoint x="60" y="120" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="S7_RL" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;fontSize=8;fontStyle=1;fontColor=#b85450;rotation=-90;" value="Add to trigger patterns → Retry" vertex="1">
+          <mxGeometry x="-5" y="580" width="160" height="15" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

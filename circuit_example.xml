@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0" version="29.6.3">
+  <diagram name="Golden Circuit" id="golden">
+    <mxGraphModel dx="900" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="600" pageHeight="350" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="gt" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontStyle=1;fontSize=14;align=center;" value="Golden Circuit" vertex="1">
+          <mxGeometry x="200" y="10" width="160" height="25" as="geometry" />
+        </mxCell>
+        <!-- PI -->
+        <mxCell id="a" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" value="a" vertex="1">
+          <mxGeometry x="40" y="60" width="45" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="b" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" value="b" vertex="1">
+          <mxGeometry x="140" y="60" width="45" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="c" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" value="c" vertex="1">
+          <mxGeometry x="340" y="60" width="45" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="d" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" value="d" vertex="1">
+          <mxGeometry x="440" y="60" width="45" height="30" as="geometry" />
+        </mxCell>
+        <!-- Gates -->
+        <mxCell id="g1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="AND" vertex="1">
+          <mxGeometry x="70" y="150" width="60" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="g2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="OR" vertex="1">
+          <mxGeometry x="370" y="150" width="60" height="35" as="geometry" />
+        </mxCell>
+        <!-- PO -->
+        <mxCell id="Y1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1;" value="Y1" vertex="1">
+          <mxGeometry x="70" y="250" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="Y2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1;" value="Y2" vertex="1">
+          <mxGeometry x="370" y="250" width="60" height="30" as="geometry" />
+        </mxCell>
+        <!-- Labels -->
+        <mxCell id="l1" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#82b366;" value="g1 = a ∧ b" vertex="1">
+          <mxGeometry x="135" y="155" width="65" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="l2" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#82b366;" value="g2 = c ∨ d" vertex="1">
+          <mxGeometry x="435" y="155" width="65" height="15" as="geometry" />
+        </mxCell>
+        <!-- Edges -->
+        <mxCell id="ea1" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="a" target="g1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ea2" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="b" target="g1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ea3" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="c" target="g2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ea4" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="d" target="g2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ea5" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="g1" target="Y1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ea6" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="g2" target="Y2"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="Trojan Circuit" id="trojan">
+    <mxGraphModel dx="900" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="650" pageHeight="500" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="tt" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontStyle=1;fontSize=14;align=center;" value="Trojan Circuit &lt;font color=&quot;#cc0000&quot;&gt;(red = inserted trojan)&lt;/font&gt;" vertex="1">
+          <mxGeometry x="130" y="10" width="350" height="25" as="geometry" />
+        </mxCell>
+        <!-- PI -->
+        <mxCell id="ta" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" value="a" vertex="1">
+          <mxGeometry x="30" y="60" width="45" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="tb" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" value="b" vertex="1">
+          <mxGeometry x="130" y="60" width="45" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="tc" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" value="c" vertex="1">
+          <mxGeometry x="340" y="60" width="45" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="td" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" value="d" vertex="1">
+          <mxGeometry x="440" y="60" width="45" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- GOLDEN gates (black border) -->
+        <mxCell id="tg1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="AND" vertex="1">
+          <mxGeometry x="60" y="150" width="60" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="tg2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" value="OR" vertex="1">
+          <mxGeometry x="360" y="150" width="60" height="35" as="geometry" />
+        </mxCell>
+        <!-- golden labels -->
+        <mxCell id="tl1" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#82b366;" value="g1" vertex="1">
+          <mxGeometry x="125" y="155" width="25" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="tl2" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#82b366;" value="g2" vertex="1">
+          <mxGeometry x="425" y="155" width="25" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- TROJAN gates (red) -->
+        <mxCell id="t1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1;" value="XOR" vertex="1">
+          <mxGeometry x="60" y="240" width="60" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="t2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1;" value="XOR" vertex="1">
+          <mxGeometry x="360" y="240" width="60" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="trig" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cc0000;strokeColor=#990000;fontColor=#ffffff;fontSize=11;fontStyle=1;" value="AND" vertex="1">
+          <mxGeometry x="210" y="310" width="70" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="payload" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cc0000;strokeColor=#990000;fontColor=#ffffff;fontSize=11;fontStyle=1;" value="XOR" vertex="1">
+          <mxGeometry x="120" y="390" width="70" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- Trojan labels -->
+        <mxCell id="tl3" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#cc0000;fontStyle=1;" value="t1 = a⊕b" vertex="1">
+          <mxGeometry x="125" y="247" width="60" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="tl4" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#cc0000;fontStyle=1;" value="t2 = c⊕d" vertex="1">
+          <mxGeometry x="425" y="247" width="60" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="tl5" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#cc0000;fontStyle=1;" value="trigger&lt;br&gt;= t1 ∧ t2" vertex="1">
+          <mxGeometry x="285" y="307" width="60" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="tl6" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#cc0000;fontStyle=1;" value="payload&lt;br&gt;= Y1 ⊕ trig" vertex="1">
+          <mxGeometry x="30" y="392" width="80" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- PO -->
+        <mxCell id="tY1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1;" value="Y1'" vertex="1">
+          <mxGeometry x="125" y="455" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="tY2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" value="Y2'" vertex="1">
+          <mxGeometry x="360" y="455" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="tl7" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=8;fontColor=#666666;" value="(unchanged)" vertex="1">
+          <mxGeometry x="425" y="460" width="65" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Golden edges (black) -->
+        <mxCell id="te1" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="ta" target="tg1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="te2" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="tb" target="tg1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="te3" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="tc" target="tg2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="te4" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="td" target="tg2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="te5" parent="1" style="endArrow=classic;html=1;rounded=0;" edge="1" source="tg2" target="tY2"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- Trojan edges (red) -->
+        <mxCell id="te10" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#cc0000;strokeWidth=2;" edge="1" source="ta" target="t1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="te11" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#cc0000;strokeWidth=2;" edge="1" source="tb" target="t1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="te12" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#cc0000;strokeWidth=2;" edge="1" source="tc" target="t2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="te13" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#cc0000;strokeWidth=2;" edge="1" source="td" target="t2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="te14" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#cc0000;strokeWidth=2;" edge="1" source="t1" target="trig"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="te15" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#cc0000;strokeWidth=2;" edge="1" source="t2" target="trig"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <!-- g1 → payload XOR -->
+        <mxCell id="te16" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#cc0000;strokeWidth=2;" edge="1" source="tg1" target="payload"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <!-- trigger → payload XOR -->
+        <mxCell id="te17" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#cc0000;strokeWidth=2;" edge="1" source="trig" target="payload"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <!-- payload → Y1' -->
+        <mxCell id="te18" parent="1" style="endArrow=classic;html=1;rounded=0;strokeColor=#cc0000;strokeWidth=2;" edge="1" source="payload" target="tY1"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
