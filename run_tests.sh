@@ -7,7 +7,7 @@ BENCH="$BASE/benchmarks"
 TROJAN="$BASE/trojaned_bench/V0_singleTrigger_singlePayload"
 GT="$BASE/groundtruth/V0_singleTrigger_singlePayload"
 OUTPUT_DIR="/tmp/silence_v0_patched"
-CSV="$BASE/results_v1_add_cec_round.csv"
+CSV="$BASE/results_v5_DP_add_cec_round.csv"
 PER_TEST_TIMEOUT=300  # 5 minutes per test
 
 mkdir -p "$OUTPUT_DIR"

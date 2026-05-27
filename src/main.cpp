@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <chrono>
@@ -72,8 +73,13 @@ bool run_abc_cec(const string& golden_path,
     if (pos != string::npos) {
       abc_bin = golden_path.substr(0, pos);  // …/benchmarks -> project root
       pos = abc_bin.rfind('/');
-      if (pos != string::npos)
+      if (pos != string::npos) {
         abc_bin = abc_bin.substr(0, pos);
+      } else {
+        abc_bin = ".";
+      }
+    } else {
+      abc_bin = ".";
     }
     abc_bin += "/abc";
   }
@@ -153,6 +159,92 @@ bool run_abc_cec(const string& golden_path,
   }
 
   return false;
+}
+
+bool classify_cec_counterexample(const circuit& golden,
+                                 const circuit& original_trojan,
+                                 const vector<int>& golden_pi_values,
+                                 bool* is_real_trigger,
+                                 string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (!is_real_trigger) {
+    if (error) {
+      *error = "is_real_trigger output pointer is null";
+    }
+    return false;
+  }
+  *is_real_trigger = true;
+  if (golden_pi_values.size() != golden.pi_count()) {
+    if (error) {
+      *error = "CEC pattern PI count mismatch";
+    }
+    return false;
+  }
+
+  unordered_map<string, int> pi_value_by_name;
+  pi_value_by_name.reserve(golden.pi_count());
+  const auto& golden_pis = golden.pi_indices();
+  for (size_t i = 0; i < golden_pis.size(); ++i) {
+    pi_value_by_name[golden.node_name(golden_pis[i])] =
+        golden_pi_values[i] ? 1 : 0;
+  }
+
+  vector<int> trojan_pi_values;
+  trojan_pi_values.reserve(original_trojan.pi_count());
+  for (int pi_idx : original_trojan.pi_indices()) {
+    const string& name = original_trojan.node_name(pi_idx);
+    auto it = pi_value_by_name.find(name);
+    if (it == pi_value_by_name.end()) {
+      if (error) {
+        *error = "Trojan PI not found in CEC pattern: " + name;
+      }
+      return false;
+    }
+    trojan_pi_values.push_back(it->second);
+  }
+
+  try {
+    circuit golden_eval = golden;
+    circuit trojan_eval = original_trojan;
+    const vector<int> golden_outputs =
+        golden_eval.simulate(golden_pi_values);
+    const vector<int> trojan_outputs =
+        trojan_eval.simulate(trojan_pi_values);
+
+    unordered_map<string, int> golden_po_by_name;
+    golden_po_by_name.reserve(golden.po_count());
+    const auto& golden_pos = golden.po_indices();
+    for (size_t i = 0; i < golden_pos.size(); ++i) {
+      golden_po_by_name[golden.node_name(golden_pos[i])] =
+          golden_outputs[i] ? 1 : 0;
+    }
+
+    for (size_t i = 0; i < original_trojan.po_indices().size(); ++i) {
+      const int po_idx = original_trojan.po_indices()[i];
+      const string& name = original_trojan.node_name(po_idx);
+      auto it = golden_po_by_name.find(name);
+      if (it == golden_po_by_name.end()) {
+        if (error) {
+          *error = "Trojan PO not found in golden circuit: " + name;
+        }
+        return false;
+      }
+      if (it->second != (trojan_outputs[i] ? 1 : 0)) {
+        *is_real_trigger = true;
+        return true;
+      }
+    }
+  } catch (const exception& e) {
+    if (error) {
+      *error = string("CEC classification simulation error: ") + e.what();
+    }
+    return false;
+  }
+
+  *is_real_trigger = false;
+  return true;
 }
 
 bool build_stats_from_groundtruth(const circuit& golden,
@@ -607,6 +699,485 @@ bool build_stats_from_groundtruth(const circuit& golden,
   return true;
 }
 
+vector<vector<int>> select_spread_patterns(const vector<vector<int>>& patterns,
+                                           size_t max_count) {
+  vector<vector<int>> selected;
+  if (max_count == 0 || patterns.empty()) {
+    return selected;
+  }
+  if (patterns.size() <= max_count) {
+    return patterns;
+  }
+  selected.reserve(max_count);
+  if (max_count == 1) {
+    selected.push_back(patterns.front());
+    return selected;
+  }
+  for (size_t i = 0; i < max_count; ++i) {
+    const size_t idx = (i * (patterns.size() - 1)) / (max_count - 1);
+    selected.push_back(patterns[idx]);
+  }
+  return selected;
+}
+
+void collect_random_nontrigger_patterns(const circuit& golden,
+                                        const circuit& trojan,
+                                        size_t target_count,
+                                        vector<vector<int>>* out) {
+  if (!out || out->size() >= target_count) {
+    return;
+  }
+  circuit golden_eval = golden;
+  circuit trojan_eval = trojan;
+  mt19937_64 rng(0x51a7e5eedULL);
+  const size_t pi_count = golden.pi_count();
+  const size_t max_attempts = target_count * 200 + 2000;
+  for (size_t attempt = 0;
+       out->size() < target_count && attempt < max_attempts;
+       ++attempt) {
+    vector<int> pattern(pi_count, 0);
+    for (size_t i = 0; i < pi_count; ++i) {
+      pattern[i] = static_cast<int>((rng() >> (i & 31U)) & 1ULL);
+    }
+    try {
+      const vector<int> golden_out = golden_eval.simulate(pattern);
+      const vector<int> trojan_out = trojan_eval.simulate(pattern);
+      if (golden_out == trojan_out) {
+        out->push_back(std::move(pattern));
+      }
+    } catch (const exception&) {
+      continue;
+    }
+  }
+}
+
+vector<int> build_signature_base_pool(const PatternStats& stats,
+                                      const vector<int>& base_candidates,
+                                      const vector<int>& important_signals,
+                                      size_t max_count) {
+  vector<int> pool;
+  if (max_count == 0) {
+    return pool;
+  }
+
+  unordered_set<int> allowed(base_candidates.begin(), base_candidates.end());
+  unordered_set<int> used;
+  pool.reserve(max_count);
+  for (int idx : important_signals) {
+    if (allowed.count(idx) && used.insert(idx).second) {
+      pool.push_back(idx);
+      if (pool.size() >= max_count) {
+        return pool;
+      }
+    }
+  }
+
+  unordered_map<int, size_t> gate_pos;
+  gate_pos.reserve(stats.gate_indices.size());
+  for (size_t i = 0; i < stats.gate_indices.size(); ++i) {
+    gate_pos[stats.gate_indices[i]] = i;
+  }
+
+  struct RankedGate {
+    int idx = -1;
+    double score = 0.0;
+  };
+  vector<RankedGate> ranked;
+  ranked.reserve(base_candidates.size());
+  const double pos_total = static_cast<double>(
+      max<uint64_t>(1, stats.trigger_patterns_total));
+  const double neg_total = static_cast<double>(
+      max<uint64_t>(1, stats.notrigger_patterns_total));
+  for (int idx : base_candidates) {
+    if (used.count(idx)) {
+      continue;
+    }
+    auto it = gate_pos.find(idx);
+    if (it == gate_pos.end()) {
+      continue;
+    }
+    const size_t pos = it->second;
+    const double p_trigger =
+        static_cast<double>(stats.ones_trigger[pos]) / pos_total;
+    const double p_normal =
+        static_cast<double>(stats.ones_notrigger[pos]) / neg_total;
+    const double separation = fabs(p_trigger - p_normal);
+    const double trigger_bias = fabs(p_trigger - 0.5);
+    ranked.push_back(RankedGate{
+        idx,
+        separation * 1000.0 + trigger_bias});
+  }
+
+  sort(ranked.begin(), ranked.end(),
+       [](const RankedGate& a, const RankedGate& b) {
+         if (fabs(a.score - b.score) > 1.0e-12) {
+           return a.score > b.score;
+         }
+         return a.idx < b.idx;
+       });
+  for (const auto& rg : ranked) {
+    if (used.insert(rg.idx).second) {
+      pool.push_back(rg.idx);
+      if (pool.size() >= max_count) {
+        break;
+      }
+    }
+  }
+  return pool;
+}
+
+struct RuleKillAction {
+  int node_idx = -1;
+  int kill_value = 0;
+  uint64_t cover_mask = 0;
+  double cost = 0.0;
+  std::size_t fanout = 0;
+};
+
+struct RuleKillPlan {
+  std::vector<std::size_t> actions;
+  double cost = 0.0;
+};
+
+bool is_virtual_node_name(const std::string& name) {
+  return name.size() >= 3 && name[0] == 'v' && name[1] == 'n' &&
+         name[2] == '_';
+}
+
+bool is_triggerish_name(const std::string& name) {
+  if (name.size() < 2 || name[0] != 'r') {
+    return false;
+  }
+  for (std::size_t i = 1; i < name.size(); ++i) {
+    if (name[i] < '0' || name[i] > '9') {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<std::size_t> compute_fanout_counts(const circuit& net) {
+  std::vector<std::size_t> fanout(net.node_count(), 0);
+  for (std::size_t i = 0; i < net.node_count(); ++i) {
+    const cell& c = net.get_cell(static_cast<int>(i));
+    if (c.ctype != CType::GATE) {
+      continue;
+    }
+    for (int inp : c.inputs) {
+      if (inp >= 0 && static_cast<std::size_t>(inp) < fanout.size()) {
+        fanout[static_cast<std::size_t>(inp)] += 1;
+      }
+    }
+  }
+  return fanout;
+}
+
+double rule_kill_action_cost(const circuit& net,
+                             int node_idx,
+                             std::size_t fanout,
+                             std::size_t cover_count) {
+  const cell& c = net.get_cell(node_idx);
+  double cost = 1000.0;
+  cost += static_cast<double>(fanout) * 80.0;
+  cost += static_cast<double>(c.inputs.size()) * 8.0;
+  cost -= static_cast<double>(cover_count) * 120.0;
+  if (is_triggerish_name(net.node_name(node_idx))) {
+    cost -= 450.0;
+  }
+  if (fanout <= 1) {
+    cost -= 120.0;
+  }
+  if (c.gtype == GType::XOR || c.gtype == GType::XNOR) {
+    cost += 80.0;
+  }
+  return cost;
+}
+
+bool solve_rule_kill_dp(const std::vector<RuleKillAction>& actions,
+                        uint64_t full_mask,
+                        std::size_t rule_count,
+                        const std::vector<char>& banned,
+                        RuleKillPlan* out) {
+  if (!out || rule_count > 16) {
+    return false;
+  }
+  out->actions.clear();
+  out->cost = 0.0;
+  const std::size_t state_count = std::size_t{1} << rule_count;
+  const double inf = std::numeric_limits<double>::infinity();
+  std::vector<double> dp(state_count, inf);
+  std::vector<uint64_t> prev_mask(state_count, 0);
+  std::vector<int> prev_action(state_count, -1);
+  dp[0] = 0.0;
+  for (std::size_t mask = 0; mask < state_count; ++mask) {
+    if (!std::isfinite(dp[mask])) {
+      continue;
+    }
+    for (std::size_t ai = 0; ai < actions.size(); ++ai) {
+      if (!banned.empty() && banned[ai]) {
+        continue;
+      }
+      const uint64_t next_mask =
+          static_cast<uint64_t>(mask) | actions[ai].cover_mask;
+      const double next_cost = dp[mask] + actions[ai].cost;
+      if (next_cost + 1.0e-9 < dp[static_cast<std::size_t>(next_mask)]) {
+        dp[static_cast<std::size_t>(next_mask)] = next_cost;
+        prev_mask[static_cast<std::size_t>(next_mask)] =
+            static_cast<uint64_t>(mask);
+        prev_action[static_cast<std::size_t>(next_mask)] =
+            static_cast<int>(ai);
+      }
+    }
+  }
+  const std::size_t full = static_cast<std::size_t>(full_mask);
+  if (!std::isfinite(dp[full])) {
+    return false;
+  }
+  std::vector<std::size_t> selected;
+  uint64_t cur = full_mask;
+  while (cur != 0) {
+    const int ai = prev_action[static_cast<std::size_t>(cur)];
+    if (ai < 0) {
+      return false;
+    }
+    selected.push_back(static_cast<std::size_t>(ai));
+    cur = prev_mask[static_cast<std::size_t>(cur)];
+  }
+  std::reverse(selected.begin(), selected.end());
+  out->actions = std::move(selected);
+  out->cost = dp[full];
+  return true;
+}
+
+bool solve_rule_kill_greedy(const std::vector<RuleKillAction>& actions,
+                            uint64_t full_mask,
+                            const std::vector<char>& banned,
+                            RuleKillPlan* out) {
+  if (!out) {
+    return false;
+  }
+  out->actions.clear();
+  out->cost = 0.0;
+  uint64_t covered = 0;
+  std::vector<char> used(actions.size(), 0);
+  while (covered != full_mask) {
+    int best = -1;
+    double best_score = -1.0;
+    for (std::size_t ai = 0; ai < actions.size(); ++ai) {
+      if (used[ai] || (!banned.empty() && banned[ai])) {
+        continue;
+      }
+      const uint64_t gain_mask = actions[ai].cover_mask & ~covered;
+      const int gain = __builtin_popcountll(gain_mask);
+      if (gain == 0) {
+        continue;
+      }
+      const double score =
+          static_cast<double>(gain) * 10000.0 /
+          std::max(1.0, actions[ai].cost);
+      if (score > best_score + 1.0e-12 ||
+          (std::fabs(score - best_score) <= 1.0e-12 &&
+           actions[ai].cost < actions[static_cast<std::size_t>(best)].cost)) {
+        best = static_cast<int>(ai);
+        best_score = score;
+      }
+    }
+    if (best < 0) {
+      return false;
+    }
+    const std::size_t best_idx = static_cast<std::size_t>(best);
+    used[best_idx] = 1;
+    out->actions.push_back(best_idx);
+    out->cost += actions[best_idx].cost;
+    covered |= actions[best_idx].cover_mask;
+  }
+  return true;
+}
+
+std::string rule_kill_plan_key(const RuleKillPlan& plan) {
+  std::vector<std::size_t> sorted = plan.actions;
+  std::sort(sorted.begin(), sorted.end());
+  std::string key;
+  for (std::size_t ai : sorted) {
+    key += std::to_string(ai);
+    key += ',';
+  }
+  return key;
+}
+
+std::vector<RuleKillPlan> build_rule_kill_plans(
+    const circuit& net,
+    const std::vector<int>& feature_nodes,
+    const DecisionTreeModel& model,
+    std::vector<RuleKillAction>* actions_out,
+    std::string* reason) {
+  if (reason) {
+    reason->clear();
+  }
+  if (actions_out) {
+    actions_out->clear();
+  }
+  std::vector<RuleKillPlan> plans;
+  const std::size_t rule_count = model.rules.size();
+  if (rule_count == 0) {
+    if (reason) *reason = "no rules";
+    return plans;
+  }
+  if (rule_count > 63) {
+    if (reason) *reason = "too many rules for rule-kill bitmask";
+    return plans;
+  }
+
+  const std::vector<std::size_t> fanout = compute_fanout_counts(net);
+  struct ActionBuilder {
+    int node_idx = -1;
+    int kill_value = 0;
+    uint64_t cover_mask = 0;
+  };
+  std::vector<ActionBuilder> builders;
+  std::unordered_map<uint64_t, std::size_t> action_pos;
+
+  for (std::size_t ri = 0; ri < model.rules.size(); ++ri) {
+    const auto& rule = model.rules[ri];
+    for (const auto& term : rule.terms) {
+      if (term.first >= feature_nodes.size()) {
+        continue;
+      }
+      const int node_idx = feature_nodes[term.first];
+      if (node_idx < 0 || static_cast<std::size_t>(node_idx) >= net.node_count()) {
+        continue;
+      }
+      const cell& c = net.get_cell(node_idx);
+      if (c.ctype != CType::GATE) {
+        continue;
+      }
+      if (is_virtual_node_name(net.node_name(node_idx))) {
+        continue;
+      }
+      const int expected = term.second ? 1 : 0;
+      const int kill_value = expected ? 0 : 1;
+      const uint64_t key =
+          (static_cast<uint64_t>(static_cast<unsigned int>(node_idx)) << 1) |
+          static_cast<uint64_t>(kill_value);
+      auto it = action_pos.find(key);
+      if (it == action_pos.end()) {
+        action_pos[key] = builders.size();
+        builders.push_back(ActionBuilder{node_idx, kill_value, 0});
+        it = action_pos.find(key);
+      }
+      builders[it->second].cover_mask |= (uint64_t{1} << ri);
+    }
+  }
+
+  std::vector<RuleKillAction> actions;
+  actions.reserve(builders.size());
+  for (const auto& b : builders) {
+    if (b.cover_mask == 0) {
+      continue;
+    }
+    const std::size_t cover_count =
+        static_cast<std::size_t>(__builtin_popcountll(b.cover_mask));
+    const std::size_t fo =
+        static_cast<std::size_t>(b.node_idx) < fanout.size()
+            ? fanout[static_cast<std::size_t>(b.node_idx)]
+            : 0;
+    actions.push_back(RuleKillAction{
+        b.node_idx,
+        b.kill_value,
+        b.cover_mask,
+        rule_kill_action_cost(net, b.node_idx, fo, cover_count),
+        fo});
+  }
+  std::sort(actions.begin(), actions.end(),
+            [&](const RuleKillAction& a, const RuleKillAction& b) {
+              if (std::fabs(a.cost - b.cost) > 1.0e-9) {
+                return a.cost < b.cost;
+              }
+              return net.node_name(a.node_idx) < net.node_name(b.node_idx);
+            });
+
+  const uint64_t full_mask =
+      rule_count == 64 ? ~uint64_t{0} : ((uint64_t{1} << rule_count) - 1);
+  uint64_t union_cover = 0;
+  for (const auto& action : actions) {
+    union_cover |= action.cover_mask;
+  }
+  if ((union_cover & full_mask) != full_mask) {
+    if (reason) *reason = "rule literals do not cover all rules";
+    if (actions_out) *actions_out = std::move(actions);
+    return plans;
+  }
+
+  const std::size_t kMaxPlans = 4;
+  std::unordered_set<std::string> seen_plans;
+  auto add_plan = [&](const RuleKillPlan& plan) {
+    if (plan.actions.empty()) {
+      return;
+    }
+    const std::string key = rule_kill_plan_key(plan);
+    if (seen_plans.insert(key).second) {
+      plans.push_back(plan);
+    }
+  };
+
+  if (rule_count == 1) {
+    for (std::size_t ai = 0; ai < actions.size() && plans.size() < kMaxPlans;
+         ++ai) {
+      if ((actions[ai].cover_mask & full_mask) == full_mask) {
+        RuleKillPlan plan;
+        plan.actions.push_back(ai);
+        plan.cost = actions[ai].cost;
+        add_plan(plan);
+      }
+    }
+  } else {
+    RuleKillPlan best;
+    std::vector<char> banned(actions.size(), 0);
+    const bool exact = rule_count <= 16;
+    bool ok = exact ? solve_rule_kill_dp(actions, full_mask, rule_count,
+                                         banned, &best)
+                    : solve_rule_kill_greedy(actions, full_mask, banned,
+                                             &best);
+    if (ok) {
+      add_plan(best);
+      const std::vector<std::size_t> base_actions = best.actions;
+      for (std::size_t banned_action : base_actions) {
+        if (plans.size() >= kMaxPlans || banned_action >= actions.size()) {
+          break;
+        }
+        std::fill(banned.begin(), banned.end(), 0);
+        banned[banned_action] = 1;
+        RuleKillPlan alt;
+        ok = exact ? solve_rule_kill_dp(actions, full_mask, rule_count,
+                                        banned, &alt)
+                   : solve_rule_kill_greedy(actions, full_mask, banned,
+                                            &alt);
+        if (ok) {
+          add_plan(alt);
+        }
+      }
+    }
+  }
+
+  std::sort(plans.begin(), plans.end(),
+            [](const RuleKillPlan& a, const RuleKillPlan& b) {
+              if (std::fabs(a.cost - b.cost) > 1.0e-9) {
+                return a.cost < b.cost;
+              }
+              return a.actions.size() < b.actions.size();
+            });
+  if (plans.size() > kMaxPlans) {
+    plans.resize(kMaxPlans);
+  }
+  if (actions_out) {
+    *actions_out = std::move(actions);
+  }
+  if (plans.empty() && reason) {
+    *reason = "no cover plan found";
+  }
+  return plans;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -662,6 +1233,7 @@ int main(int argc, char** argv) {
 
   const int kMaxCecRounds = 5;
   std::vector<std::vector<int>> extra_trigger_patterns;
+  std::vector<std::vector<int>> extra_nontrigger_patterns;
   int cec_round = 0;
   string fix_output_path;
 
@@ -701,6 +1273,12 @@ int main(int argc, char** argv) {
       stats.mismatch_patterns = stats.trigger_patterns_total;
       cout << "cec_extra_patterns " << extra_trigger_patterns.size()
            << " total_trigger " << stats.trigger_patterns_total << "\n";
+    }
+    const std::vector<std::vector<int>>* extra_neg_patterns =
+        extra_nontrigger_patterns.empty() ? nullptr : &extra_nontrigger_patterns;
+    if (!extra_nontrigger_patterns.empty()) {
+      cout << "cec_extra_neg_patterns " << extra_nontrigger_patterns.size()
+           << "\n";
     }
 
     cout << "pattern_total " << stats.total_patterns << "\n";
@@ -795,7 +1373,7 @@ int main(int argc, char** argv) {
         bool phase1_ok = run_mining(golden, working_trojan,
                                      stats.trigger_patterns,
                                      base_for_vn, phase1_opts,
-                                     trojan_rate, nullptr, nullptr,
+                                     trojan_rate, extra_neg_patterns, nullptr,
                                      &phase1_result, &phase1_error);
         if (phase1_ok && !phase1_result.model.rules.empty()) {
           // Extract circuit node indices actually used by the tree.
@@ -815,55 +1393,72 @@ int main(int argc, char** argv) {
                << " important_signals " << important_signals.size()
                << " from_candidates " << base_for_vn.size() << "\n";
 
-          // Phase 2: Generate pairwise+triple virtual nodes from important
-          // signals.
-          std::vector<VirtualNodeDef> all_vn_defs;
-          if (important_signals.size() >= 2) {
-            const std::size_t max_arity =
-                (important_signals.size() <= 12) ? 3 : 2;
-            generate_virtual_candidates(important_signals, max_arity,
-                                        &all_vn_defs);
-            cout << "vn_phase2_combo " << all_vn_defs.size()
-                 << " max_arity " << max_arity << "\n";
+          size_t phase1_literal_count = 0;
+          for (const auto& rule : phase1_result.model.rules) {
+            phase1_literal_count += rule.terms.size();
           }
 
-          // Phase 2b: Mine frequent subclauses (length 3-4) from phase1 rules
-          // to create targeted higher-arity virtual nodes.
-          // first_virtual_idx=0 means no virtual features exist yet.
-          {
-            std::vector<VirtualNodeDef> subclause_defs;
-            mine_subclauses_from_rules(
-                phase1_result.feature_nodes,
-                phase1_result.model,
-                3, 4,    // min_len=3, max_len=4 (reduced from 5)
-                500,     // max_candidates (conservative)
-                all_vn_defs,  // existing VN for dedup
-                &subclause_defs,
-                0);      // no virtual features in phase1
-            if (!subclause_defs.empty()) {
-              cout << "vn_phase2_subclauses " << subclause_defs.size() << "\n";
-              for (auto& sd : subclause_defs) {
-                all_vn_defs.push_back(std::move(sd));
+          if (phase1_result.model.rules.size() == 1 &&
+              phase1_literal_count <= 1) {
+            cout << "vn_signature_skip single_literal_phase1\n";
+          } else {
+            // Phase 2: Generate virtual nodes only through signature DP.
+            // No structural fallback and no rule-mined expansion.
+            std::vector<VirtualNodeDef> all_vn_defs;
+            vector<int> signature_base = build_signature_base_pool(
+                stats, base_for_vn, important_signals, 64);
+            cout << "vn_signature_base " << signature_base.size()
+                 << " important " << important_signals.size()
+                 << " from_candidates " << base_for_vn.size() << "\n";
+            if (signature_base.size() >= 2) {
+              const std::size_t max_arity =
+                  (signature_base.size() <= 64) ? 3 : 2;
+              vector<vector<int>> sig_pos =
+                  select_spread_patterns(stats.trigger_patterns, 32);
+              vector<vector<int>> sig_neg =
+                  select_spread_patterns(extra_nontrigger_patterns, 16);
+              const size_t sig_neg_target =
+                  min<size_t>(32, max<size_t>(8, sig_pos.size()));
+              collect_random_nontrigger_patterns(golden,
+                                                 working_trojan,
+                                                 sig_neg_target,
+                                                 &sig_neg);
+
+              SignatureVirtualOptions sig_opts;
+              sig_opts.max_arity = max_arity;
+              sig_opts.max_candidates = 300;
+              sig_opts.max_pair_states = 300;
+              SignatureVirtualStats sig_stats;
+              string sig_error;
+              const bool sig_ok = generate_signature_virtual_candidates(
+                  working_trojan,
+                  signature_base,
+                  sig_pos,
+                  sig_neg,
+                  sig_opts,
+                  &all_vn_defs,
+                  &sig_stats,
+                  &sig_error);
+              if (!sig_ok) {
+                cerr << "vn_signature_dp error: " << sig_error
+                     << "; skipping virtual nodes\n";
+                all_vn_defs.clear();
               }
+              cout << "vn_signature_patterns pos " << sig_pos.size()
+                   << " neg " << sig_neg.size() << "\n";
+              cout << "vn_signature_dp selected " << all_vn_defs.size()
+                   << " base " << signature_base.size()
+                   << " patterns " << sig_stats.pattern_count
+                   << " pair_states " << sig_stats.pair_states
+                   << " triple_ext " << sig_stats.triple_states
+                   << " max_arity " << max_arity << "\n";
             }
-          }
 
-          // Phase 3: Iterative refinement - train with virtual features
-          // (computed on-the-fly, NO circuit modification), then mine
-          // subclauses from that result.
-          if (!all_vn_defs.empty()) {
-            cout << "vn_phase2_total " << all_vn_defs.size()
-                 << " (virtual, circuit unchanged)\n";
-
-            // best_vn_defs tracks the VN set that produced the fewest rules.
-            std::vector<VirtualNodeDef> best_vn_defs = all_vn_defs;
-            std::size_t best_rules = 0;
-
-            const int max_vn_iters = 3;
-            std::size_t prev_iter_rules = 0;
-            for (int vn_iter = 0; vn_iter < max_vn_iters; ++vn_iter) {
-              // Snapshot VN defs so we can revert on regression.
-              const std::size_t vn_snapshot = all_vn_defs.size();
+            // Phase 3: Train once with the signature VNs to see which rules
+            // the model can learn from the virtual features.
+            if (!all_vn_defs.empty()) {
+              cout << "vn_phase2_total " << all_vn_defs.size()
+                   << " (virtual, circuit unchanged)\n";
 
               MiningOptions iter_opts;
               iter_opts.max_depth = options.max_depth;
@@ -875,75 +1470,28 @@ int main(int argc, char** argv) {
               iter_opts.force_split = options.force_split;
               iter_opts.strict_retry = false;
 
-              // Train with base candidates + virtual features (on-the-fly).
               MiningResult iter_result;
               string iter_error;
               bool iter_ok = run_mining(golden, working_trojan,
                                          stats.trigger_patterns,
                                          base_for_vn, iter_opts,
-                                         trojan_rate, nullptr, nullptr,
+                                         trojan_rate, extra_neg_patterns, nullptr,
                                          &iter_result, &iter_error,
                                          &all_vn_defs);
               if (!iter_ok || iter_result.model.rules.empty()) {
                 if (!iter_error.empty()) {
-                  cerr << "vn_iter" << (vn_iter + 1)
-                       << " error: " << iter_error << "\n";
+                  cerr << "vn_iter1 error: " << iter_error << "\n";
                 }
-                break;
+              } else {
+                const std::size_t iter_rules =
+                    iter_result.model.rules.size();
+                cout << "vn_iter1_rules " << iter_rules
+                     << " vn_count " << all_vn_defs.size() << "\n";
+                final_vn_defs = std::move(all_vn_defs);
+                cout << "vn_best_rules " << iter_rules
+                     << " vn_count " << final_vn_defs.size() << "\n";
               }
-
-              const std::size_t iter_rules = iter_result.model.rules.size();
-              cout << "vn_iter" << (vn_iter + 1)
-                   << "_rules " << iter_rules
-                   << " vn_count " << all_vn_defs.size() << "\n";
-
-              // Stop if rule count increased (regression from feature noise).
-              // Revert VN defs to before this iteration's additions.
-              if (prev_iter_rules > 0 && iter_rules >= prev_iter_rules) {
-                all_vn_defs.resize(vn_snapshot);
-                cout << "vn_iter" << (vn_iter + 1)
-                     << " stopped+reverted: rules did not decrease ("
-                     << prev_iter_rules << " -> " << iter_rules << ")\n";
-                break;
-              }
-              prev_iter_rules = iter_rules;
-              best_vn_defs = all_vn_defs;
-              best_rules = iter_rules;
-
-              // Mine subclauses of length 2-4 from this iteration's rules.
-              // Skip virtual feature terms to prevent VN-on-VN composition.
-              const std::size_t first_vn_feat = iter_result.feature_nodes.size();
-              const std::size_t sc_max =
-                  (vn_iter == 0) ? 500 : 200;
-              std::vector<VirtualNodeDef> iter_subclauses;
-              mine_subclauses_from_rules(
-                  iter_result.feature_nodes,
-                  iter_result.model,
-                  2, 4,    // min_len=2, max_len=4 (reduced from 5)
-                  sc_max,  // max_candidates (decreasing)
-                  all_vn_defs,  // dedup against all existing
-                  &iter_subclauses,
-                  first_vn_feat);  // skip virtual features
-
-              if (iter_subclauses.empty()) {
-                cout << "vn_iter" << (vn_iter + 1)
-                     << "_new_subclauses 0 (converged)\n";
-                break;
-              }
-
-              // Add new subclauses to VN defs (no circuit modification).
-              for (auto& sd : iter_subclauses) {
-                all_vn_defs.push_back(std::move(sd));
-              }
-              cout << "vn_iter" << (vn_iter + 1)
-                   << "_new_subclauses " << iter_subclauses.size()
-                   << " total_vn " << all_vn_defs.size() << "\n";
             }
-
-            // Use the best VN set found during iterations.
-            final_vn_defs = std::move(best_vn_defs);
-            cout << "vn_best_rules " << best_rules
-                 << " vn_count " << final_vn_defs.size() << "\n";
           }
         } else {
           if (!phase1_error.empty()) {
@@ -984,7 +1532,7 @@ int main(int argc, char** argv) {
       bool final_vn_ok = run_mining(golden, working_trojan,
                                      stats.trigger_patterns,
                                      base_for_insert, final_vn_opts,
-                                     trojan_rate, nullptr, nullptr,
+                                     trojan_rate, extra_neg_patterns, nullptr,
                                      &final_vn_result, &final_vn_error,
                                      &final_vn_defs);
 
@@ -1046,7 +1594,7 @@ int main(int argc, char** argv) {
                       candidate_indices,
                       mining_options,
                       trojan_rate,
-                      nullptr,
+                      extra_neg_patterns,
                       &neg_trace,
                       &result,
                       &error)) {
@@ -1280,6 +1828,128 @@ int main(int argc, char** argv) {
   t_sub = std::chrono::steady_clock::now();
 
   if (!fix_succeeded) {
+    std::vector<RuleKillAction> rule_kill_actions;
+    std::string rule_kill_reason;
+    std::vector<RuleKillPlan> rule_kill_plans =
+        build_rule_kill_plans(working_trojan,
+                              result.feature_nodes,
+                              result.model,
+                              &rule_kill_actions,
+                              &rule_kill_reason);
+    if (!rule_kill_plans.empty()) {
+      cout << "rule_kill_dp_actions " << rule_kill_actions.size()
+           << " plans " << rule_kill_plans.size()
+           << " rules " << result.model.rules.size() << "\n";
+
+      std::size_t base_area = 0;
+      std::size_t base_level = 0;
+      bool have_base_metrics = true;
+      try {
+        circuit base_eval = working_trojan;
+        base_eval.ensure_eval_order();
+        base_area = base_eval.area();
+        base_level = base_eval.level();
+      } catch (const std::exception& e) {
+        have_base_metrics = false;
+        cerr << "rule_kill_dp baseline error: " << e.what() << "\n";
+      }
+
+      if (have_base_metrics) {
+        for (std::size_t pi = 0; pi < rule_kill_plans.size(); ++pi) {
+          const RuleKillPlan& plan = rule_kill_plans[pi];
+          circuit trial = working_trojan;
+          bool plan_valid = true;
+          for (std::size_t action_idx : plan.actions) {
+            if (action_idx >= rule_kill_actions.size()) {
+              plan_valid = false;
+              break;
+            }
+            const RuleKillAction& action = rule_kill_actions[action_idx];
+            try {
+              trial.force_gate_const(action.node_idx, action.kill_value);
+            } catch (const std::exception& e) {
+              cerr << "rule_kill_dp action error: " << e.what() << "\n";
+              plan_valid = false;
+              break;
+            }
+          }
+          if (!plan_valid) {
+            continue;
+          }
+
+          std::size_t mismatch_index = 0;
+          auto t_verify = std::chrono::steady_clock::now();
+          if (!verify_patch_groundtruth(golden,
+                                        trial,
+                                        stats.trigger_patterns,
+                                        &mismatch_index,
+                                        &error)) {
+            cerr << "rule_kill_dp_plan " << (pi + 1)
+                 << " failed: " << error;
+            if (!stats.trigger_patterns.empty()) {
+              cerr << " pattern " << mismatch_index;
+            }
+            cerr << "\n";
+            continue;
+          }
+          cerr << "[TIMING]   final_verify: " << ms_since(t_verify)
+               << " ms (PASS)\n";
+
+          std::size_t trial_area = 0;
+          std::size_t trial_level = 0;
+          try {
+            trial.ensure_eval_order();
+            trial_area = trial.area();
+            trial_level = trial.level();
+          } catch (const std::exception& e) {
+            cerr << "rule_kill_dp area/level error: " << e.what() << "\n";
+            continue;
+          }
+
+          cout << "rule_kill_dp_selected plan " << (pi + 1)
+               << " actions " << plan.actions.size()
+               << " cost " << plan.cost << "\n";
+          for (std::size_t action_idx : plan.actions) {
+            const RuleKillAction& action = rule_kill_actions[action_idx];
+            cout << "rule_kill_dp_action "
+                 << working_trojan.node_name(action.node_idx)
+                 << " forced " << action.kill_value
+                 << " covers " << __builtin_popcountll(action.cover_mask)
+                 << " fanout " << action.fanout
+                 << " cost " << action.cost << "\n";
+          }
+
+          const long long delta_area =
+              static_cast<long long>(trial_area) -
+              static_cast<long long>(base_area);
+          const long long delta_level =
+              static_cast<long long>(trial_level) -
+              static_cast<long long>(base_level);
+          fix_output_path = options.output_path.empty()
+                                ? derive_patched_path(options.trojan_path)
+                                : options.output_path;
+          if (!bench_io::write_bench_file(fix_output_path, trial, &error)) {
+            cerr << "Write error: " << error << "\n";
+            return 1;
+          }
+          cout << "payload_fix_selected 1 area_delta " << delta_area
+               << " level_delta " << delta_level << "\n";
+          cout << "payload_fix_bench " << fix_output_path << "\n";
+          cerr << "[TIMING] rule_kill+verify+write: "
+               << ms_since(t_phase) << " ms\n";
+          fix_succeeded = true;
+          break;
+        }
+      }
+    } else if (!rule_kill_reason.empty()) {
+      cerr << "rule_kill_dp skipped: " << rule_kill_reason << "\n";
+    }
+  }
+
+  cerr << "[TIMING]   rule_kill_dp: " << ms_since(t_sub) << " ms\n";
+  t_sub = std::chrono::steady_clock::now();
+
+  if (!fix_succeeded) {
     std::vector<int> payload_fix_nodes;
     analyze_payload_nodes(golden,
                           working_trojan,
@@ -1423,13 +2093,36 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  // CEC failed — extract counter-example and retry.
+  // CEC failed — classify the counter-example and retry.  If the original
+  // trojan already differs from golden, it is a missed trigger.  If original
+  // trojan matches golden but patched differs, it is a patch false-positive
+  // and must be learned as a hard negative instead.
   if (cec_counter.empty()) {
     cerr << "cec: failed to parse counter-example, giving up\n";
     break;
   }
-  extra_trigger_patterns.push_back(std::move(cec_counter));
-  cout << "cec_new_pattern total_extra " << extra_trigger_patterns.size() << "\n";
+  bool is_real_trigger = true;
+  string classify_error;
+  if (!classify_cec_counterexample(golden, trojan, cec_counter,
+                                   &is_real_trigger, &classify_error)) {
+    cerr << "cec: failed to classify counter-example";
+    if (!classify_error.empty()) {
+      cerr << ": " << classify_error;
+    }
+    cerr << "; treating as trigger\n";
+    is_real_trigger = true;
+  }
+  if (is_real_trigger) {
+    extra_trigger_patterns.push_back(std::move(cec_counter));
+    cout << "cec_new_pattern total_extra "
+         << extra_trigger_patterns.size()
+         << " type trigger\n";
+  } else {
+    extra_nontrigger_patterns.push_back(std::move(cec_counter));
+    cout << "cec_new_negative total_extra_neg "
+         << extra_nontrigger_patterns.size()
+         << " type false_positive\n";
+  }
 
   }  // end CEC retry loop
 

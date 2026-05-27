@@ -15,14 +15,36 @@ struct VirtualNodeDef {
   std::vector<std::pair<int, bool>> inputs;
 };
 
-// Generate virtual node candidates as pairwise and triple boolean
-// combinations (AND/OR with all polarity combinations) of the given
-// base candidate signals.  max_arity controls whether triples (3) or
-// only pairs (2) are generated.
-void generate_virtual_candidates(
+struct SignatureVirtualOptions {
+  std::size_t max_arity = 3;
+  std::size_t max_candidates = 300;
+  std::size_t max_pair_states = 300;
+};
+
+struct SignatureVirtualStats {
+  std::size_t pattern_count = 0;
+  std::size_t positive_count = 0;
+  std::size_t negative_count = 0;
+  std::size_t base_count = 0;
+  std::size_t pair_states = 0;
+  std::size_t triple_states = 0;
+  std::size_t selected = 0;
+};
+
+// Generate VN candidates by ranking their pattern signatures.  The input
+// patterns are capped to one packed word; positives are the desired trigger
+// side, negatives are hard/background non-trigger examples.  The function
+// deduplicates candidates that have the same signature and keeps the cheaper
+// expression for that behavior.
+bool generate_signature_virtual_candidates(
+    const circuit& net,
     const std::vector<int>& base_candidates,
-    std::size_t max_arity,
-    std::vector<VirtualNodeDef>* out);
+    const std::vector<std::vector<int>>& positive_patterns,
+    const std::vector<std::vector<int>>& negative_patterns,
+    const SignatureVirtualOptions& options,
+    std::vector<VirtualNodeDef>* out,
+    SignatureVirtualStats* stats = nullptr,
+    std::string* error = nullptr);
 
 // Add virtual node gates to a circuit.  Inverted inputs are handled
 // by inserting shared NOT gates (cached per signal).  Returns the
@@ -55,21 +77,3 @@ std::vector<packed_circuit::word_t> compute_virtual_feature_bits(
 int compute_virtual_feature_value(
     const circuit& c,
     const VirtualNodeDef& def);
-
-// Mine frequently co-occurring literal subclauses from decision tree rules.
-// Extracts all k-subsets of terms (k in [min_len, max_len]) from each rule,
-// counts frequency across rules, and returns VirtualNodeDefs for the top
-// max_candidates most frequent subclauses (AND gate with appropriate
-// inversions).  Subclauses that already correspond to existing virtual nodes
-// in existing_vn (by matching inputs exactly) are skipped.
-// first_virtual_idx: feature indices >= this value are virtual features
-// and will be excluded from subclause mining to prevent VN-on-VN composition.
-void mine_subclauses_from_rules(
-    const std::vector<int>& feature_nodes,
-    const DecisionTreeModel& model,
-    std::size_t min_len,
-    std::size_t max_len,
-    std::size_t max_candidates,
-    const std::vector<VirtualNodeDef>& existing_vn,
-    std::vector<VirtualNodeDef>* out,
-    std::size_t first_virtual_idx = 0);
