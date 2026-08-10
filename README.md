@@ -172,7 +172,7 @@ Run all test cases and produce a CSV report:
 bash run_tests.sh
 ```
 
-Output CSV columns: `circuit, trojan, success, gt_verify, vn_rounds, runtime_ms, area_delta, level_delta, cec_rounds`
+The first nine backward-compatible CSV columns are `circuit, trojan, success, gt_verify, vn_rounds, runtime_ms, area_delta, level_delta, cec_rounds`. Appended columns record the selected strategy, actual DT/training-data build counts, VN counts, synthesis metrics, apply source, and applied/effective rule metrics; see the header in `run_tests.sh` for the complete schema.
 
 Success is determined by ABC CEC (equivalence check) of the patched circuit against the golden.
 
@@ -190,16 +190,18 @@ Reproduce the fixed 11 hard cases and 3 controls (large V0 inputs must already b
 ```bash
 python3 scripts/compare_rule_methods.py \
   --profile rebuild11 \
-  --output-root validation/rule_method_ab_rebuild11 \
+  --output-root validation/rule_method_ab_rebuild11_v2 \
   --jobs 1 --force
 
 python3 scripts/compare_rule_methods.py \
   --profile controls \
-  --output-root validation/rule_method_ab_controls \
+  --output-root validation/rule_method_ab_controls_v2 \
   --jobs 1 --force
 ```
 
-The runner stores per-method logs, patched netlists, JSON records, aggregate CSV/JSON, tool/input SHA-256 identities, and an independent external ABC CEC result. See [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md) for the measured comparison and its limitations.
+The runner enforces `--jobs 1` because methods for one case can otherwise race on a shared intermediate rule-merge netlist. It pins `ABC_BIN` to the fingerprinted ABC executable, requires the independent external CEC marker and a zero exit status, and rechecks all tool/input identities after each run. `wall_ms` covers execution; the separate `provenance_verification_ms` field records the post-run identity check.
+
+Artifacts include per-method logs, patched netlists, JSON records, aggregate CSV/JSON, pre-run fingerprints with post-run mutation checks, and the external ABC CEC result. The tracked 28-row projection is [`experiments/rule_method_ab_2026-08-11/paired_results.csv`](experiments/rule_method_ab_2026-08-11/paired_results.csv). See [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md) for the v2 comparison and limitations.
 
 ## ABC Setup
 

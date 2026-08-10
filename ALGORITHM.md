@@ -113,7 +113,7 @@ Virtual Node（VN）把兩個或三個帶 polarity 的 gate literal 合成 AND f
 
 若 phase-1 已得到單一 literal，就跳過 VN generation，通常每個 CEC attempt 只有 phase-1 與 final DT 共 2 次 build。若 VN candidates 有產生且進入 used-VN pass，通常是 phase-1、VN retrain、used-VN pass、final DT 共 4 次 build。`rule_synth_summary` 會記錄 `dt_builds`、`vn_generated`、`vn_used` 與各階段時間。
 
-**注意：** 生成很多 VN 不表示最後 patch 會使用它們。正式 `rebuild11` artifacts 中許多 pass 的 `vn_used=0`，但重訓成本仍已發生。
+**注意：** 生成很多 VN 不表示最後 patch 會使用它們。正式 `rebuild11_v2` artifacts 中許多 pass 的 `vn_used=0`，但重訓成本仍已發生。
 
 #### 3.B `dt`：不使用 VN 的 baseline
 
@@ -123,7 +123,7 @@ Virtual Node（VN）把兩個或三個帶 polarity 的 gate literal 合成 AND f
 
 `z3-pb` 先建立一次 DT。在 greedy simplification 之前，收集所有 raw positive DT paths 出現的 feature index 並做 union。optimizer 只可從這個 union 選 literal，不會自動探索 tree 未使用的 gates。這個 optimizer 只取代 rule synthesis 的 VN 重訓；第 5 節 payload-node MaxSAT 與 patch application 仍是所有 rule methods 共用的 downstream 流程。
 
-令 `a_k` 表示 DNF clause `k` 是否啟用，`x_{k,j,0}` / `x_{k,j,1}` 表示該 clause 是否選 feature `j` 的 0/1 polarity。對有限 training signature `s`，clause match 為：
+令 `a_k` 表示 DNF clause `k` 是否啟用，`x_{k,j,0}` / `x_{k,j,1}` 表示該 clause 是否選 feature `j` 的 0/1 polarity。對有限 training signature `s`，以下 `m[s,k]` 只是方便說明的 match predicate/expression 記號；程式直接建立右式，不另外宣告一個 `m[s,k]` solver 變數：
 
 ```
 m[s,k] = a[k] AND
@@ -219,7 +219,14 @@ z3-pb（若啟用）：
   - 對 raw DT candidate union 做跨 clauses 的全域重合成
 ```
 
-`rule_synth_summary` 在後續 trigger signature minimization、literal patch cut、rule-match merge 與實際 patch application之前輸出；`synthesized_*` 是明確的 synthesis-stage 指標，`final_*` 只保留作舊 parser 的相容 alias。後處理完成後另輸出 `rule_apply_summary`，以 `source`、`rule_model_used` 與 `effective_rules/effective_literals/effective_depth` 區分 conditional DNF、signature/stat literal 與直接 literal cut。
+`rule_synth_summary` 在後續 trigger signature minimization、literal patch cut、rule-match merge 與實際 patch application之前輸出；`synthesized_rules/synthesized_literals/synthesized_depth` 是明確的 synthesis-stage 指標，`final_*` 只保留作舊 parser 的相容 alias。
+
+後處理完成後另輸出 `rule_apply_summary`：
+
+- `source` 記錄實際分支，例如 `signature_minimize`、`signature_single_literal`、`stats_literal`、`literal_patch_cut`。
+- `rule_model_used=1` 時，`applied_*` 是後處理完、由 downstream repair 消費的 rule model 大小；single-literal model 可直接觸發 trigger-kill，multi-literal/rule model 才會成為 conditional patch 條件。
+- verified direct literal cut 完全 bypass rule model，因此 `rule_model_used=0` 且 `applied_*=0/0/0`；為了跨分支比較，`effective_*=1/1/1` 表示一個有效 predicate/action。
+- `effective_rules/effective_literals/effective_depth` 應搭配 external CEC 結果解讀；CEC_FAIL 的小條件不是正確 patch。
 
 ### 5. 修補策略
 
@@ -911,7 +918,7 @@ CEC Retry Loop（最多 5 輪）：
 - Mining 只在這些 pattern 上訓練，可能遺漏某些 trigger 條件
 - CEC 用形式化方法檢驗所有可能 input
 - Counter-example 回饋讓 mining 逐步完善 trigger 條件
-- 正式 `rebuild11` profile 中，兩法仍各有多個案例需要 1–5 輪；不能由有限 training accuracy 推定 CEC PASS
+- 正式 `rebuild11_v2` profile 中，兩法仍各有多個案例需要 1–5 輪；不能由有限 training accuracy 推定 CEC PASS
 
 ---
 
@@ -946,13 +953,17 @@ bash scripts/test_rule_method_telemetry.sh
 
 python3 scripts/compare_rule_methods.py \
   --profile rebuild11 \
-  --output-root validation/rule_method_ab_rebuild11 \
+  --output-root validation/rule_method_ab_rebuild11_v2 \
   --jobs 1 --force
 
 python3 scripts/compare_rule_methods.py \
   --profile controls \
-  --output-root validation/rule_method_ab_controls \
+  --output-root validation/rule_method_ab_controls_v2 \
   --jobs 1 --force
 ```
 
-runner 會保存每個 case/method 的 stdout、stderr、patched bench、external CEC logs、JSON record，以及帶 SHA-256 identities 的 aggregate CSV/JSON。11 個 hard cases、3 個 controls、commit 鏈、artifact SHA 與限制見 [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md)。
+runner 強制 `--jobs 1`，避免同 case 的兩種方法競爭共用 rule-merge 中間檔；非 1 的值會在寫 artifact 前被拒絕。它把 internal CEC 的 `ABC_BIN` 固定到已 fingerprint 的 ABC，external CEC 同時要求 equivalence marker 與 return code 0。每次 run 完成後會重查所有 tool/input identities；`wall_ms` 記錄 execution，而額外的 `provenance_verification_ms` 記錄 post-run identity check。
+
+runner 會保存 stdout、stderr、patched bench、external CEC logs、JSON record，以及帶 pre-run fingerprints 與 post-run mutation check 的 aggregate CSV/JSON。可追蹤的 28-row 投影在 [`experiments/rule_method_ab_2026-08-11/paired_results.csv`](experiments/rule_method_ab_2026-08-11/paired_results.csv)；完整結果、commit 鏈、artifact SHA 與限制見 [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md)。
+
+面積比較應採 runner 對最終 patched bench 重新量測的 `actual_area_delta_trojan` / `actual_area_delta_golden`。main 的 `reported_area_delta` 是流程內摘要；正式 v2 hard artifacts 的 8 個 multi-rule runs 中，它都低估了包含 rule-match logic 的最終面積增量。
