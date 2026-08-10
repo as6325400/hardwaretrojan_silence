@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -37,6 +38,29 @@ using namespace std;
 
 namespace {
 
+string shell_quote(const string& value) {
+  string quoted = "'";
+  for (char ch : value) {
+    if (ch == '\'') {
+      quoted += "'\\''";
+    } else {
+      quoted += ch;
+    }
+  }
+  quoted += "'";
+  return quoted;
+}
+
+string abc_quote(const string& value) {
+  string quoted = "\"";
+  for (char ch : value) {
+    if (ch == '\\' || ch == '"') quoted += '\\';
+    quoted += ch;
+  }
+  quoted += "\"";
+  return quoted;
+}
+
 std::uint64_t popcount_ull(packed_circuit::word_t value) {
   return static_cast<std::uint64_t>(__builtin_popcountll(value));
 }
@@ -65,11 +89,13 @@ bool run_abc_cec(const string& golden_path,
                  vector<int>* counter_example) {
   if (counter_example) counter_example->clear();
 
-  // Locate abc binary next to the main binary's grandparent directory.
-  // In practice the test script uses $BASE/abc — we derive it from the
-  // golden_path which lives under the project root.
   string abc_bin;
-  {
+  const char* configured_abc = std::getenv("ABC_BIN");
+  if (configured_abc && configured_abc[0] != '\0') {
+    abc_bin = configured_abc;
+  } else {
+    // Backward-compatible fallback: infer the project root from a golden
+    // circuit under <root>/benchmarks/.
     auto pos = golden_path.rfind('/');
     if (pos != string::npos) {
       abc_bin = golden_path.substr(0, pos);  // …/benchmarks -> project root
@@ -85,7 +111,10 @@ bool run_abc_cec(const string& golden_path,
     abc_bin += "/abc";
   }
 
-  string cmd = abc_bin + " -c \"cec " + golden_path + " " + patched_path + "\" 2>&1";
+  const string abc_script =
+      "cec " + abc_quote(golden_path) + " " + abc_quote(patched_path);
+  const string cmd = shell_quote(abc_bin) + " -c " +
+                     shell_quote(abc_script) + " 2>&1";
   FILE* pipe = popen(cmd.c_str(), "r");
   if (!pipe) {
     cerr << "cec: failed to run abc\n";
@@ -100,7 +129,10 @@ bool run_abc_cec(const string& golden_path,
     }
   }
   int rc = pclose(pipe);
-  (void)rc;
+  if (rc != 0) {
+    cerr << "cec: abc exited with status " << rc << "\n";
+    return false;
+  }
 
   if (output.find("Networks are equivalent") != string::npos) {
     return true;
@@ -889,6 +921,20 @@ std::size_t count_model_literals(const DecisionTreeModel& model) {
   return total;
 }
 
+std::size_t max_model_rule_literals(const DecisionTreeModel& model) {
+  std::size_t maximum = 0;
+  for (const auto& rule : model.rules) {
+    maximum = std::max(maximum, rule.terms.size());
+  }
+  return maximum;
+}
+
+void refresh_model_rule_metadata(DecisionTreeModel* model) {
+  if (!model) return;
+  model->leaf_count = model->rules.size();
+  model->max_depth_used = max_model_rule_literals(*model);
+}
+
 DecisionTreeRule make_literal_rule(std::size_t feature_idx, int expected);
 
 bool is_virtual_node_name(const std::string& name) {
@@ -1270,7 +1316,7 @@ bool reduce_model_to_stats_literal(const circuit& trojan,
       const std::size_t feature_idx = term.first;
       result->model.rules.clear();
       result->model.rules.push_back(make_literal_rule(feature_idx, expected));
-      result->model.leaf_count = result->model.rules.size();
+      refresh_model_rule_metadata(&result->model);
       cout << "trigger_stats_literal "
            << trojan.node_name(node_idx)
            << "=" << expected << "\n";
@@ -1829,6 +1875,8 @@ bool signature_minimize_trigger_model(
   TriggerSigStats local;
   local.rules_before = result->model.rules.size();
   local.literals_before = count_model_literals(result->model);
+  const DecisionTreeModel original_model = result->model;
+  const std::vector<int> original_feature_nodes = result->feature_nodes;
 
   int whole_node = -1;
   int whole_expected = 1;
@@ -1876,15 +1924,19 @@ bool signature_minimize_trigger_model(
     simplify_rules(&result->model.rules);
   }
 
-  result->model.leaf_count = result->model.rules.size();
+  refresh_model_rule_metadata(&result->model);
   local.rules_after = result->model.rules.size();
   local.literals_after = count_model_literals(result->model);
 
   std::vector<SigWord> final_sig;
-  if (compute_model_signature(ctx, result->feature_nodes, result->model,
-                              &final_sig)) {
+  const bool final_signature_ok =
+      compute_model_signature(ctx, result->feature_nodes, result->model,
+                              &final_sig);
+  if (final_signature_ok) {
     local.exact_mismatches =
         sig_mismatch_count(final_sig, ctx.target_sig, ctx);
+  } else {
+    local.exact_mismatches = ctx.total_count;
   }
 
   cout << "trigger_sig_patterns pos " << ctx.pos_count
@@ -1902,6 +1954,18 @@ bool signature_minimize_trigger_model(
 
   if (sig_stats) {
     *sig_stats = local;
+  }
+  if (!final_signature_ok || local.exact_mismatches != 0) {
+    result->model = original_model;
+    result->feature_nodes = original_feature_nodes;
+    if (error) {
+      *error = !final_signature_ok
+                   ? "could not verify minimized trigger signature"
+                   : "minimized trigger signature changed " +
+                         std::to_string(local.exact_mismatches) +
+                         " sampled classifications";
+    }
+    return false;
   }
   return true;
 }
@@ -2395,9 +2459,13 @@ int main(int argc, char** argv) {
       const size_t rules_before = result.model.rules.size();
       simplify_rules(&result.model.rules);
       if (result.model.rules.size() != rules_before) {
-        result.model.leaf_count = result.model.rules.size();
+        refresh_model_rule_metadata(&result.model);
         cout << "rule_simplify " << rules_before
              << " -> " << result.model.rules.size() << "\n";
+      } else {
+        // Earlier per-rule minimization can reduce literal width without
+        // changing the number of rules.
+        refresh_model_rule_metadata(&result.model);
       }
     }
     cerr << "[TIMING] final_mining: " << ms_since(t_phase) << " ms\n";
@@ -2447,9 +2515,15 @@ int main(int argc, char** argv) {
          << rule_synth_telemetry.optimizer_stats.literals_after
          << " optimizer_solver_ms "
          << rule_synth_telemetry.optimizer_solver_ms
+         << " synthesized_rules " << result.model.rules.size()
+         << " synthesized_literals " << count_model_literals(result.model)
+         << " synthesized_depth " << max_model_rule_literals(result.model)
+         // Legacy aliases retained for existing log parsers.  These fields
+         // describe the synthesis output before downstream rule/signature
+         // minimization, not necessarily the condition used by the patch.
          << " final_rules " << result.model.rules.size()
          << " final_literals " << count_model_literals(result.model)
-         << " final_depth " << result.model.max_depth_used
+         << " final_depth " << max_model_rule_literals(result.model)
          << " synth_ms " << rule_synth_ms << "\n";
     if (rule_synth_telemetry.optimizer_calls != 0 &&
         !rule_synth_telemetry.optimizer_stats.reason.empty()) {
@@ -2462,6 +2536,9 @@ int main(int argc, char** argv) {
     }
 
     t_phase = std::chrono::steady_clock::now();
+    int effective_literal_node = -1;
+    int effective_literal_expected = -1;
+    int effective_literal_forced = -1;
     if (!fix_succeeded &&
         !(result.model.rules.size() == 1U &&
           result.model.rules[0].terms.size() == 1U)) {
@@ -2496,6 +2573,9 @@ int main(int argc, char** argv) {
              << literal_cut_area_delta
              << " level_delta " << literal_cut_level_delta << "\n";
         cout << "payload_fix_bench " << fix_output_path << "\n";
+        effective_literal_node = literal_cut_node;
+        effective_literal_expected = literal_cut_value ? 0 : 1;
+        effective_literal_forced = literal_cut_value;
         fix_succeeded = true;
       } else if (!literal_cut_error.empty()) {
         cerr << "literal_patch_cut skipped: " << literal_cut_error << "\n";
@@ -2504,21 +2584,29 @@ int main(int argc, char** argv) {
     }
 
     t_phase = std::chrono::steady_clock::now();
+    std::string rule_apply_source = "mined_model";
+    bool rule_model_used = true;
+    std::size_t signature_exact_mismatch = 0;
     if (fix_succeeded) {
+      rule_apply_source = "literal_patch_cut";
+      rule_model_used = false;
       cerr << "[TIMING] trigger_sig_minimize: 0 ms (patch cut selected)\n";
     } else if (reduce_model_to_stats_literal(working_trojan,
                                              stats,
                                              extra_nontrigger_patterns,
                                              &result)) {
+      rule_apply_source = "stats_literal";
       trigger_sig_single_kill = true;
       cout << "stats_literal_kill_candidate 1\n";
       cerr << "[TIMING] trigger_sig_minimize: 0 ms (stats literal)\n";
     } else if (result.model.rules.size() == 1U &&
         result.model.rules[0].terms.size() == 1U) {
+      rule_apply_source = "tree_single_literal";
       trigger_sig_single_kill = true;
       cout << "tree_single_literal_kill_candidate 1\n";
       cerr << "[TIMING] trigger_sig_minimize: 0 ms (skipped single literal)\n";
     } else {
+      rule_apply_source = "signature_minimize";
       TriggerSigStats trigger_sig_stats;
       std::string trigger_sig_error;
       if (!signature_minimize_trigger_model(golden,
@@ -2529,17 +2617,58 @@ int main(int argc, char** argv) {
                                             &result,
                                             &trigger_sig_stats,
                                             &trigger_sig_error)) {
+        rule_apply_source = "signature_minimize_skipped";
         cerr << "trigger_sig_minimize skipped: " << trigger_sig_error << "\n";
       }
       trigger_sig_single_kill =
           trigger_sig_stats.exact_mismatches == 0 &&
           result.model.rules.size() == 1U &&
           result.model.rules[0].terms.size() == 1U;
+      signature_exact_mismatch = trigger_sig_stats.exact_mismatches;
       if (trigger_sig_single_kill) {
+        rule_apply_source = "signature_single_literal";
         cout << "trigger_sig_single_literal_kill_candidate 1\n";
       }
       cerr << "[TIMING] trigger_sig_minimize: " << ms_since(t_phase) << " ms\n";
     }
+
+    refresh_model_rule_metadata(&result.model);
+    const std::size_t applied_rules =
+        rule_model_used ? result.model.rules.size() : 0;
+    const std::size_t applied_literals =
+        rule_model_used ? count_model_literals(result.model) : 0;
+    const std::size_t applied_depth =
+        rule_model_used ? max_model_rule_literals(result.model) : 0;
+    // A verified literal patch cut bypasses the conditional DNF model but is
+    // still one effective predicate/action for compactness comparisons.
+    const std::size_t effective_rules = rule_model_used ? applied_rules : 1;
+    const std::size_t effective_literals =
+        rule_model_used ? applied_literals : 1;
+    const std::size_t effective_depth = rule_model_used ? applied_depth : 1;
+    if (rule_model_used && effective_rules == 1 &&
+        result.model.rules[0].terms.size() == 1) {
+      const auto term = result.model.rules[0].terms[0];
+      effective_literal_expected = term.second;
+      if (term.first < result.feature_nodes.size()) {
+        effective_literal_node = result.feature_nodes[term.first];
+      }
+    }
+    cout << "rule_apply_summary"
+         << " strategy " << rule_method_name(options.rule_method)
+         << " cec_attempt " << (cec_round + 1)
+         << " synth_pass " << synth_pass
+         << " source " << rule_apply_source
+         << " rule_model_used " << (rule_model_used ? 1 : 0)
+         << " literal_node " << effective_literal_node
+         << " literal_expected " << effective_literal_expected
+         << " literal_forced " << effective_literal_forced
+         << " signature_exact_mismatch " << signature_exact_mismatch
+         << " applied_rules " << applied_rules
+         << " applied_literals " << applied_literals
+         << " applied_depth " << applied_depth
+         << " effective_rules " << effective_rules
+         << " effective_literals " << effective_literals
+         << " effective_depth " << effective_depth << "\n";
 
     cout << "training_set pos=" << result.data_pos
          << " neg=" << result.data_neg << '\n';

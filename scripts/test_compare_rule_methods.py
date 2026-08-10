@@ -30,6 +30,11 @@ if "--help" in sys.argv:
     print("Usage: fake <g> <t> <gt> <out> [--rule-method vn-retrain|dt|z3-pb]")
     raise SystemExit(0)
 
+expected_abc = os.environ.get("FAKE_EXPECT_ABC_BIN")
+if expected_abc and os.environ.get("ABC_BIN") != expected_abc:
+    print("ABC_BIN was not pinned to the runner's --abc", file=sys.stderr)
+    raise SystemExit(3)
+
 method = sys.argv[sys.argv.index("--rule-method") + 1]
 counter = os.environ.get("FAKE_INVOCATION_COUNTER")
 if counter:
@@ -37,6 +42,9 @@ if counter:
         sink.write(method + "\n")
 if os.environ.get("FAKE_MAIN_SLEEP"):
     time.sleep(float(os.environ["FAKE_MAIN_SLEEP"]))
+if os.environ.get("FAKE_MUTATE_INPUT"):
+    with Path(os.environ["FAKE_MUTATE_INPUT"]).open("a", encoding="utf-8") as sink:
+        sink.write("# mutated during run\n")
 
 Path(sys.argv[4]).write_text(
     "INPUT(a)\nOUTPUT(n1)\nn1 = BUF(a)\n# " + method + "\n",
@@ -49,10 +57,19 @@ if method == "z3-pb":
     print("rule_synth_summary strategy z3-pb cec_attempt 2 synth_pass 1 "
           "dt_builds 2 candidate_count 19 solver_status optimal "
           "pb_variables 15 final_rules 1 final_literals 2 final_depth 1 synth_ms 5.5")
+    print("rule_apply_summary strategy z3-pb cec_attempt 1 synth_pass 1 "
+          "source signature_minimize rule_model_used 1 effective_rules 2 "
+          "effective_literals 3 effective_depth 2")
+    print("rule_apply_summary strategy z3-pb cec_attempt 2 synth_pass 1 "
+          "source literal_patch_cut rule_model_used 0 effective_rules 1 "
+          "effective_literals 1 effective_depth 1")
 else:
     print("rule_synth_summary strategy vn-retrain cec_attempt 1 synth_pass 1 "
           "dt_builds 3 vn_generated 4 vn_used 1 final_rules 2 "
           "final_literals 4 final_depth 3 synth_ms 12.5")
+    print("rule_apply_summary strategy vn-retrain cec_attempt 1 synth_pass 1 "
+          "source signature_minimize rule_model_used 1 effective_rules 2 "
+          "effective_literals 3 effective_depth 2")
 print("payload_fix_selected 1 area_delta 999 level_delta 999")
 print("cec_rounds 1")
 print("[TIMING]   final_verify: 1.0 ms (PASS)", file=sys.stderr)
@@ -62,13 +79,17 @@ print("[TIMING] TOTAL: 25.0 ms", file=sys.stderr)
 
 FAKE_ABC = r'''#!/usr/bin/env python3
 import os
+import shlex
 import sys
-patch_path = sys.argv[-1].split()[-1]
+patch_path = shlex.split(sys.argv[-1])[-1]
 if not patch_path.endswith(".bench"):
     print("unknown file format")
     raise SystemExit(2)
 if os.environ.get("FAKE_ABC_MODE") == "fail":
     print("Networks are NOT EQUIVALENT")
+elif os.environ.get("FAKE_ABC_MODE") == "marker_nonzero":
+    print("Networks are equivalent")
+    raise SystemExit(7)
 else:
     print("Networks are equivalent")
 '''
@@ -90,7 +111,8 @@ else:
 
 class RunnerFixture(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
+        # A space in the root exercises ABC command-language path quoting.
+        self.temporary = tempfile.TemporaryDirectory(prefix="rule method ")
         self.root = Path(self.temporary.name)
         (self.root / "benchmarks").mkdir()
         (self.root / "trojans" / "c1").mkdir(parents=True)
@@ -177,11 +199,22 @@ class SummaryParserTest(unittest.TestCase):
         self.assertEqual(aggregates["last"]["pb_variables"], 29)
         self.assertEqual(aggregates["numeric_sum"]["synth_ms"], 4.0)
 
+        apply = runner.parse_rule_apply_summaries(
+            "rule_apply_summary source literal_patch_cut effective_rules 1\n"
+        )
+        self.assertEqual(apply[0]["source"], "literal_patch_cut")
+        self.assertEqual(apply[0]["effective_rules"], 1)
+
 
 class EndToEndTest(RunnerFixture):
     def test_atomic_artifacts_metrics_and_resume(self) -> None:
         with mock.patch.dict(
-            os.environ, {"FAKE_INVOCATION_COUNTER": str(self.counter)}, clear=False
+            os.environ,
+            {
+                "FAKE_INVOCATION_COUNTER": str(self.counter),
+                "FAKE_EXPECT_ABC_BIN": str(self.abc_path),
+            },
+            clear=False,
         ):
             self.assertEqual(runner.main(self.args()), 0)
         self.assertEqual(self.counter.read_text(encoding="utf-8").splitlines(),
@@ -196,7 +229,7 @@ class EndToEndTest(RunnerFixture):
             self.assertTrue(record["external_cec"]["equivalent"])
             self.assertTrue(record["command"][4].endswith(".bench"))
             cec_script = record["external_cec"]["command"][2]
-            self.assertTrue(cec_script.split()[-1].endswith(".bench"))
+            self.assertTrue(cec_script.endswith('bench"'))
             for key, relative in record["artifacts"].items():
                 if relative is not None:
                     self.assertTrue((self.output / relative).is_file(), key)
@@ -204,6 +237,7 @@ class EndToEndTest(RunnerFixture):
 
         z3_record = by_method["z3-pb"]
         self.assertEqual(z3_record["parsed"]["rule_synth_summary_count"], 2)
+        self.assertEqual(z3_record["parsed"]["rule_apply_summary_count"], 2)
         self.assertEqual(
             z3_record["parsed"]["rule_synth_aggregates"]["last"]["solver_status"],
             "optimal",
@@ -222,6 +256,8 @@ class EndToEndTest(RunnerFixture):
         self.assertEqual(rows["z3-pb"]["reported_area_delta"], "999")
         self.assertEqual(rows["z3-pb"]["summary_last_solver_status"], "optimal")
         self.assertEqual(rows["z3-pb"]["summary_numeric_sum_synth_ms"], "10.0")
+        self.assertEqual(rows["z3-pb"]["apply_last_source"], "literal_patch_cut")
+        self.assertEqual(rows["z3-pb"]["apply_last_effective_literals"], "1")
 
         with mock.patch.dict(
             os.environ, {"FAKE_INVOCATION_COUNTER": str(self.counter)}, clear=False
@@ -239,6 +275,39 @@ class EndToEndTest(RunnerFixture):
         )
         self.assertEqual(record["main"]["returncode"], 0)
         self.assertEqual(record["status"], "CEC_FAIL")
+        self.assertFalse(record["success"])
+
+    def test_external_cec_equivalence_marker_requires_zero_exit(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"FAKE_ABC_MODE": "marker_nonzero"}, clear=False
+        ):
+            self.assertEqual(
+                runner.main(self.args("--method", "vn-retrain")), 0
+            )
+        record = json.loads(
+            (self.output / "records" / "case1--vn-retrain.json").read_text()
+        )
+        self.assertEqual(record["external_cec"]["returncode"], 7)
+        self.assertEqual(record["status"], "ABC_ERROR")
+        self.assertFalse(record["success"])
+
+    def test_parallel_jobs_are_rejected_before_writes(self) -> None:
+        self.assertEqual(runner.main(self.args("--jobs", "2")), 2)
+        self.assertFalse(self.output.exists())
+
+    def test_input_mutation_during_run_is_a_harness_error(self) -> None:
+        trojan = self.root / "trojans" / "c1" / "trojan1.bench"
+        with mock.patch.dict(
+            os.environ, {"FAKE_MUTATE_INPUT": str(trojan)}, clear=False
+        ):
+            self.assertEqual(
+                runner.main(self.args("--method", "vn-retrain")), 0
+            )
+        record = json.loads(
+            (self.output / "records" / "case1--vn-retrain.json").read_text()
+        )
+        self.assertEqual(record["status"], "HARNESS_ERROR")
+        self.assertIn("inputs.trojan", record["post_run_identity_changes"])
         self.assertFalse(record["success"])
 
     def test_timeout_is_recorded_and_does_not_run_cec(self) -> None:

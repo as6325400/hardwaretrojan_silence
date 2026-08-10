@@ -122,6 +122,13 @@ int main() {
                      {"--rule-opt-max-rounds", "0"});
   ok &= expect_error(zero_rounds, "must be positive", "zero rounds");
 
+  auto ignored_optimizer_option = positional;
+  ignored_optimizer_option.insert(ignored_optimizer_option.end(),
+                                  {"--rule-opt-max-clauses", "2"});
+  ok &= expect_error(ignored_optimizer_option,
+                     "require --rule-method z3-pb",
+                     "optimizer option with VN strategy");
+
   if (!ok) {
     return EXIT_FAILURE;
   }

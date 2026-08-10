@@ -1431,9 +1431,6 @@ bool run_mining_loop(const circuit& golden,
       const std::size_t baseline_rules = result->model.rules.size();
       if (effective_options.max_clauses == 0) {
         effective_options.max_clauses = baseline_rules;
-      } else {
-        effective_options.max_clauses =
-            std::min(effective_options.max_clauses, baseline_rules);
       }
       RuleOptimizationResult optimized = optimize_dnf_rules_z3_pb(
           data->features,

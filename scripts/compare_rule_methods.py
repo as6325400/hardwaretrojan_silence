@@ -11,7 +11,6 @@ an interrupted run resumable without trusting a partially written CSV.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,9 +31,9 @@ import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
-RUNNER_SCHEMA_VERSION = "rule-method-ab-run/1"
+RUNNER_SCHEMA_VERSION = "rule-method-ab-run/2"
 MANIFEST_SCHEMA_VERSION = "rule-method-ab-cases/1"
-SUMMARY_SCHEMA_VERSION = "rule-method-ab-summary/1"
+SUMMARY_SCHEMA_VERSION = "rule-method-ab-summary/2"
 DEFAULT_MANIFEST = Path("configs/rule_method_ab_cases.json")
 DEFAULT_OUTPUT_ROOT = Path("validation/rule_method_ab")
 DEFAULT_METHODS = ("vn-retrain", "z3-pb")
@@ -329,6 +328,31 @@ def parse_rule_synth_summaries(stdout: str) -> List[Dict[str, Any]]:
     return summaries
 
 
+def parse_rule_apply_summaries(stdout: str) -> List[Dict[str, Any]]:
+    """Parse every order-independent rule_apply_summary line."""
+    summaries: List[Dict[str, Any]] = []
+    for line_number, line in enumerate(stdout.splitlines(), start=1):
+        if not line.startswith("rule_apply_summary "):
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError as exc:
+            summaries.append(
+                {"_raw": line, "_line": line_number, "_parse_error": str(exc)}
+            )
+            continue
+        parsed: Dict[str, Any] = {"_raw": line, "_line": line_number}
+        tail = tokens[1:]
+        if len(tail) % 2:
+            parsed["_parse_error"] = "odd number of key/value tokens"
+            parsed["_unparsed_tail"] = tail[-1]
+            tail = tail[:-1]
+        for index in range(0, len(tail), 2):
+            parsed[tail[index]] = _parse_scalar(tail[index + 1])
+        summaries.append(parsed)
+    return summaries
+
+
 def _summary_aggregates(
     summaries: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
@@ -356,6 +380,7 @@ def _summary_aggregates(
 
 def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
     summaries = parse_rule_synth_summaries(stdout)
+    apply_summaries = parse_rule_apply_summaries(stdout)
     runtime_matches = re.findall(
         r"\[TIMING\]\s+TOTAL:\s+([0-9]+(?:\.[0-9]+)?)\s+ms", stderr
     )
@@ -385,6 +410,9 @@ def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
         "rule_synth_summaries": summaries,
         "rule_synth_aggregates": _summary_aggregates(summaries),
         "rule_synth_summary_count": len(summaries),
+        "rule_apply_summaries": apply_summaries,
+        "rule_apply_aggregates": _summary_aggregates(apply_summaries),
+        "rule_apply_summary_count": len(apply_summaries),
         "runtime_ms": float(runtime_matches[-1]) if runtime_matches else None,
         "cec_rounds": int(cec_matches[-1]) if cec_matches else None,
         "gt_verify": "PASS" if verify_pass else "FAIL",
@@ -402,6 +430,14 @@ def _temporary_sibling(path: Path, suffix: str = ".tmp") -> Path:
     )
     os.close(fd)
     return Path(raw)
+
+
+def _abc_quote_path(path: Path) -> str:
+    """Quote one filename for ABC's command parser (not for a shell)."""
+    value = str(path)
+    if any(character in value for character in ("\x00", "\r", "\n")):
+        raise RunnerError(f"ABC path contains a control character: {path}")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
@@ -492,11 +528,50 @@ def _artifact_ref(path: Optional[Path], output_root: Path) -> Optional[str]:
 
 def _external_cec_status(stdout: str, stderr: str) -> Tuple[str, Optional[bool]]:
     combined = stdout + "\n" + stderr
-    if "Networks are equivalent" in combined:
+    equivalent = "Networks are equivalent" in combined
+    not_equivalent = (
+        "Networks are NOT EQUIVALENT" in combined
+        or "not equivalent" in combined.lower()
+    )
+    if equivalent and not_equivalent:
+        return "ABC_ERROR", None
+    if equivalent:
         return "PASS", True
-    if "Networks are NOT EQUIVALENT" in combined or "not equivalent" in combined.lower():
+    if not_equivalent:
         return "CEC_FAIL", False
     return "ABC_ERROR", None
+
+
+def _verify_run_identities(
+    expected_groups: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Re-hash every tool/input after a run and report any mutation."""
+    changes: Dict[str, Any] = {}
+    for group_name, raw_group in expected_groups.items():
+        if not isinstance(raw_group, Mapping):
+            changes[str(group_name)] = {"error": "identity group is not an object"}
+            continue
+        for item_name, raw_expected in raw_group.items():
+            key = f"{group_name}.{item_name}"
+            if not isinstance(raw_expected, Mapping) or not isinstance(
+                raw_expected.get("path"), str
+            ):
+                changes[key] = {"error": "invalid expected identity"}
+                continue
+            try:
+                actual = _file_identity(Path(raw_expected["path"]))
+            except RunnerError as exc:
+                changes[key] = {"error": str(exc)}
+                continue
+            if (
+                actual.get("size_bytes") != raw_expected.get("size_bytes")
+                or actual.get("sha256") != raw_expected.get("sha256")
+            ):
+                changes[key] = {
+                    "expected": dict(raw_expected),
+                    "actual": actual,
+                }
+    return changes
 
 
 def _measure_structure(
@@ -602,6 +677,9 @@ def _execute_run(
     env = os.environ.copy()
     env["LC_ALL"] = "C"
     env["LANG"] = "C"
+    # main performs internal CEC/CEGIS calls.  Pin those calls to the exact
+    # ABC executable fingerprinted by this runner.
+    env["ABC_BIN"] = str(abc)
     started_at = _utc_now()
     wall_started = time.monotonic()
     deadline = wall_started + run.timeout_seconds
@@ -639,7 +717,8 @@ def _execute_run(
             cec_command = [
                 str(abc),
                 "-c",
-                f"cec {run.paths.golden} {staged_patch}",
+                "cec " + _abc_quote_path(run.paths.golden) + " " +
+                _abc_quote_path(staged_patch),
             ]
             cec_result = _run_logged_process(
                 cec_command,
@@ -652,6 +731,8 @@ def _execute_run(
                 status = "TIMEOUT"
                 timeout_stage = "external_cec"
             elif cec_result.launch_error is not None:
+                status = "ABC_ERROR"
+            elif cec_result.returncode != 0:
                 status = "ABC_ERROR"
             else:
                 parsed_cec_status, abc_equivalent = _external_cec_status(
@@ -673,7 +754,12 @@ def _execute_run(
     structural = _structural_metrics(
         show_binary, run.paths, final_patched, deadline
     )
-    wall_ms = (time.monotonic() - wall_started) * 1000.0
+    execution_wall_ms = (time.monotonic() - wall_started) * 1000.0
+    identity_started = time.monotonic()
+    identity_changes = _verify_run_identities(run.identities)
+    provenance_ms = (time.monotonic() - identity_started) * 1000.0
+    if identity_changes:
+        status = "HARNESS_ERROR"
     artifact_paths: Dict[str, Optional[Path]] = {
         "stdout": stdout_path,
         "stderr": stderr_path,
@@ -712,7 +798,8 @@ def _execute_run(
         "timeout_stage": timeout_stage,
         "started_at": started_at,
         "finished_at": _utc_now(),
-        "wall_ms": wall_ms,
+        "wall_ms": execution_wall_ms,
+        "provenance_verification_ms": provenance_ms,
         "command": command,
         "main": {
             "returncode": main_result.returncode,
@@ -731,6 +818,7 @@ def _execute_run(
         "parsed": parsed,
         "structural_metrics": structural,
         "identities": dict(run.identities),
+        "post_run_identity_changes": identity_changes,
         "environment": dict(environment_meta),
         "artifacts": artifact_refs,
         "artifact_identities": artifact_identities,
@@ -752,6 +840,8 @@ def _record_is_resumable(
     if record.get("schema_version") != RUNNER_SCHEMA_VERSION:
         return None
     if record.get("cache_key") != cache_key:
+        return None
+    if record.get("post_run_identity_changes"):
         return None
     artifacts = record.get("artifacts")
     if not isinstance(artifacts, dict):
@@ -782,6 +872,9 @@ def _record_is_resumable(
         if not isinstance(artifacts.get(key), str):
             return None
     if record.get("status") == "PASS":
+        external_cec = record.get("external_cec", {})
+        if not isinstance(external_cec, dict) or external_cec.get("returncode") != 0:
+            return None
         for key in ("cec_stdout", "cec_stderr", "patched_bench"):
             if not isinstance(artifacts.get(key), str):
                 return None
@@ -822,6 +915,7 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         "legacy_vn_passes": parsed.get("legacy_vn_passes"),
         "runtime_ms": parsed.get("runtime_ms"),
         "wall_ms": record.get("wall_ms"),
+        "provenance_verification_ms": record.get("provenance_verification_ms"),
         "main_wall_ms": main.get("wall_ms"),
         "cec_wall_ms": cec.get("wall_ms"),
         "payload_fix_nodes": payload.get("selected_nodes"),
@@ -848,6 +942,7 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         "actual_area_delta_golden": delta_golden.get("area_delta"),
         "actual_level_delta_golden": delta_golden.get("level_delta"),
         "rule_synth_summary_count": parsed.get("rule_synth_summary_count"),
+        "rule_apply_summary_count": parsed.get("rule_apply_summary_count"),
         "binary_sha256": tools.get("binary", {}).get("sha256"),
         "abc_sha256": tools.get("abc", {}).get("sha256"),
         "cache_key": record.get("cache_key"),
@@ -860,6 +955,9 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         "rule_synth_summaries_json": json.dumps(
             parsed.get("rule_synth_summaries", []), separators=(",", ":")
         ),
+        "rule_apply_summaries_json": json.dumps(
+            parsed.get("rule_apply_summaries", []), separators=(",", ":")
+        ),
     }
     aggregates = parsed.get("rule_synth_aggregates", {})
     for group in ("first", "last", "numeric_sum"):
@@ -868,6 +966,13 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
             continue
         for key, value in values.items():
             row[f"summary_{group}_{key}"] = value
+    apply_aggregates = parsed.get("rule_apply_aggregates", {})
+    for group in ("first", "last", "numeric_sum"):
+        values = apply_aggregates.get(group, {})
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            row[f"apply_{group}_{key}"] = value
     return row
 
 
@@ -875,15 +980,17 @@ BASE_CSV_COLUMNS = [
     "case_id", "cohort", "circuit", "trojan", "method", "profile",
     "status", "success", "main_returncode", "timeout_stage", "gt_verify",
     "abc_equivalent", "cec_rounds", "legacy_vn_passes", "runtime_ms",
-    "wall_ms", "main_wall_ms", "cec_wall_ms", "payload_fix_nodes",
+    "wall_ms", "provenance_verification_ms", "main_wall_ms", "cec_wall_ms",
+    "payload_fix_nodes",
     "area_delta", "level_delta", "reported_area_delta", "reported_level_delta",
     "golden_area", "golden_level", "trojan_area", "trojan_level",
     "patched_area", "patched_level", "actual_area_delta_trojan",
     "actual_level_delta_trojan", "actual_area_delta_golden",
     "actual_level_delta_golden", "rule_synth_summary_count",
+    "rule_apply_summary_count",
     "binary_sha256", "abc_sha256", "cache_key", "stdout_log", "stderr_log",
     "cec_stdout_log", "cec_stderr_log", "patched_bench", "command_json",
-    "rule_synth_summaries_json",
+    "rule_synth_summaries_json", "rule_apply_summaries_json",
 ]
 
 
@@ -911,9 +1018,16 @@ def _load_all_records(output_root: Path) -> List[Dict[str, Any]]:
 
 
 def _write_aggregates(
-    output_root: Path, invocation: Mapping[str, Any]
+    output_root: Path,
+    invocation: Mapping[str, Any],
+    selected_cache_keys: Optional[set[str]] = None,
 ) -> Tuple[Path, Path]:
     records = _load_all_records(output_root)
+    if selected_cache_keys is not None:
+        records = [
+            record for record in records
+            if record.get("cache_key") in selected_cache_keys
+        ]
     rows = [_flatten_record(record) for record in records]
     dynamic = sorted(
         {key for row in rows for key in row if key not in BASE_CSV_COLUMNS}
@@ -1055,8 +1169,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         methods = list(args.method or DEFAULT_METHODS)
         if len(methods) != len(set(methods)):
             raise RunnerError("--method values must be unique")
-        if args.jobs <= 0:
-            raise RunnerError("--jobs must be positive")
+        if args.jobs != 1:
+            raise RunnerError(
+                "--jobs must be 1: methods for the same case can write the "
+                "same intermediate *_rule_merged.bench file"
+            )
         if args.timeout is not None:
             _positive_number(args.timeout, "--timeout")
         _positive_number(args.abc_timeout, "--abc-timeout")
@@ -1141,13 +1258,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             show_binary = None
         _validate_binary_methods(binary, methods)
-        if args.jobs > 1:
-            print(
-                "warning: --jobs > 1 can introduce GPU/CPU contention; "
-                "use jobs=1 for reported runtimes",
-                file=sys.stderr,
-            )
-
         print("Fingerprinting binary, ABC, and selected input files ...")
         identity_cache: Dict[Path, Dict[str, Any]] = {}
 
@@ -1157,12 +1267,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 identity_cache[resolved] = _file_identity(resolved)
             return identity_cache[resolved]
 
-        tools_identity = {"binary": identity(binary), "abc": identity(abc)}
+        tools_identity = {
+            "runner": identity(Path(__file__).resolve()),
+            "binary": identity(binary),
+            "abc": identity(abc),
+        }
         if show_binary is not None:
             tools_identity["show"] = identity(show_binary)
         context_payload = {
             "runner_schema": RUNNER_SCHEMA_VERSION,
+            "runner_sha256": tools_identity["runner"]["sha256"],
             "manifest_sha256": manifest_sha,
+            "profile": args.profile,
+            "methods": methods,
             "binary_sha256": tools_identity["binary"]["sha256"],
             "abc_sha256": tools_identity["abc"]["sha256"],
             "show_sha256": (
@@ -1239,7 +1356,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "environment": environment_meta,
         }
         output_root.mkdir(parents=True, exist_ok=True)
-        _write_aggregates(output_root, invocation)
+        selected_keys = {run.cache_key for run in prepared}
+        _write_aggregates(output_root, invocation, selected_keys)
 
         pending: List[PreparedRun] = []
         for run in prepared:
@@ -1263,37 +1381,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 f"DONE case={case.get('case_id')} method={record.get('method')} "
                 f"status={record.get('status')} wall_ms={record.get('wall_ms', 0):.1f}"
             )
-            _write_aggregates(output_root, invocation)
+            _write_aggregates(output_root, invocation, selected_keys)
 
-        if args.jobs == 1:
-            for run in pending:
-                completed(
-                    _execute_run(
-                        run, output_root, binary, abc, show_binary, args.abc_timeout,
-                        environment_meta,
-                    )
+        for run in pending:
+            completed(
+                _execute_run(
+                    run, output_root, binary, abc, show_binary, args.abc_timeout,
+                    environment_meta,
                 )
-        else:
-            with ThreadPoolExecutor(max_workers=args.jobs) as executor:
-                futures = {
-                    executor.submit(
-                        _execute_run,
-                        run,
-                        output_root,
-                        binary,
-                        abc,
-                        show_binary,
-                        args.abc_timeout,
-                        environment_meta,
-                    ): run
-                    for run in pending
-                }
-                for future in as_completed(futures):
-                    completed(future.result())
+            )
 
-        csv_path, json_path = _write_aggregates(output_root, invocation)
+        csv_path, json_path = _write_aggregates(
+            output_root, invocation, selected_keys
+        )
         records = _load_all_records(output_root)
-        selected_keys = {run.cache_key for run in prepared}
         selected_records = [
             record for record in records if record.get("cache_key") in selected_keys
         ]

@@ -417,12 +417,6 @@ RuleOptimizationResult optimize_dnf_rules_z3_pb(
   std::vector<std::size_t> candidates = deduplicate_candidate_features(
       features, raw_dt_candidate_features);
   stats.unique_candidate_features = candidates.size();
-  const std::vector<std::size_t> raw_unique = [&]() {
-    std::vector<std::size_t> copy = raw_dt_candidate_features;
-    std::sort(copy.begin(), copy.end());
-    copy.erase(std::unique(copy.begin(), copy.end()), copy.end());
-    return copy;
-  }();
   stats.duplicate_candidate_features =
       raw_dt_candidate_features.size() - stats.unique_candidate_features;
   stats.candidate_literals = stats.unique_candidate_features * 2;
@@ -602,7 +596,12 @@ RuleOptimizationResult optimize_dnf_rules_z3_pb(
 
     std::vector<std::size_t> false_negative;
     std::vector<std::size_t> false_positive;
+    bool scan_timed_out = false;
     for (std::size_t i = 0; i < patterns.size(); ++i) {
+      if ((i & 1023U) == 0U && Clock::now() >= deadline) {
+        scan_timed_out = true;
+        break;
+      }
       const bool prediction = model_matches_signature(
           candidate_model, patterns[i], candidate_position);
       if (prediction == (patterns[i].label != 0)) continue;
@@ -612,15 +611,29 @@ RuleOptimizationResult optimize_dnf_rules_z3_pb(
         false_positive.push_back(i);
       }
     }
+    if (scan_timed_out) {
+      stats.status = "timeout";
+      stats.reason = "solver deadline expired during signature verification";
+      break;
+    }
 
     if (false_negative.empty() && false_positive.empty()) {
       std::size_t full_fp = 0;
       std::size_t full_fn = 0;
       for (std::size_t row = 0; row < features.row_count; ++row) {
+        if ((row & 1023U) == 0U && Clock::now() >= deadline) {
+          scan_timed_out = true;
+          break;
+        }
         const bool prediction = model_matches_row(
             candidate_model, features, row);
         if (prediction && labels[row] == 0) full_fp += 1;
         if (!prediction && labels[row] == 1) full_fn += 1;
+      }
+      if (scan_timed_out) {
+        stats.status = "timeout";
+        stats.reason = "solver deadline expired during full-row verification";
+        break;
       }
       stats.verification_false_positive = full_fp;
       stats.verification_false_negative = full_fn;

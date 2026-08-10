@@ -66,16 +66,21 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
   CLI::Option* rule_method_option =
       app.add_option("--rule-method", rule_method,
                      "Rule synthesis method: vn-retrain, dt, or z3-pb");
-  app.add_option("--rule-opt-timeout-ms", out->rule_opt_timeout_ms,
-                 "Shared Z3-PB wall-clock budget in milliseconds");
-  app.add_option("--rule-opt-max-rounds", out->rule_opt_max_rounds,
-                 "Maximum Z3-PB CEGIS checks");
-  app.add_option("--rule-opt-cex-batch", out->rule_opt_cex_batch,
-                 "Counterexample signatures added per Z3-PB round");
-  app.add_option("--rule-opt-max-clauses", out->rule_opt_max_clauses,
-                 "Z3-PB DNF clause cap (0 uses baseline rule count)");
-  app.add_option("--rule-opt-max-literals", out->rule_opt_max_literals,
-                 "Z3-PB literals per clause cap (0 uses baseline maximum)");
+  CLI::Option* opt_timeout =
+      app.add_option("--rule-opt-timeout-ms", out->rule_opt_timeout_ms,
+                     "Shared Z3-PB wall-clock budget in milliseconds");
+  CLI::Option* opt_rounds =
+      app.add_option("--rule-opt-max-rounds", out->rule_opt_max_rounds,
+                     "Maximum Z3-PB CEGIS checks");
+  CLI::Option* opt_cex =
+      app.add_option("--rule-opt-cex-batch", out->rule_opt_cex_batch,
+                     "Counterexample signatures added per Z3-PB round");
+  CLI::Option* opt_clauses =
+      app.add_option("--rule-opt-max-clauses", out->rule_opt_max_clauses,
+                     "Z3-PB DNF clause cap (0 uses baseline rule count)");
+  CLI::Option* opt_literals =
+      app.add_option("--rule-opt-max-literals", out->rule_opt_max_literals,
+                     "Z3-PB literals per clause cap (0 uses baseline maximum)");
   app.add_option("--output", out->output_path, "Output path (alternative)");
 
   // --no-strict disables strict_retry (inverted flag)
@@ -132,6 +137,14 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
   }
   if (out->rule_opt_cex_batch == 0) {
     if (error) *error = "--rule-opt-cex-batch must be positive";
+    return ParseStatus::error;
+  }
+  if (out->rule_method != RuleMethod::z3_pb &&
+      (opt_timeout->count() || opt_rounds->count() || opt_cex->count() ||
+       opt_clauses->count() || opt_literals->count())) {
+    if (error) {
+      *error = "--rule-opt-* options require --rule-method z3-pb";
+    }
     return ParseStatus::error;
   }
 

@@ -35,7 +35,9 @@ struct AppOptions {
   unsigned rule_opt_timeout_ms = 10000;
   std::size_t rule_opt_max_rounds = 100;
   std::size_t rule_opt_cex_batch = 5;
-  std::size_t rule_opt_max_clauses = 8;
+  // Zero derives the cap from the current DT baseline.  An explicit nonzero
+  // value is honored even when it is larger than the baseline rule count.
+  std::size_t rule_opt_max_clauses = 0;
   std::size_t rule_opt_max_literals = 10;
 };
 
