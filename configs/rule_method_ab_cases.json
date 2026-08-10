@@ -1,0 +1,169 @@
+{
+  "schema_version": "rule-method-ab-cases/1",
+  "description": "Fixed V0 cases for comparing VN retraining with Z3 pseudo-Boolean rule synthesis.",
+  "dataset": {
+    "golden_root": "benchmarks",
+    "trojan_root": "trojaned_bench/V0_singleTrigger_singlePayload",
+    "groundtruth_root": "groundtruth/V0_singleTrigger_singlePayload"
+  },
+  "common_args": [
+    "--depth",
+    "10",
+    "--neg-ratio",
+    "50",
+    "--mine-rounds",
+    "15",
+    "--mine-max",
+    "5000"
+  ],
+  "profiles": {
+    "rebuild11": [
+      "c5315_trojan28",
+      "c5315_trojan34",
+      "c5315_trojan55",
+      "c5315_trojan78",
+      "c7552_trojan23",
+      "c7552_trojan53",
+      "c7552_trojan73",
+      "c7552_trojan82",
+      "c880_trojan26",
+      "c880_trojan3",
+      "c880_trojan7"
+    ],
+    "controls": [
+      "c2670_trojan0",
+      "c5315_trojan26",
+      "c880_trojan30"
+    ],
+    "all": [
+      "c5315_trojan28",
+      "c5315_trojan34",
+      "c5315_trojan55",
+      "c5315_trojan78",
+      "c7552_trojan23",
+      "c7552_trojan53",
+      "c7552_trojan73",
+      "c7552_trojan82",
+      "c880_trojan26",
+      "c880_trojan3",
+      "c880_trojan7",
+      "c2670_trojan0",
+      "c5315_trojan26",
+      "c880_trojan30"
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "c5315_trojan28",
+      "circuit": "c5315",
+      "trojan": "c5315_trojan28",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 120,
+      "legacy_v6": {"status": "PASS", "vn_rounds": 2, "cec_rounds": 1, "runtime_ms": 2797.1}
+    },
+    {
+      "case_id": "c5315_trojan34",
+      "circuit": "c5315",
+      "trojan": "c5315_trojan34",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 120,
+      "legacy_v6": {"status": "PASS", "vn_rounds": 2, "cec_rounds": 1, "runtime_ms": 4065.28}
+    },
+    {
+      "case_id": "c5315_trojan55",
+      "circuit": "c5315",
+      "trojan": "c5315_trojan55",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 300,
+      "legacy_v6": {"status": "CEC_FAIL", "vn_rounds": 5, "cec_rounds": 5, "runtime_ms": 189500.0}
+    },
+    {
+      "case_id": "c5315_trojan78",
+      "circuit": "c5315",
+      "trojan": "c5315_trojan78",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 300,
+      "legacy_v6": {"status": "CEC_FAIL", "vn_rounds": 5, "cec_rounds": 5, "runtime_ms": 196684.0}
+    },
+    {
+      "case_id": "c7552_trojan23",
+      "circuit": "c7552",
+      "trojan": "c7552_trojan23",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 300,
+      "legacy_v6": {"status": "CEC_FAIL", "vn_rounds": 5, "cec_rounds": 5, "runtime_ms": 107688.0}
+    },
+    {
+      "case_id": "c7552_trojan53",
+      "circuit": "c7552",
+      "trojan": "c7552_trojan53",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 120,
+      "legacy_v6": {"status": "PASS", "vn_rounds": 2, "cec_rounds": 1, "runtime_ms": 3530.46}
+    },
+    {
+      "case_id": "c7552_trojan73",
+      "circuit": "c7552",
+      "trojan": "c7552_trojan73",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 300,
+      "legacy_v6": {"status": "CEC_FAIL", "vn_rounds": 5, "cec_rounds": 5, "runtime_ms": 104538.0}
+    },
+    {
+      "case_id": "c7552_trojan82",
+      "circuit": "c7552",
+      "trojan": "c7552_trojan82",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 120,
+      "legacy_v6": {"status": "PASS", "vn_rounds": 2, "cec_rounds": 1, "runtime_ms": 3114.6}
+    },
+    {
+      "case_id": "c880_trojan26",
+      "circuit": "c880",
+      "trojan": "c880_trojan26",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 120,
+      "legacy_v6": {"status": "PASS", "vn_rounds": 5, "cec_rounds": 4, "runtime_ms": 2087.73}
+    },
+    {
+      "case_id": "c880_trojan3",
+      "circuit": "c880",
+      "trojan": "c880_trojan3",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 120,
+      "legacy_v6": {"status": "PASS", "vn_rounds": 4, "cec_rounds": 3, "runtime_ms": 3373.03}
+    },
+    {
+      "case_id": "c880_trojan7",
+      "circuit": "c880",
+      "trojan": "c880_trojan7",
+      "cohort": "v6_vn_rounds_gt_1",
+      "timeout_seconds": 120,
+      "legacy_v6": {"status": "PASS", "vn_rounds": 2, "cec_rounds": 1, "runtime_ms": 956.906}
+    },
+    {
+      "case_id": "c2670_trojan0",
+      "circuit": "c2670",
+      "trojan": "c2670_trojan0",
+      "cohort": "control_no_vn_retry",
+      "timeout_seconds": 60,
+      "legacy_v6": {"status": "PASS", "vn_rounds": 0, "cec_rounds": 0, "runtime_ms": 575.307}
+    },
+    {
+      "case_id": "c5315_trojan26",
+      "circuit": "c5315",
+      "trojan": "c5315_trojan26",
+      "cohort": "control_single_vn_pass",
+      "timeout_seconds": 60,
+      "legacy_v6": {"status": "PASS", "vn_rounds": 1, "cec_rounds": 0, "runtime_ms": 1405.25}
+    },
+    {
+      "case_id": "c880_trojan30",
+      "circuit": "c880",
+      "trojan": "c880_trojan30",
+      "cohort": "control_single_vn_pass",
+      "timeout_seconds": 60,
+      "legacy_v6": {"status": "PASS", "vn_rounds": 1, "cec_rounds": 0, "runtime_ms": 431.812}
+    }
+  ]
+}
