@@ -1,6 +1,6 @@
 # Hardware Trojan Silence
 
-Automatic hardware trojan detection and patching tool. Given a golden circuit and a trojaned version, the tool learns the trojan's trigger condition via decision tree mining and generates a patched circuit that is functionally equivalent to the golden.
+Automatic hardware trojan detection and patching tool. Given a golden circuit and a trojaned version, the tool builds an interpretable trigger rule, patches the trojaned netlist, and uses ABC combinational equivalence checking (CEC) to decide whether the result is functionally equivalent to the golden circuit.
 
 ## Algorithm Overview
 
@@ -16,29 +16,29 @@ Golden + Trojan .bench
         │
         ▼
   Candidate selection
-  ── pick gates with high trojan activation rate
+  ── use all gate nodes; current CLI also includes primary inputs as features
         │
         ▼
-  Virtual Node generation (iterative)
-  ── Phase 1: train decision tree (unlimited depth, force split)
-  ── Phase 2: generate pairwise/triple VN from important signals
-  ── Phase 3: iterative refinement, mine subclauses, early stop
-  ── Insert only used VNs into circuit
+  Select rule synthesis method
+  ├─ vn-retrain (default)
+  │  ├─ shallow DT selects important gates
+  │  ├─ signature-ranked pair/triple AND virtual features
+  │  ├─ retrain with VNs; materialize only VNs used by the tree
+  │  └─ final DT
+  ├─ dt
+  │  └─ one final DT, without VN or PB optimization
+  └─ z3-pb
+     ├─ one DT; union gates on raw positive paths
+     └─ bounded-DNF 0-1 PB optimization over the finite training matrix
         │
         ▼
-  Final mining (strict mode)
-  ── decision tree + hard-negative mining
-  ── strict retry: unlimited depth until zero false positives
-  ── rule simplification (remove redundant terms)
+  Rule simplification and patch selection
+  ├─ verified common-literal cut / single-literal trigger kill
+  ├─ merge multi-rule match logic when needed
+  └─ payload fix (Z3-guided node selection + rule-controlled patch)
         │
         ▼
-  Fix strategy selection
-  ├─ Try trigger kill (force gate to constant 0/1)
-  ├─ Try VN expand kill (decompose virtual AND, kill constituents)
-  └─ Payload fix (MaxSAT-guided PO patching with MUX/XOR insertion)
-        │
-        ▼
-  CEC verification (ABC equivalence check)
+  Internal ABC CEC, followed by an independent external ABC CEC in A/B runs
   ── if fail: extract counter-example, add to triggers, retry (max 5 rounds)
         │
         ▼
@@ -60,8 +60,9 @@ src/
 │   ├── decision_tree.hpp/cpp   # Decision tree (column-major packed matrix)
 │   ├── gpu_tree.cu/cuh         # GPU-accelerated tree training
 │   ├── miner.hpp/cpp           # Mining loop + hard-negative mining + strict retry
-│   ├── virtual_node.hpp/cpp    # Virtual node feature generation (AND/OR/XOR combos)
-│   ├── candidate_selector.hpp/cpp # Gate candidate selection by trojan rate
+│   ├── rule_optimizer.hpp/cpp  # Z3 Optimize bounded-DNF 0-1 PB optimizer
+│   ├── virtual_node.hpp/cpp    # Signature-ranked pair/triple AND virtual features
+│   ├── candidate_selector.hpp/cpp # Build the all-gate candidate set
 │   ├── pattern_sampler.hpp/cpp # Random pattern generation
 │   ├── rule_patch.hpp/cpp      # Rule-based circuit patching (MUX/XOR insertion)
 │   ├── trigger_fixer.hpp/cpp   # Trigger kill strategies
@@ -79,6 +80,10 @@ src/
     ├── synthesis.cpp           # ABC-based optimization
     ├── verify_groundtruth.cpp  # Verify groundtruth patterns
     └── packed_cmp.cpp          # Packed circuit comparison
+scripts/
+├── compare_rule_methods.py     # Reproducible per-case A/B runner + external CEC
+├── test_compare_rule_methods.py
+└── test_rule_method_telemetry.sh
 ```
 
 ## Build
@@ -107,12 +112,22 @@ bin/main <golden.bench> <trojan.bench> <groundtruth.json> [output.bench] [option
 |------|---------|-------------|
 | `--depth N` | 10 | Max decision tree depth (non-strict phases) |
 | `--neg-ratio N` | 50 | Negative-to-positive sample ratio |
-| `--mine-rounds N` | 15 | Hard-negative mining iterations |
-| `--mine-max N` | 5000 | Max features per mining round |
-| `--include-pi` | on | Include primary inputs as features |
+| `--mine-rounds N` | 15 | Parsed/logged compatibility setting; the current `main` rule-synthesis path fixes mining to one DT round |
+| `--mine-max N` | 5000 | Parsed/logged compatibility setting; the current path disables newly mined hard-negative additions |
+| `--include-pi` | on | Compatibility flag; primary-input features are already enabled by default |
 | `--force-split` | off | Force tree splits even with low gain |
-| `--no-strict` | off | Disable strict retry (skip zero-FP enforcement) |
-| `--no-virtual` | off | Disable virtual node generation |
+| `--no-strict` | off | Disable strict retry for zero FP on the finite training matrix |
+| `--rule-method M` | `vn-retrain` | `vn-retrain`, `dt`, or `z3-pb` |
+| `--no-virtual` | off | Legacy alias for `--rule-method dt`; conflicts with an explicit non-`dt` method |
+| `--rule-opt-timeout-ms N` | 10000 | Shared Z3-PB wall-clock budget per optimizer call |
+| `--rule-opt-max-rounds N` | 100 | Maximum PB CEGIS checks |
+| `--rule-opt-cex-batch N` | 5 | Misclassified finite-training signatures added per CEGIS check |
+| `--rule-opt-max-clauses N` | 0 | DNF clause cap; `0` derives it from the DT baseline rule count, while an explicit nonzero cap is honored |
+| `--rule-opt-max-literals N` | 10 | Literals per DNF clause; `0` uses the largest baseline clause |
+
+`z3-pb` changes rule synthesis only; downstream payload-node optimization and patch application are shared with the other methods. It uses Z3 Optimize as a pseudo-Boolean/MaxSMT backend. Its Boolean formulation is 0-1 ILP-equivalent, but it is not a generic MILP solver and does not construct or expose an LP relaxation, so there is no reported MILP gap. “Optimal” and “verified” telemetry apply only to the bounded candidate set and finite training matrix. Whole-input correctness is established by ABC CEC.
+
+`rule_synth_summary synthesized_*` records the model immediately after rule synthesis. `rule_apply_summary` separately records the post-signature/applied mechanism and its effective rule/literal/depth counts; a verified direct literal cut is identified with `rule_model_used=0` and an effective `1/1/1` condition.
 
 **Example:**
 
@@ -149,17 +164,42 @@ python3 trojan_collect_batch.py \
 
 Options: `--start-round`, `--end-round`, `--rounds`, `--dry-run`.
 
-## Batch Testing
+## Batch Testing and Rule-Method Reproduction
 
 Run all test cases and produce a CSV report:
 
 ```bash
-bash run_v0_tests.sh
+bash run_tests.sh
 ```
 
 Output CSV columns: `circuit, trojan, success, gt_verify, vn_rounds, runtime_ms, area_delta, level_delta, cec_rounds`
 
 Success is determined by ABC CEC (equivalence check) of the patched circuit against the golden.
+
+Run the rule-optimizer and comparison regression tests with:
+
+```bash
+make -C src ../bin/script/test_rule_optimizer -j4
+bin/script/test_rule_optimizer
+python3 scripts/test_compare_rule_methods.py
+bash scripts/test_rule_method_telemetry.sh
+```
+
+Reproduce the fixed 11 hard cases and 3 controls (large V0 inputs must already be present under the paths in `configs/rule_method_ab_cases.json`):
+
+```bash
+python3 scripts/compare_rule_methods.py \
+  --profile rebuild11 \
+  --output-root validation/rule_method_ab_rebuild11 \
+  --jobs 1 --force
+
+python3 scripts/compare_rule_methods.py \
+  --profile controls \
+  --output-root validation/rule_method_ab_controls \
+  --jobs 1 --force
+```
+
+The runner stores per-method logs, patched netlists, JSON records, aggregate CSV/JSON, tool/input SHA-256 identities, and an independent external ABC CEC result. See [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md) for the measured comparison and its limitations.
 
 ## ABC Setup
 

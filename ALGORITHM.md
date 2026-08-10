@@ -11,7 +11,7 @@
 產生一個修補後的電路，使其與 Golden 功能完全等價，且面積（area）和延遲（level）的增加盡可能小。
 
 **核心思路：**
-將每筆 error pattern 模擬後，把電路中每個 gate 的值當作 feature，用 decision tree 學出 trigger 的觸發條件（rules）。再根據這些 rules，透過插入 MUX/XOR 的方式修補受影響的 primary output。
+將 error patterns 模擬成 gate features，先由 decision tree 產生可解釋的 trigger DNF baseline。接著依 `--rule-method` 選擇 VN 重訓、純 DT，或以 Z3 Optimize 對 raw DT path 的候選 gate union 做 bounded-DNF 0–1 pseudo-Boolean 重合成。rule 只負責引導修補；最後是否正確，以 patched circuit 對 golden circuit 的 ABC CEC 為準。
 
 ---
 
@@ -40,26 +40,26 @@
   └─────────────────┬─────────────────────────┘   │
                     │                              │
   ┌─────────────────▼─────────────────────────┐   │
-  │  3. Virtual Node 生成（迭代式）             │   │
-  │     ─ Phase 1: 快速 tree → 找重要 signal   │   │
-  │     ─ Phase 2: 組合產生 VN candidate       │   │
-  │     ─ Phase 3: 迭代訓練，挖 subclause     │   │
-  │     ─ Phase 4: 只插入有用的 VN 到電路      │   │
+  │  3. Rule method                            │   │
+  │     ├─ vn-retrain: DT → signature VN       │   │
+  │     │               → 重訓 → final DT      │   │
+  │     ├─ dt: 一次 final DT                   │   │
+  │     └─ z3-pb: 一次 DT → candidate union    │   │
+  │                → bounded-DNF 0–1 PB        │   │
   └─────────────────┬─────────────────────────┘   │
                     │                              │
   ┌─────────────────▼─────────────────────────┐   │
-  │  4. Final Mining（Strict Mode）            │   │
-  │     ─ Decision Tree 訓練                   │   │
-  │     ─ Hard-negative mining                 │   │
-  │     ─ Strict retry（無限深度 + 全 PI）     │   │
-  │     ─ Rule 簡化                            │   │
+  │  4. Rule 後處理                            │   │
+  │     ─ finite-training rule simplification │   │
+  │     ─ 視需要 strict retry                  │   │
+  │     ─ signature minimization / rule merge │   │
   └─────────────────┬─────────────────────────┘   │
                     │                              │
   ┌─────────────────▼─────────────────────────┐   │
   │  5. 修補策略                               │   │
-  │     ─ Trigger Kill                         │   │
-  │     ─ VN Expand Kill                       │   │
-  │     ─ Payload Fix（MaxSAT + MUX 插入）     │   │
+  │     ─ verified common-literal patch cut    │   │
+  │     ─ single-literal trigger kill          │   │
+  │     ─ Payload Fix（Z3 + rule-controlled）  │   │
   └─────────────────┬─────────────────────────┘   │
                     │                              │
   ┌─────────────────▼─────────────────────────┐   │
@@ -91,86 +91,60 @@
 從模擬結果中選出所有 gate 節點作為 decision tree 的 feature 候選。
 
 - 包含所有 GATE 類型節點
-- 可選擇是否包含 Primary Input（`--include-pi`）
+- 目前 CLI 預設包含 Primary Input（`--include-pi` 已預設為 true）
 - 過濾掉先前 rule merge 產生的 `rule_opt_gate_*` 節點，避免汙染
 
 **輸出：** `candidate_indices`（gate index 列表）
 
-### 3. Virtual Node 生成（迭代式多階段）
+### 3. Rule synthesis methods
 
-Virtual Node（VN）的目標是**壓縮 trigger 條件的表達**。如果 trigger 需要多個 gate 同時滿足特定值（例如 `A=1 AND B=1 AND C=0`），decision tree 需要多層 split 才能表達。VN 把這些組合預先計算成單一 feature（例如 `vn_A_AND_B = A AND B`），讓 tree 用一次 split 就能表達。
+以 `--rule-method vn-retrain|dt|z3-pb` 選擇流程。預設是 `vn-retrain`；舊參數 `--no-virtual` 等同 `--rule-method dt`。
 
-#### Phase 1：快速訓練，找出重要 signal
+#### 3.A `vn-retrain`：目前實際 VN 流程
 
-```
-設定：max_depth=10, strict_retry=false, mine_rounds=1
-輸入：base_for_vn（所有非 VN 的 candidate gate）
-輸出：important_signals（Phase 1 rules 中用到的 gate index）
-```
+Virtual Node（VN）把兩個或三個帶 polarity 的 gate literal 合成 AND feature，例如 `A AND (NOT B)`，讓 tree 可能以較少 split 表達 trigger。現行版本已不再執行舊文件所述的「最多三輪 subclause expansion」；每個 synthesis pass 是固定的幾個階段：
 
-用一棵淺層 decision tree 快速辨識哪些 gate 與 trigger 有關。這些 gate 就是後續生成 VN 的素材。
+1. **Phase 1 DT**：在所有非 `vn_` base candidates 上訓練一棵 `max_depth=--depth`、`strict_retry=false` 的 tree，收集 positive rules 實際使用的 circuit nodes。
+2. **Signature base pool**：重要 nodes 優先，再以 trigger/non-trigger signature 排名補到最多 64 個 base gates。
+3. **Signature VN DP**：最多取 32 個 positive patterns；negative 會先取 CEC hard negatives，再補隨機 non-trigger patterns，目標 8–32 個。所有 patterns 合計受一個 64-bit packed word 限制。枚舉帶正反 polarity 的 pair AND，再從排名前 300 個 pair states 延伸 triple AND；相同 signature 只留成本較低者，最後最多保留 300 個 VN。
+4. **VN retrain**：以 base features 加上 on-the-fly VN features 重訓一次。此時尚未修改 circuit。
+5. **Used-VN pass**：再訓練一次，找出 tree rules 真正引用的 VN；只 materialize 這些 VN 與共用 NOT gates，加入 final candidates。
+6. **Final DT**：在更新後的 circuit/candidates 上建立最終 baseline rules。
 
-#### Phase 2a：組合產生 VN candidate
+若 phase-1 已得到單一 literal，就跳過 VN generation，通常每個 CEC attempt 只有 phase-1 與 final DT 共 2 次 build。若 VN candidates 有產生且進入 used-VN pass，通常是 phase-1、VN retrain、used-VN pass、final DT 共 4 次 build。`rule_synth_summary` 會記錄 `dt_builds`、`vn_generated`、`vn_used` 與各階段時間。
 
-從 `important_signals` 中取所有 pairwise（兩兩組合）和 triple（三個組合）：
+**注意：** 生成很多 VN 不表示最後 patch 會使用它們。正式 `rebuild11` artifacts 中許多 pass 的 `vn_used=0`，但重訓成本仍已發生。
 
-```
-對每對 (A, B)，產生：
-  - A AND B
-  - A AND (NOT B)
-  - (NOT A) AND B
-  → 3 個 VN candidate per pair
+#### 3.B `dt`：不使用 VN 的 baseline
 
-對每個三元組 (A, B, C)（當 signal 數 ≤ 12 時）：
-  → 3 個 VN candidate per triple
+`dt` 直接執行 final DT mining，不產生 VN，也不執行 PB optimizer。它用來隔離「多次 VN 重訓」本身的成本，`--no-virtual` 只是這個方法的 legacy alias。
 
-典型數量：56 個 signal → C(56,2)×3 = 4,620 個 pairwise VN
-```
+#### 3.C `z3-pb`：DT candidate union + bounded DNF
 
-#### Phase 2b：Subclause Mining
+`z3-pb` 先建立一次 DT。在 greedy simplification 之前，收集所有 raw positive DT paths 出現的 feature index 並做 union。optimizer 只可從這個 union 選 literal，不會自動探索 tree 未使用的 gates。這個 optimizer 只取代 rule synthesis 的 VN 重訓；第 5 節 payload-node MaxSAT 與 patch application 仍是所有 rule methods 共用的 downstream 流程。
 
-從 Phase 1 的 rules 中挖掘頻繁出現的子條款（長度 3-4 的 literal 組合）：
+令 `a_k` 表示 DNF clause `k` 是否啟用，`x_{k,j,0}` / `x_{k,j,1}` 表示該 clause 是否選 feature `j` 的 0/1 polarity。對有限 training signature `s`，clause match 為：
 
 ```
-例如：若多條 rule 都包含 (A=1, B=0, C=1)
-→ 產生 VN: A AND (NOT B) AND C
-→ 加入 all_vn_defs（最多 500 個）
+m[s,k] = a[k] AND
+         AND_j NOT(x[k,j,1-s[j]])
 ```
 
-這些 subclause-based VN 比盲目的 pairwise 更有針對性，因為它們直接來自 tree 發現的 pattern。
+主要 constraints：
 
-#### Phase 3：迭代精煉（最多 3 輪）
+- `x[k,j,0]` 與 `x[k,j,1]` 至多選一個；
+- selected literal 蘊含 `a[k]`；active clause 至少 1 個 literal，且不超過 cap；
+- positive signature：`OR_k m[s,k] = true`；
+- negative signature：每個 `m[s,k] = false`；
+- active clauses 使用 prefix constraint，移除一部分對稱解。
 
-```
-每輪：
-  1. 用 base_for_vn + 所有 VN（on-the-fly 計算）訓練 decision tree
-     設定：max_depth=10, strict_retry=false
-  2. 比較 rule 數量：
-     - 若 rule 數沒有減少 → revert 本輪新增的 VN，停止迭代
-     - 若有減少 → 記錄為 best，繼續
-  3. 從本輪 rules 挖 subclause（長度 2-4），加入 VN candidate
-     - 跳過 VN-on-VN 組合（避免巢狀爆炸）
-  4. 若沒有新 subclause → 收斂，停止
+Z3 Optimize 以 lexicographic objectives 先最小化 active clauses，再最小化 selected literals。實作採 deterministic CEGIS：每類先加入最多 `--rule-opt-cex-batch` 個 signatures，解完掃描完整的有限 signature table，每輪再加入最多一個 batch 的真正 misclassified signatures，直到 0 FP/0 FN、timeout、infeasible 或達到 round cap。只有再次逐 row 驗證完整 packed training matrix 為 0 FP/0 FN 時才接受；其他狀態保留 DT baseline。
 
-追蹤 best_vn_defs：保留 rule 數最少的那輪 VN 集合
-```
+這是 Z3 Optimize 的 **0–1 pseudo-Boolean / MaxSMT formulation**，在此 Boolean model 上可稱 0–1 ILP-equivalent；它不是 generic MILP solver，也不建立或公開 LP relaxation，因此沒有可報告的 MILP optimality gap。`optimizer_optimal=1` 與 `optimizer_verified=1` 只適用於目前 candidate union、clause/literal bounds 與有限 training matrix，不代表全部 PI input exact。全輸入功能正確性仍須由 ABC CEC 證明。
 
-**注意：** VN 迭代期間電路不會被修改。VN 特徵是 on-the-fly 從模擬值計算的。
+### 4. Final Mining 與 rule 後處理
 
-#### Phase 4：插入有用的 VN
-
-```
-1. 用 best_vn_defs 做最後一次訓練
-2. 找出 rules 中實際用到的 VN index
-3. 只把 used VN 插入電路（add_virtual_gates_to_circuit）
-4. 將新 VN gate 加入 candidate_indices
-```
-
-例如：24,044 個 VN candidate 中可能只有 7 個被實際使用。只插入這 7 個，避免電路膨脹。
-
-### 4. Final Mining
-
-使用完整的 decision tree mining pipeline 找出最終的 trigger rules。
+三種 rule methods 都會建立 final training matrix 與至少一棵 DT；`z3-pb` 再以同一 matrix 重合成 bounded DNF。以下資料結構三種方法共用。
 
 #### 訓練資料建構
 
@@ -206,35 +180,28 @@ Virtual Node（VN）的目標是**壓縮 trigger 條件的表達**。如果 trig
   - 即 trigger 條件 = rule_1 OR rule_2 OR ... OR rule_N
 ```
 
-#### Hard-Negative Mining（迭代式）
+#### Hard-negative loop 的目前狀態
 
-目標：降低 false positive rate，確保 rules 不會誤判 non-trigger pattern 為 trigger。
+`miner.cpp` 仍保留 `eval_and_mine` 的多輪 hard-negative 能力；但目前 `main.cpp` 在 phase-1、VN retrain、used-VN pass 與 final mining 都固定傳入：
 
 ```
-重複最多 mine_rounds 輪（預設 15）：
-  1. 隨機產生大量 PI pattern（預設 eval_count = 1,000,000）
-  2. 模擬 golden + trojan，找出 non-trigger pattern
-  3. 對每個 non-trigger pattern，用當前 rules 判斷
-  4. 若 rules 誤判為 trigger → 這是 hard negative
-  5. 將 hard negatives 加入訓練資料（每輪最多 mine_max = 5,000）
-  6. 重新訓練 decision tree
-
-停止條件：
-  - 達到最大輪數
-  - 某輪找不到新的 hard negative
-  - 已達成 0 false positive
+eval_count = 0
+mine_rounds = 1
+mine_max = 0
 ```
+
+所以正式 `bin/main` 路徑不會額外抽一百萬 patterns，也不會在同一 synthesis pass 依 `--mine-rounds` 反覆 rebuild。`--mine-rounds` 與 `--mine-max` 目前仍會被 CLI 解析、顯示並寫進 A/B command record，但不控制這條路徑。現行 refinement 主要來自初始 negative sampling、`z3-pb` 對有限 signature table 的內部 CEGIS，以及 ABC CEC 失敗後加入的新 trigger/false-positive pattern。
 
 #### Strict Retry
 
-若 hard-negative mining 後仍有 false positive（`train_false_pos > 0`），啟動 strict mode：
+若 finite training matrix 上仍有 false positive（`train_false_pos > 0`），啟動 strict mode：
 
 ```
 設定：
   - force_split = true（強制 tree 繼續分裂，即使 gain 很低）
   - max_depth = 無限制（max_depth = feature 數量）
   - 加入所有 Primary Input 作為額外 feature
-  - 重新建構訓練資料 + 重跑 mining loop
+  - 重新建構訓練資料 + 重跑目前的一輪 mining
 
 目的：確保 0 false positive
 代價：可能產生很多 rules（tree 很深很寬）
@@ -246,48 +213,47 @@ Virtual Node（VN）的目標是**壓縮 trigger 條件的表達**。如果 trig
 simplify_rules：
   - 移除被其他 rule 包含（更一般化）的冗餘 rule
   - 移除 rule 中矛盾的 term（同一 feature 同時要求 0 和 1）
+minimize_rules_with_data：
+  - 在 finite training matrix 上逐 literal 嘗試刪除
+z3-pb（若啟用）：
+  - 對 raw DT candidate union 做跨 clauses 的全域重合成
 ```
+
+`rule_synth_summary` 在後續 trigger signature minimization、literal patch cut、rule-match merge 與實際 patch application之前輸出；`synthesized_*` 是明確的 synthesis-stage 指標，`final_*` 只保留作舊 parser 的相容 alias。後處理完成後另輸出 `rule_apply_summary`，以 `source`、`rule_model_used` 與 `effective_rules/effective_literals/effective_depth` 區分 conditional DNF、signature/stat literal 與直接 literal cut。
 
 ### 5. 修補策略
 
-找到 trigger rules 後，需要實際修補電路。依序嘗試三種策略：
+找到 trigger rules 後，需要實際修補電路。目前主流程依序嘗試 verified literal cut、單一 literal kill，最後才進入 payload fix；舊版文件所述的 VN constituent expand-kill 並未在目前 `main.cpp` 呼叫。
 
-#### 策略 A：Trigger Kill（最簡單）
+#### 策略 A：Verified common-literal patch cut
 
 ```
-嘗試：找到一個 gate，使得把它 force 成常數 0 或 1 後，
-      所有 trigger pattern 都不再觸發。
+嘗試：找出在每一條 rule 都出現的原始 GATE literal，依成本排序後，
+      把它 force 成相反常數；最多嘗試 16 個候選。
 
 條件：rules 中有某個 literal 出現在所有 rules 裡
       → 這個 gate 是 trigger 的必要條件
       → 強制它永遠不滿足 trigger 條件
 
-驗證：修補後模擬所有 trigger pattern，
+驗證：每個 trial 都模擬目前所有 trigger patterns，
       確認輸出與 golden 一致
 
 優點：幾乎零面積開銷（只是斷開一條線）
-缺點：只在單一 trigger point 的簡單案例有效
+缺點：有限 GT verify 通過仍不代表全輸入等價，後面仍需 ABC CEC
 ```
 
-#### 策略 B：VN Expand Kill
+#### 策略 B：Single-literal trigger kill
 
 ```
-前提：Trigger Kill 找到的 gate 是一個 virtual AND node
-      → 不能直接 kill（VN 是組合出來的，不是原本電路的 gate）
-
-做法：展開 VN 的組成 signal，逐一嘗試 kill
-      例如 VN = A AND (NOT B)
-      → 嘗試 force A=0
-      → 嘗試 force B=1
-      → 若其中一個通過 verify → 採用
-
-追蹤 NOT 反相：若 VN 的 input 經過 NOT gate，
-      需要反轉 kill value（NOT(x)=0 → x=1）
+先嘗試用 PatternStats 或 trigger-signature minimization 將模型化為單一 literal。
+若 single literal 對應原始 GATE，就 force 成相反值並做 GT verify。
+若它是 materialized `vn_*`，目前會拒絕直接 kill；floating VN 本身不是
+原始 trojan datapath，force 它不會中和 trojan。
 ```
 
 #### 策略 C：Payload Fix（MaxSAT + MUX 插入）
 
-最通用但面積開銷最大的策略。當 Trigger Kill 和 VN Expand Kill 都失敗時使用。
+最通用但面積開銷通常較大的策略。當前述 literal-based patch 不適用或驗證失敗時使用。
 
 整體目標：找出 trojan 電路中哪些 gate 在 trigger 觸發時輸出了錯誤值，然後對這些 gate 插入修補邏輯（MUX），在 trigger 觸發時強制輸出正確值。
 
@@ -903,16 +869,15 @@ trigger rules (from Mining)
     - 產生新的 trigger pattern
 
 CEC Retry Loop（最多 5 輪）：
-  1. 將 counter-example 加入 trigger patterns
-  2. 從頭重跑整個流程（模擬 → VN → Mining → Fix）
-  3. 新的 trigger pattern 讓 mining 發現更完整的 trigger 條件
-  4. 新的 fix 覆蓋更多 trigger input → 更可能通過 CEC
-
-典型情況：
-  - 大多數案例 cec_round=0（首輪即通過）
-  - 複雜案例需要 1-4 輪 CEC retry
-  - 極少數案例 5 輪仍無法通過（trigger 極度複雜）
+  1. 在原始 golden/trojan 上分類 counter-example：
+     - 原始 trojan 已錯 → missed trigger，加入 positive patterns
+     - 原始 trojan 正確但 patch 錯 → patch false-positive，加入 negatives
+  2. 依目前 rule method 從頭重跑（vn-retrain、dt 或 z3-pb）
+  3. 重新選 fix 並再次 CEC
+  4. 最多 5 輪；仍不等價就回報 CEC failure
 ```
+
+有限 `GT verify`、`optimizer_verified=1` 或 finite-training 0 FP/0 FN 都不能取代 CEC。在正式 A/B runner 中，`bin/main` 完成後還會以獨立 subprocess 再執行一次 external ABC CEC；比較報告以這個 `abc_equivalent` 欄位為 primary correctness result。
 
 ---
 
@@ -925,17 +890,18 @@ CEC Retry Loop（最多 5 輪）：
 - Tree 的輸出直接可以編碼成電路邏輯（MUX selector）
 - 相比 neural network，tree 的 rule 是可解釋的，可以直接用於電路修補
 
-### 為什麼需要 Virtual Node？
+### Virtual Node 的用途與成本
 
 - 有些 trigger 需要多個 gate 同時為特定值才會觸發
 - 單層 decision tree split 只能看一個 feature
-- VN 把 `A AND B` 壓成單一 feature，讓 tree 用一次 split 就能表達
-- 減少 rule 數量 → 修補電路更小 → area overhead 更低
+- VN 把 pair/triple AND 壓成單一 feature，可能讓 tree 用較少 split 表達
+- 但 `vn-retrain` 最多需要 phase-1、VN retrain、used-VN pass、final DT 四次 build
+- generated VN 可能完全未被最後 tree 使用；因此 VN 是可比較的 heuristic，不是必然改善
 
-### 為什麼 Strict Mode 會產生很多 Rules？
+### 為什麼 Strict Mode 可能產生很多 Rules？
 
-- Strict mode 要求 **0 false positive**（不能把正常 pattern 誤判為 trigger）
-- 隨機生成的 negative pattern 涵蓋面廣，tree 需要很精確地分類
+- Strict mode 要求目前 finite training matrix 上 **0 false positive**
+- 初始 negative sampling 與 CEC hard negatives 可能要求很精確的分類
 - 為了不漏判，tree 需要很多細緻的 split → 很多 leaf → 很多 rules
 - 每條 rule 都需要編碼成電路 → rule 越多，MUX selector 越大 → area 越大
 
@@ -945,7 +911,7 @@ CEC Retry Loop（最多 5 輪）：
 - Mining 只在這些 pattern 上訓練，可能遺漏某些 trigger 條件
 - CEC 用形式化方法檢驗所有可能 input
 - Counter-example 回饋讓 mining 逐步完善 trigger 條件
-- 實驗顯示約 20% 的案例需要至少 1 輪 CEC retry
+- 正式 `rebuild11` profile 中，兩法仍各有多個案例需要 1–5 輪；不能由有限 training accuracy 推定 CEC PASS
 
 ---
 
@@ -955,9 +921,38 @@ CEC Retry Loop（最多 5 輪）：
 |------|--------|------|
 | `--depth N` | 10 | Non-strict 階段的 tree 深度上限。越大越精確但越慢 |
 | `--neg-ratio N` | 50 | 負樣本倍率。越大越不容易 false positive 但記憶體越多 |
-| `--mine-rounds N` | 15 | Hard-negative mining 最大輪數。越多越精確但越慢 |
-| `--mine-max N` | 5000 | 每輪最多加入的 hard negative 數。控制訓練集增長速度 |
+| `--mine-rounds N` | 15 | 目前由 CLI 解析/記錄；`main` 的正式 rule-synthesis calls 固定使用 1 |
+| `--mine-max N` | 5000 | 目前由 CLI 解析/記錄；`main` 的正式 rule-synthesis calls 固定使用 0 |
 | `--force-split` | off | 強制 tree 繼續分裂。增加 rule 數但降低 false positive |
 | `--no-strict` | off | 停用 strict retry。加快速度但可能有 false positive |
-| `--no-virtual` | off | 停用 VN 生成。加快速度但可能增加 rule 數 |
-| `--include-pi` | on | 將 PI 也加入 feature candidate。增加表達能力 |
+| `--rule-method M` | `vn-retrain` | 選擇 `vn-retrain`、`dt` 或 `z3-pb` |
+| `--no-virtual` | off | Legacy alias for `--rule-method dt`；不可與明確的非 `dt` method 並用 |
+| `--include-pi` | on | 相容性 flag；目前 CLI 已預設加入 PI features |
+| `--rule-opt-timeout-ms N` | 10000 | 每次 Z3-PB optimizer call 共用的 wall-clock budget |
+| `--rule-opt-max-rounds N` | 100 | PB CEGIS 最多 Optimize checks |
+| `--rule-opt-cex-batch N` | 5 | 每次加入的有限-training counterexample signatures 上限 |
+| `--rule-opt-max-clauses N` | 0 | DNF clause cap；0 由 baseline rule count 推導，明確非零值不再被 baseline count 截斷 |
+| `--rule-opt-max-literals N` | 10 | 每條 clause literal cap；0 使用 baseline 最大 clause 長度 |
+
+---
+
+## Rule-method 測試與正式 artifact 重現
+
+```bash
+make -C src ../bin/script/test_rule_optimizer -j4
+bin/script/test_rule_optimizer
+python3 scripts/test_compare_rule_methods.py
+bash scripts/test_rule_method_telemetry.sh
+
+python3 scripts/compare_rule_methods.py \
+  --profile rebuild11 \
+  --output-root validation/rule_method_ab_rebuild11 \
+  --jobs 1 --force
+
+python3 scripts/compare_rule_methods.py \
+  --profile controls \
+  --output-root validation/rule_method_ab_controls \
+  --jobs 1 --force
+```
+
+runner 會保存每個 case/method 的 stdout、stderr、patched bench、external CEC logs、JSON record，以及帶 SHA-256 identities 的 aggregate CSV/JSON。11 個 hard cases、3 個 controls、commit 鏈、artifact SHA 與限制見 [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md)。
