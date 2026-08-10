@@ -9,6 +9,13 @@ enum class ParseStatus {
   error
 };
 
+enum class RuleMethod {
+  vn_retrain,
+  dt
+};
+
+const char* rule_method_name(RuleMethod method);
+
 struct AppOptions {
   std::string golden_path;
   std::string trojan_path;
@@ -23,6 +30,7 @@ struct AppOptions {
   bool force_split = false;
   bool strict_retry = true;
   bool no_virtual = false;
+  RuleMethod rule_method = RuleMethod::vn_retrain;
 };
 
 ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::string* error); // Parse CLI args into AppOptions.

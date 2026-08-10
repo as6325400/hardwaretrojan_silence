@@ -13,7 +13,33 @@ PER_TEST_TIMEOUT=300  # 5 minutes per test
 mkdir -p "$OUTPUT_DIR"
 
 # CSV header
-echo "circuit,trojan,success,gt_verify,vn_rounds,runtime_ms,area_delta,level_delta,cec_rounds" > "$CSV"
+echo "circuit,trojan,success,gt_verify,vn_rounds,runtime_ms,area_delta,level_delta,cec_rounds,strategy,dt_builds,strict_dt_builds,training_data_builds,vn_generated,vn_used,rules,literals,depth,rule_synth_ms" > "$CSV"
+
+summary_last_value() {
+    local key="$1"
+    local file="$2"
+    awk -v key="$key" '
+        /^rule_synth_summary / {
+            for (i = 2; i < NF; i += 2) {
+                if ($i == key) value = $(i + 1)
+            }
+        }
+        END { if (value != "") print value }
+    ' "$file"
+}
+
+summary_sum_value() {
+    local key="$1"
+    local file="$2"
+    awk -v key="$key" '
+        /^rule_synth_summary / {
+            for (i = 2; i < NF; i += 2) {
+                if ($i == key) total += $(i + 1)
+            }
+        }
+        END { print total + 0 }
+    ' "$file"
+}
 
 pass=0
 fail=0
@@ -94,7 +120,8 @@ for gt_file in "$GT"/*/*_error_patterns.json; do
         gt_verify="PASS"
     fi
 
-    # --- vn_rounds: count distinct vn_iter{N}_rules lines ---
+    # Legacy compatibility only: this counts VN retraining passes, not DT builds.
+    # `dt_builds` below is the authoritative completed-tree count.
     vn_rounds=$(grep -cE '^vn_iter[0-9]+_rules ' "$tmp_out" 2>/dev/null || true)
     vn_rounds=${vn_rounds:-0}
 
@@ -114,10 +141,26 @@ for gt_file in "$GT"/*/*_error_patterns.json; do
     cec_rounds=$(grep '^cec_rounds ' "$tmp_out" 2>/dev/null | awk '{print $2}' | head -1 || true)
     cec_rounds=${cec_rounds:-""}
 
-    # --- append to CSV ---
-    echo "$circuit,$trojan_name,$success,$gt_verify,$vn_rounds,$runtime,$area_delta,$level_delta,$cec_rounds" >> "$CSV"
+    # --- rule synthesis telemetry (summed across all CEC attempts) ---
+    strategy=$(summary_last_value strategy "$tmp_out")
+    strategy=${strategy:-""}
+    dt_builds=$(summary_sum_value dt_builds "$tmp_out")
+    strict_dt_builds=$(summary_sum_value strict_dt_builds "$tmp_out")
+    training_data_builds=$(summary_sum_value training_data_builds "$tmp_out")
+    vn_generated=$(summary_sum_value vn_generated "$tmp_out")
+    vn_used=$(summary_sum_value vn_used "$tmp_out")
+    rules=$(summary_last_value final_rules "$tmp_out")
+    literals=$(summary_last_value final_literals "$tmp_out")
+    depth=$(summary_last_value final_depth "$tmp_out")
+    rule_synth_ms=$(summary_sum_value synth_ms "$tmp_out")
+    rules=${rules:-""}
+    literals=${literals:-""}
+    depth=${depth:-""}
 
-    echo "$success  gt=$gt_verify  vn=$vn_rounds  cec=$cec_rounds  time=${runtime}ms  area=$area_delta  level=$level_delta"
+    # --- append to CSV ---
+    echo "$circuit,$trojan_name,$success,$gt_verify,$vn_rounds,$runtime,$area_delta,$level_delta,$cec_rounds,$strategy,$dt_builds,$strict_dt_builds,$training_data_builds,$vn_generated,$vn_used,$rules,$literals,$depth,$rule_synth_ms" >> "$CSV"
+
+    echo "$success  gt=$gt_verify  strategy=$strategy  dt_builds=$dt_builds  vn_passes=$vn_rounds  cec=$cec_rounds  rules=$rules/$literals/$depth  time=${runtime}ms  area=$area_delta  level=$level_delta"
 
     rm -f "$tmp_out" "$tmp_err"
 done

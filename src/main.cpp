@@ -852,6 +852,17 @@ struct TriggerSigStats {
   std::size_t exact_mismatches = 0;
 };
 
+struct RuleSynthTelemetry {
+  std::size_t dt_builds = 0;
+  std::size_t strict_dt_builds = 0;
+  std::size_t training_data_builds = 0;
+  std::size_t vn_generated = 0;
+  std::size_t vn_used = 0;
+  std::size_t phase_rules = 0;
+  std::size_t phase_literals = 0;
+  std::size_t phase_depth = 0;
+};
+
 struct LiteralPatchCutCandidate {
   int node_idx = -1;
   int forced_value = 0;
@@ -1938,6 +1949,7 @@ int main(int argc, char** argv) {
        << " neg_ratio " << options.neg_ratio
        << " mine_rounds " << options.mine_rounds
        << " mine_max " << options.mine_max
+       << " rule_method " << rule_method_name(options.rule_method)
        << " force_split " << (options.force_split ? 1 : 0)
        << " strict_retry " << (options.strict_retry ? 1 : 0) << "\n";
 
@@ -1957,12 +1969,21 @@ int main(int argc, char** argv) {
   int merged_match_idx = -1;
   bool fix_succeeded = false;
   bool trigger_sig_single_kill = false;
+  std::size_t synth_pass = 0;
 
   if (cec_round > 0) {
     cout << "cec_retry_round " << cec_round + 1 << "\n";
   }
 
   while (true) {
+    synth_pass += 1;
+    RuleSynthTelemetry rule_synth_telemetry;
+    auto add_mining_telemetry = [&](const MiningResult& mining_result) {
+      rule_synth_telemetry.dt_builds += mining_result.dt_builds;
+      rule_synth_telemetry.strict_dt_builds += mining_result.strict_dt_builds;
+      rule_synth_telemetry.training_data_builds +=
+          mining_result.training_data_builds;
+    };
     t_phase = std::chrono::steady_clock::now();
     try {
       if (!build_stats_from_groundtruth(golden, working_trojan, groundtruth_path, &stats, &error)) {
@@ -2050,13 +2071,15 @@ int main(int argc, char** argv) {
       candidate_indices.push_back(merged_match_idx);
     }
 
+    const auto t_rule_synth = std::chrono::steady_clock::now();
+
     // --- Virtual node feature preprocessing (iterative multi-pass) ---
     // Virtual features are computed on-the-fly from simulation results.
     // The circuit is NOT modified during the VN iteration phase.
     // After iterations, only used VNs are inserted into the circuit.
     t_phase = std::chrono::steady_clock::now();
     std::vector<VirtualNodeDef> final_vn_defs;  // VN defs for the SAT loop.
-    if (!options.no_virtual) {
+    if (options.rule_method == RuleMethod::vn_retrain) {
       // Collect base candidates (exclude any previously added virtual nodes).
       std::vector<int> base_for_vn;
       base_for_vn.reserve(candidate_indices.size());
@@ -2086,7 +2109,14 @@ int main(int argc, char** argv) {
                                      base_for_vn, phase1_opts,
                                      trojan_rate, extra_neg_patterns, nullptr,
                                      &phase1_result, &phase1_error);
+        add_mining_telemetry(phase1_result);
         if (phase1_ok && !phase1_result.model.rules.empty()) {
+          rule_synth_telemetry.phase_rules =
+              phase1_result.model.rules.size();
+          rule_synth_telemetry.phase_literals =
+              count_model_literals(phase1_result.model);
+          rule_synth_telemetry.phase_depth =
+              phase1_result.model.max_depth_used;
           // Extract circuit node indices actually used by the tree.
           unordered_set<int> used_set;
           for (const auto& rule : phase1_result.model.rules) {
@@ -2155,6 +2185,7 @@ int main(int argc, char** argv) {
                      << "; skipping virtual nodes\n";
                 all_vn_defs.clear();
               }
+              rule_synth_telemetry.vn_generated = all_vn_defs.size();
               cout << "vn_signature_patterns pos " << sig_pos.size()
                    << " neg " << sig_neg.size() << "\n";
               cout << "vn_signature_dp selected " << all_vn_defs.size()
@@ -2189,6 +2220,7 @@ int main(int argc, char** argv) {
                                          trojan_rate, extra_neg_patterns, nullptr,
                                          &iter_result, &iter_error,
                                          &all_vn_defs);
+              add_mining_telemetry(iter_result);
               if (!iter_ok || iter_result.model.rules.empty()) {
                 if (!iter_error.empty()) {
                   cerr << "vn_iter1 error: " << iter_error << "\n";
@@ -2246,6 +2278,7 @@ int main(int argc, char** argv) {
                                      trojan_rate, extra_neg_patterns, nullptr,
                                      &final_vn_result, &final_vn_error,
                                      &final_vn_defs);
+      add_mining_telemetry(final_vn_result);
 
       if (final_vn_ok && !final_vn_result.model.rules.empty()) {
         // Find which VN indices are used in the rules.
@@ -2280,6 +2313,7 @@ int main(int argc, char** argv) {
                << " from " << final_vn_defs.size()
                << " circuit_nodes " << working_trojan.node_count() << "\n";
         }
+        rule_synth_telemetry.vn_used = used_defs.size();
         // Clear final_vn_defs since the used VNs are now in the circuit.
         final_vn_defs.clear();
       }
@@ -2314,6 +2348,7 @@ int main(int argc, char** argv) {
         }
         return 1;
       }
+      add_mining_telemetry(result);
 
       const size_t rules_before = result.model.rules.size();
       simplify_rules(&result.model.rules);
@@ -2324,6 +2359,25 @@ int main(int argc, char** argv) {
       }
     }
     cerr << "[TIMING] final_mining: " << ms_since(t_phase) << " ms\n";
+
+    const double rule_synth_ms = ms_since(t_rule_synth);
+    cout << "rule_synth_summary"
+         << " strategy " << rule_method_name(options.rule_method)
+         << " cec_attempt " << (cec_round + 1)
+         << " synth_pass " << synth_pass
+         << " dt_builds " << rule_synth_telemetry.dt_builds
+         << " strict_dt_builds " << rule_synth_telemetry.strict_dt_builds
+         << " training_data_builds "
+         << rule_synth_telemetry.training_data_builds
+         << " vn_generated " << rule_synth_telemetry.vn_generated
+         << " vn_used " << rule_synth_telemetry.vn_used
+         << " phase_rules " << rule_synth_telemetry.phase_rules
+         << " phase_literals " << rule_synth_telemetry.phase_literals
+         << " phase_depth " << rule_synth_telemetry.phase_depth
+         << " final_rules " << result.model.rules.size()
+         << " final_literals " << count_model_literals(result.model)
+         << " final_depth " << result.model.max_depth_used
+         << " synth_ms " << rule_synth_ms << "\n";
 
     t_phase = std::chrono::steady_clock::now();
     if (!fix_succeeded &&

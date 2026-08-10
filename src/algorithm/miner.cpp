@@ -1370,7 +1370,8 @@ bool run_mining_loop(const circuit& golden,
                      double target_rate,
                      MiningResult* result,
                      std::string* error,
-                     const std::vector<VirtualNodeDef>* virtual_defs = nullptr) {
+                     const std::vector<VirtualNodeDef>* virtual_defs = nullptr,
+                     bool strict_phase = false) {
   const std::size_t total_rounds = std::max<std::size_t>(1, rounds);
   result->feature_nodes = feature_nodes;
   result->hard_added = 0;
@@ -1386,6 +1387,10 @@ bool run_mining_loop(const circuit& golden,
                      &result->train_false_neg,
                      error)) {
       return false;
+    }
+    result->dt_builds += 1;
+    if (strict_phase) {
+      result->strict_dt_builds += 1;
     }
 
     const std::size_t rules_before = result->model.rules.size();
@@ -1475,6 +1480,9 @@ bool run_mining(const circuit& golden,
     }
     return false;
   }
+  result->dt_builds = 0;
+  result->strict_dt_builds = 0;
+  result->training_data_builds = 0;
   if (candidate_gate_indices.empty()) {
     if (error) {
       *error = "No candidate nets available for mining";
@@ -1536,6 +1544,7 @@ bool run_mining(const circuit& golden,
     }
     return false;
   }
+  result->training_data_builds += 1;
   std::cerr << "[TIMING]     build_training_data: " << mine_ms(t_mine) << " ms\n";
   t_mine = std::chrono::steady_clock::now();
 
@@ -1565,15 +1574,19 @@ bool run_mining(const circuit& golden,
     std::vector<int> strict_features = build_feature_nodes(trojan, candidate_gate_indices, true);
     strict_options.max_depth = std::max(options.max_depth, strict_features.size());
     TrainingData strict_data;
-    if (build_training_data(golden,
-                            trojan,
-                            *training_triggers,
-                            strict_features,
-                            extra_neg_patterns,
-                            options.neg_ratio,
-                            &strict_data,
-                            neg_trace,
-                            virtual_defs) &&
+    const bool strict_data_ok = build_training_data(golden,
+                                                    trojan,
+                                                    *training_triggers,
+                                                    strict_features,
+                                                    extra_neg_patterns,
+                                                    options.neg_ratio,
+                                                    &strict_data,
+                                                    neg_trace,
+                                                    virtual_defs);
+    if (strict_data_ok) {
+      result->training_data_builds += 1;
+    }
+    if (strict_data_ok &&
         run_mining_loop(golden,
                         trojan,
                         strict_features,
@@ -1585,7 +1598,8 @@ bool run_mining(const circuit& golden,
                         target_rate,
                         result,
                         error,
-                        virtual_defs)) {
+                        virtual_defs,
+                        true)) {
       std::cout << "strict_features " << strict_features.size()
                 << " strict_depth " << strict_options.max_depth << "\n";
     } else {

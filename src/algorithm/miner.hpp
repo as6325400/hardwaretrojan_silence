@@ -33,6 +33,10 @@ struct MiningResult {
   std::size_t eval_false_pos = 0;
   std::size_t hard_added = 0;
   std::size_t rounds_used = 0;
+  // Completed work counters for machine-readable rule-synthesis telemetry.
+  std::size_t dt_builds = 0;
+  std::size_t strict_dt_builds = 0;
+  std::size_t training_data_builds = 0;
 };
 
 struct NegSampleTrace {
