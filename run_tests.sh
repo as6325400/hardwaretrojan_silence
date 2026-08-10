@@ -13,7 +13,7 @@ PER_TEST_TIMEOUT=300  # 5 minutes per test
 mkdir -p "$OUTPUT_DIR"
 
 # CSV header
-echo "circuit,trojan,success,gt_verify,vn_rounds,runtime_ms,area_delta,level_delta,cec_rounds,strategy,dt_builds,strict_dt_builds,training_data_builds,vn_generated,vn_used,rules,literals,depth,rule_synth_ms" > "$CSV"
+echo "circuit,trojan,success,gt_verify,vn_rounds,runtime_ms,area_delta,level_delta,cec_rounds,strategy,dt_builds,strict_dt_builds,training_data_builds,vn_generated,vn_used,rules,literals,depth,rule_synth_ms,apply_source,rule_model_used,applied_rules,applied_literals,applied_depth,effective_rules,effective_literals,effective_depth" > "$CSV"
 
 summary_last_value() {
     local key="$1"
@@ -38,6 +38,19 @@ summary_sum_value() {
             }
         }
         END { print total + 0 }
+    ' "$file"
+}
+
+apply_last_value() {
+    local key="$1"
+    local file="$2"
+    awk -v key="$key" '
+        /^rule_apply_summary / {
+            for (i = 2; i < NF; i += 2) {
+                if ($i == key) value = $(i + 1)
+            }
+        }
+        END { if (value != "") print value }
     ' "$file"
 }
 
@@ -149,18 +162,27 @@ for gt_file in "$GT"/*/*_error_patterns.json; do
     training_data_builds=$(summary_sum_value training_data_builds "$tmp_out")
     vn_generated=$(summary_sum_value vn_generated "$tmp_out")
     vn_used=$(summary_sum_value vn_used "$tmp_out")
-    rules=$(summary_last_value final_rules "$tmp_out")
-    literals=$(summary_last_value final_literals "$tmp_out")
-    depth=$(summary_last_value final_depth "$tmp_out")
+    # Legacy rules/literals/depth columns remain synthesis-stage values.
+    rules=$(summary_last_value synthesized_rules "$tmp_out")
+    literals=$(summary_last_value synthesized_literals "$tmp_out")
+    depth=$(summary_last_value synthesized_depth "$tmp_out")
     rule_synth_ms=$(summary_sum_value synth_ms "$tmp_out")
     rules=${rules:-""}
     literals=${literals:-""}
     depth=${depth:-""}
+    apply_source=$(apply_last_value source "$tmp_out")
+    rule_model_used=$(apply_last_value rule_model_used "$tmp_out")
+    applied_rules=$(apply_last_value applied_rules "$tmp_out")
+    applied_literals=$(apply_last_value applied_literals "$tmp_out")
+    applied_depth=$(apply_last_value applied_depth "$tmp_out")
+    effective_rules=$(apply_last_value effective_rules "$tmp_out")
+    effective_literals=$(apply_last_value effective_literals "$tmp_out")
+    effective_depth=$(apply_last_value effective_depth "$tmp_out")
 
     # --- append to CSV ---
-    echo "$circuit,$trojan_name,$success,$gt_verify,$vn_rounds,$runtime,$area_delta,$level_delta,$cec_rounds,$strategy,$dt_builds,$strict_dt_builds,$training_data_builds,$vn_generated,$vn_used,$rules,$literals,$depth,$rule_synth_ms" >> "$CSV"
+    echo "$circuit,$trojan_name,$success,$gt_verify,$vn_rounds,$runtime,$area_delta,$level_delta,$cec_rounds,$strategy,$dt_builds,$strict_dt_builds,$training_data_builds,$vn_generated,$vn_used,$rules,$literals,$depth,$rule_synth_ms,$apply_source,$rule_model_used,$applied_rules,$applied_literals,$applied_depth,$effective_rules,$effective_literals,$effective_depth" >> "$CSV"
 
-    echo "$success  gt=$gt_verify  strategy=$strategy  dt_builds=$dt_builds  vn_passes=$vn_rounds  cec=$cec_rounds  rules=$rules/$literals/$depth  time=${runtime}ms  area=$area_delta  level=$level_delta"
+    echo "$success  gt=$gt_verify  strategy=$strategy  dt_builds=$dt_builds  vn_passes=$vn_rounds  cec=$cec_rounds  synth=$rules/$literals/$depth  effective=$effective_rules/$effective_literals/$effective_depth  time=${runtime}ms  area=$area_delta  level=$level_delta"
 
     rm -f "$tmp_out" "$tmp_err"
 done
