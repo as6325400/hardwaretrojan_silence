@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <chrono>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -826,18 +827,51 @@ vector<int> build_signature_base_pool(const PatternStats& stats,
   return pool;
 }
 
-struct RuleKillAction {
-  int node_idx = -1;
-  int kill_value = 0;
-  uint64_t cover_mask = 0;
-  double cost = 0.0;
-  std::size_t fanout = 0;
+using SigWord = packed_circuit::word_t;
+
+struct TriggerSignatureContext {
+  std::vector<int> nodes;
+  std::unordered_map<int, std::size_t> node_pos;
+  std::vector<SigWord> node_sigs;
+  std::vector<SigWord> target_sig;
+  std::size_t pos_count = 0;
+  std::size_t neg_count = 0;
+  std::size_t total_count = 0;
+  std::size_t words = 0;
+  SigWord last_mask = 0;
 };
 
-struct RuleKillPlan {
-  std::vector<std::size_t> actions;
+struct TriggerSigStats {
+  std::size_t rules_before = 0;
+  std::size_t rules_after = 0;
+  std::size_t literals_before = 0;
+  std::size_t literals_after = 0;
+  std::size_t single_model = 0;
+  std::size_t single_rule = 0;
+  std::size_t hit_rules = 0;
+  std::size_t exact_mismatches = 0;
+};
+
+struct LiteralPatchCutCandidate {
+  int node_idx = -1;
+  int forced_value = 0;
+  int expected = 0;
+  std::size_t feature_idx = 0;
+  std::size_t cover_count = 0;
+  uint64_t cover_mask = 0;
+  std::size_t fanout = 0;
   double cost = 0.0;
 };
+
+std::size_t count_model_literals(const DecisionTreeModel& model) {
+  std::size_t total = 0;
+  for (const auto& rule : model.rules) {
+    total += rule.terms.size();
+  }
+  return total;
+}
+
+DecisionTreeRule make_literal_rule(std::size_t feature_idx, int expected);
 
 bool is_virtual_node_name(const std::string& name) {
   return name.size() >= 3 && name[0] == 'v' && name[1] == 'n' &&
@@ -872,10 +906,10 @@ std::vector<std::size_t> compute_fanout_counts(const circuit& net) {
   return fanout;
 }
 
-double rule_kill_action_cost(const circuit& net,
-                             int node_idx,
-                             std::size_t fanout,
-                             std::size_t cover_count) {
+double literal_patch_cut_cost(const circuit& net,
+                              int node_idx,
+                              std::size_t fanout,
+                              std::size_t cover_count) {
   const cell& c = net.get_cell(node_idx);
   double cost = 1000.0;
   cost += static_cast<double>(fanout) * 80.0;
@@ -893,289 +927,965 @@ double rule_kill_action_cost(const circuit& net,
   return cost;
 }
 
-bool solve_rule_kill_dp(const std::vector<RuleKillAction>& actions,
-                        uint64_t full_mask,
-                        std::size_t rule_count,
-                        const std::vector<char>& banned,
-                        RuleKillPlan* out) {
-  if (!out || rule_count > 16) {
-    return false;
-  }
-  out->actions.clear();
-  out->cost = 0.0;
-  const std::size_t state_count = std::size_t{1} << rule_count;
-  const double inf = std::numeric_limits<double>::infinity();
-  std::vector<double> dp(state_count, inf);
-  std::vector<uint64_t> prev_mask(state_count, 0);
-  std::vector<int> prev_action(state_count, -1);
-  dp[0] = 0.0;
-  for (std::size_t mask = 0; mask < state_count; ++mask) {
-    if (!std::isfinite(dp[mask])) {
-      continue;
-    }
-    for (std::size_t ai = 0; ai < actions.size(); ++ai) {
-      if (!banned.empty() && banned[ai]) {
-        continue;
-      }
-      const uint64_t next_mask =
-          static_cast<uint64_t>(mask) | actions[ai].cover_mask;
-      const double next_cost = dp[mask] + actions[ai].cost;
-      if (next_cost + 1.0e-9 < dp[static_cast<std::size_t>(next_mask)]) {
-        dp[static_cast<std::size_t>(next_mask)] = next_cost;
-        prev_mask[static_cast<std::size_t>(next_mask)] =
-            static_cast<uint64_t>(mask);
-        prev_action[static_cast<std::size_t>(next_mask)] =
-            static_cast<int>(ai);
-      }
-    }
-  }
-  const std::size_t full = static_cast<std::size_t>(full_mask);
-  if (!std::isfinite(dp[full])) {
-    return false;
-  }
-  std::vector<std::size_t> selected;
-  uint64_t cur = full_mask;
-  while (cur != 0) {
-    const int ai = prev_action[static_cast<std::size_t>(cur)];
-    if (ai < 0) {
-      return false;
-    }
-    selected.push_back(static_cast<std::size_t>(ai));
-    cur = prev_mask[static_cast<std::size_t>(cur)];
-  }
-  std::reverse(selected.begin(), selected.end());
-  out->actions = std::move(selected);
-  out->cost = dp[full];
-  return true;
+uint64_t literal_patch_cut_key(int node_idx, int forced_value) {
+  return (static_cast<uint64_t>(static_cast<uint32_t>(node_idx)) << 1) |
+         static_cast<uint64_t>(forced_value & 1);
 }
 
-bool solve_rule_kill_greedy(const std::vector<RuleKillAction>& actions,
-                            uint64_t full_mask,
-                            const std::vector<char>& banned,
-                            RuleKillPlan* out) {
-  if (!out) {
-    return false;
-  }
-  out->actions.clear();
-  out->cost = 0.0;
-  uint64_t covered = 0;
-  std::vector<char> used(actions.size(), 0);
-  while (covered != full_mask) {
-    int best = -1;
-    double best_score = -1.0;
-    for (std::size_t ai = 0; ai < actions.size(); ++ai) {
-      if (used[ai] || (!banned.empty() && banned[ai])) {
-        continue;
-      }
-      const uint64_t gain_mask = actions[ai].cover_mask & ~covered;
-      const int gain = __builtin_popcountll(gain_mask);
-      if (gain == 0) {
-        continue;
-      }
-      const double score =
-          static_cast<double>(gain) * 10000.0 /
-          std::max(1.0, actions[ai].cost);
-      if (score > best_score + 1.0e-12 ||
-          (std::fabs(score - best_score) <= 1.0e-12 &&
-           actions[ai].cost < actions[static_cast<std::size_t>(best)].cost)) {
-        best = static_cast<int>(ai);
-        best_score = score;
-      }
-    }
-    if (best < 0) {
-      return false;
-    }
-    const std::size_t best_idx = static_cast<std::size_t>(best);
-    used[best_idx] = 1;
-    out->actions.push_back(best_idx);
-    out->cost += actions[best_idx].cost;
-    covered |= actions[best_idx].cover_mask;
-  }
-  return true;
-}
-
-std::string rule_kill_plan_key(const RuleKillPlan& plan) {
-  std::vector<std::size_t> sorted = plan.actions;
-  std::sort(sorted.begin(), sorted.end());
-  std::string key;
-  for (std::size_t ai : sorted) {
-    key += std::to_string(ai);
-    key += ',';
-  }
-  return key;
-}
-
-std::vector<RuleKillPlan> build_rule_kill_plans(
+std::vector<LiteralPatchCutCandidate> collect_literal_patch_cut_candidates(
     const circuit& net,
-    const std::vector<int>& feature_nodes,
-    const DecisionTreeModel& model,
-    std::vector<RuleKillAction>* actions_out,
-    std::string* reason) {
-  if (reason) {
-    reason->clear();
-  }
-  if (actions_out) {
-    actions_out->clear();
-  }
-  std::vector<RuleKillPlan> plans;
-  const std::size_t rule_count = model.rules.size();
+    const MiningResult& result) {
+  std::vector<LiteralPatchCutCandidate> candidates;
+  const std::size_t rule_count = result.model.rules.size();
   if (rule_count == 0) {
-    if (reason) *reason = "no rules";
-    return plans;
-  }
-  if (rule_count > 63) {
-    if (reason) *reason = "too many rules for rule-kill bitmask";
-    return plans;
+    return candidates;
   }
 
-  const std::vector<std::size_t> fanout = compute_fanout_counts(net);
-  struct ActionBuilder {
-    int node_idx = -1;
-    int kill_value = 0;
-    uint64_t cover_mask = 0;
-  };
-  std::vector<ActionBuilder> builders;
-  std::unordered_map<uint64_t, std::size_t> action_pos;
+  std::unordered_map<uint64_t, std::size_t> by_key;
+  by_key.reserve(count_model_literals(result.model) + 1);
 
-  for (std::size_t ri = 0; ri < model.rules.size(); ++ri) {
-    const auto& rule = model.rules[ri];
-    for (const auto& term : rule.terms) {
-      if (term.first >= feature_nodes.size()) {
+  for (std::size_t ri = 0; ri < rule_count; ++ri) {
+    std::unordered_set<uint64_t> seen_in_rule;
+    for (const auto& term : result.model.rules[ri].terms) {
+      if (term.first >= result.feature_nodes.size()) {
         continue;
       }
-      const int node_idx = feature_nodes[term.first];
-      if (node_idx < 0 || static_cast<std::size_t>(node_idx) >= net.node_count()) {
+      const int node_idx = result.feature_nodes[term.first];
+      if (node_idx < 0 ||
+          static_cast<std::size_t>(node_idx) >= net.node_count()) {
+        continue;
+      }
+      const std::string& name = net.node_name(node_idx);
+      if (is_virtual_node_name(name)) {
         continue;
       }
       const cell& c = net.get_cell(node_idx);
       if (c.ctype != CType::GATE) {
         continue;
       }
-      if (is_virtual_node_name(net.node_name(node_idx))) {
+
+      const int expected = term.second ? 1 : 0;
+      const int forced_value = expected ? 0 : 1;
+      const uint64_t key = literal_patch_cut_key(node_idx, forced_value);
+      if (!seen_in_rule.insert(key).second) {
         continue;
       }
-      const int expected = term.second ? 1 : 0;
-      const int kill_value = expected ? 0 : 1;
-      const uint64_t key =
-          (static_cast<uint64_t>(static_cast<unsigned int>(node_idx)) << 1) |
-          static_cast<uint64_t>(kill_value);
-      auto it = action_pos.find(key);
-      if (it == action_pos.end()) {
-        action_pos[key] = builders.size();
-        builders.push_back(ActionBuilder{node_idx, kill_value, 0});
-        it = action_pos.find(key);
+
+      auto it = by_key.find(key);
+      if (it == by_key.end()) {
+        LiteralPatchCutCandidate cand;
+        cand.node_idx = node_idx;
+        cand.forced_value = forced_value;
+        cand.expected = expected;
+        cand.feature_idx = term.first;
+        candidates.push_back(cand);
+        const std::size_t pos = candidates.size() - 1;
+        by_key.emplace(key, pos);
+        it = by_key.find(key);
       }
-      builders[it->second].cover_mask |= (uint64_t{1} << ri);
+
+      LiteralPatchCutCandidate& cand = candidates[it->second];
+      cand.cover_count += 1;
+      if (ri < 64) {
+        cand.cover_mask |= (uint64_t{1} << ri);
+      }
     }
   }
 
-  std::vector<RuleKillAction> actions;
-  actions.reserve(builders.size());
-  for (const auto& b : builders) {
-    if (b.cover_mask == 0) {
+  std::vector<LiteralPatchCutCandidate> covering;
+  covering.reserve(candidates.size());
+  const std::vector<std::size_t> fanout = compute_fanout_counts(net);
+  for (auto& cand : candidates) {
+    if (cand.cover_count != rule_count) {
       continue;
     }
-    const std::size_t cover_count =
-        static_cast<std::size_t>(__builtin_popcountll(b.cover_mask));
-    const std::size_t fo =
-        static_cast<std::size_t>(b.node_idx) < fanout.size()
-            ? fanout[static_cast<std::size_t>(b.node_idx)]
-            : 0;
-    actions.push_back(RuleKillAction{
-        b.node_idx,
-        b.kill_value,
-        b.cover_mask,
-        rule_kill_action_cost(net, b.node_idx, fo, cover_count),
-        fo});
+    cand.fanout = fanout[static_cast<std::size_t>(cand.node_idx)];
+    cand.cost = literal_patch_cut_cost(net,
+                                       cand.node_idx,
+                                       cand.fanout,
+                                       cand.cover_count);
+    covering.push_back(cand);
   }
-  std::sort(actions.begin(), actions.end(),
-            [&](const RuleKillAction& a, const RuleKillAction& b) {
+
+  std::sort(covering.begin(), covering.end(),
+            [](const LiteralPatchCutCandidate& a,
+               const LiteralPatchCutCandidate& b) {
               if (std::fabs(a.cost - b.cost) > 1.0e-9) {
                 return a.cost < b.cost;
               }
-              return net.node_name(a.node_idx) < net.node_name(b.node_idx);
+              if (a.fanout != b.fanout) {
+                return a.fanout < b.fanout;
+              }
+              return a.node_idx < b.node_idx;
             });
+  return covering;
+}
 
-  const uint64_t full_mask =
-      rule_count == 64 ? ~uint64_t{0} : ((uint64_t{1} << rule_count) - 1);
-  uint64_t union_cover = 0;
-  for (const auto& action : actions) {
-    union_cover |= action.cover_mask;
+bool try_verified_literal_patch_cut(const circuit& golden,
+                                    const circuit& base,
+                                    const PatternStats& stats,
+                                    const MiningResult& result,
+                                    circuit* patched_out,
+                                    int* selected_node,
+                                    int* forced_value,
+                                    long long* delta_area,
+                                    long long* delta_level,
+                                    std::string* error) {
+  if (error) {
+    error->clear();
   }
-  if ((union_cover & full_mask) != full_mask) {
-    if (reason) *reason = "rule literals do not cover all rules";
-    if (actions_out) *actions_out = std::move(actions);
-    return plans;
+  if (!patched_out) {
+    if (error) *error = "literal patch cut output pointer is null";
+    return false;
+  }
+  if (stats.trigger_patterns.empty()) {
+    if (error) *error = "no trigger patterns for literal patch cut";
+    return false;
   }
 
-  const std::size_t kMaxPlans = 4;
-  std::unordered_set<std::string> seen_plans;
-  auto add_plan = [&](const RuleKillPlan& plan) {
-    if (plan.actions.empty()) {
-      return;
-    }
-    const std::string key = rule_kill_plan_key(plan);
-    if (seen_plans.insert(key).second) {
-      plans.push_back(plan);
-    }
-  };
+  std::vector<LiteralPatchCutCandidate> candidates =
+      collect_literal_patch_cut_candidates(base, result);
+  cout << "literal_patch_cut_candidates " << candidates.size()
+       << " rules " << result.model.rules.size() << "\n";
+  if (candidates.empty()) {
+    if (error) *error = "no single literal covers every rule";
+    return false;
+  }
 
-  if (rule_count == 1) {
-    for (std::size_t ai = 0; ai < actions.size() && plans.size() < kMaxPlans;
-         ++ai) {
-      if ((actions[ai].cover_mask & full_mask) == full_mask) {
-        RuleKillPlan plan;
-        plan.actions.push_back(ai);
-        plan.cost = actions[ai].cost;
-        add_plan(plan);
+  std::size_t base_area = 0;
+  std::size_t base_level = 0;
+  try {
+    circuit base_eval = base;
+    base_eval.ensure_eval_order();
+    base_area = base_eval.area();
+    base_level = base_eval.level();
+  } catch (const std::exception& e) {
+    if (error) *error = std::string("literal patch cut baseline error: ") + e.what();
+    return false;
+  }
+
+  constexpr std::size_t kMaxLiteralPatchCutTries = 16;
+  std::size_t tried = 0;
+  for (const LiteralPatchCutCandidate& cand : candidates) {
+    if (tried >= kMaxLiteralPatchCutTries) {
+      break;
+    }
+    tried += 1;
+
+    circuit trial = base;
+    try {
+      trial.force_gate_const(cand.node_idx, cand.forced_value);
+    } catch (const std::exception& e) {
+      cerr << "literal_patch_cut_try "
+           << base.node_name(cand.node_idx)
+           << " forced " << cand.forced_value
+           << " failed: " << e.what() << "\n";
+      continue;
+    }
+
+    std::size_t mismatch_index = 0;
+    std::string verify_error;
+    const auto verify_start = std::chrono::steady_clock::now();
+    const bool verified = verify_patch_groundtruth(golden,
+                                                   trial,
+                                                   stats.trigger_patterns,
+                                                   &mismatch_index,
+                                                   &verify_error);
+    const double verify_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - verify_start).count();
+    if (!verified) {
+      cerr << "[TIMING]   literal_patch_cut_verify: "
+           << verify_ms << " ms (FAIL)\n";
+      cerr << "literal_patch_cut_try "
+           << base.node_name(cand.node_idx)
+           << " forced " << cand.forced_value
+           << " failed: " << verify_error;
+      if (!stats.trigger_patterns.empty()) {
+        cerr << " pattern " << mismatch_index;
       }
+      cerr << "\n";
+      continue;
+    }
+    cerr << "[TIMING]   final_verify: "
+         << verify_ms << " ms (PASS)\n";
+
+    std::size_t trial_area = 0;
+    std::size_t trial_level = 0;
+    try {
+      trial.ensure_eval_order();
+      trial_area = trial.area();
+      trial_level = trial.level();
+    } catch (const std::exception& e) {
+      cerr << "literal_patch_cut area/level error: " << e.what() << "\n";
+      continue;
+    }
+
+    cout << "literal_patch_cut_selected "
+         << base.node_name(cand.node_idx)
+         << " forced " << cand.forced_value
+         << " covers " << cand.cover_count
+         << " fanout " << cand.fanout
+         << " cost " << cand.cost << "\n";
+
+    if (selected_node) {
+      *selected_node = cand.node_idx;
+    }
+    if (forced_value) {
+      *forced_value = cand.forced_value;
+    }
+    if (delta_area) {
+      *delta_area = static_cast<long long>(trial_area) -
+                    static_cast<long long>(base_area);
+    }
+    if (delta_level) {
+      *delta_level = static_cast<long long>(trial_level) -
+                     static_cast<long long>(base_level);
+    }
+    *patched_out = std::move(trial);
+    return true;
+  }
+
+  if (error) {
+    *error = "no verified single literal patch cut";
+  }
+  return false;
+}
+
+bool literal_rejects_extra_negatives(const circuit& trojan,
+                                     int node_idx,
+                                     int expected,
+                                     const std::vector<std::vector<int>>& extra_neg_patterns) {
+  if (extra_neg_patterns.empty()) {
+    return true;
+  }
+  circuit sim_net = trojan;
+  packed_circuit sim(sim_net);
+  sim.prepare_batch();
+  std::size_t offset = 0;
+  while (offset < extra_neg_patterns.size()) {
+    const std::size_t block =
+        std::min<std::size_t>(packed_circuit::kWordBits,
+                              extra_neg_patterns.size() - offset);
+    std::vector<std::vector<int>> patterns;
+    patterns.reserve(block);
+    for (std::size_t i = 0; i < block; ++i) {
+      if (extra_neg_patterns[offset + i].size() != trojan.pi_count()) {
+        return false;
+      }
+      patterns.push_back(extra_neg_patterns[offset + i]);
+    }
+    try {
+      sim.simulate(patterns);
+    } catch (const std::exception&) {
+      return false;
+    }
+    const SigWord mask = packed_circuit::mask_for_count(block);
+    const SigWord bits = sim.node_bits(node_idx) & mask;
+    const SigWord literal_bits = expected ? bits : ((~bits) & mask);
+    if (literal_bits != 0) {
+      return false;
+    }
+    offset += block;
+  }
+  return true;
+}
+
+bool literal_matches_stats_trigger(const circuit& trojan,
+                                   const PatternStats& stats,
+                                   const std::vector<std::vector<int>>& extra_neg_patterns,
+                                   int node_idx,
+                                   int expected) {
+  if (node_idx < 0 || static_cast<std::size_t>(node_idx) >= trojan.node_count()) {
+    return false;
+  }
+  const cell& c = trojan.get_cell(node_idx);
+  if (c.ctype != CType::GATE) {
+    return false;
+  }
+  auto it = std::find(stats.gate_indices.begin(),
+                      stats.gate_indices.end(),
+                      node_idx);
+  if (it == stats.gate_indices.end()) {
+    return false;
+  }
+  const std::size_t pos =
+      static_cast<std::size_t>(std::distance(stats.gate_indices.begin(), it));
+  if (expected) {
+    if (stats.ones_trigger[pos] != stats.trigger_patterns_total ||
+        stats.ones_notrigger[pos] != 0) {
+      return false;
     }
   } else {
-    RuleKillPlan best;
-    std::vector<char> banned(actions.size(), 0);
-    const bool exact = rule_count <= 16;
-    bool ok = exact ? solve_rule_kill_dp(actions, full_mask, rule_count,
-                                         banned, &best)
-                    : solve_rule_kill_greedy(actions, full_mask, banned,
-                                             &best);
-    if (ok) {
-      add_plan(best);
-      const std::vector<std::size_t> base_actions = best.actions;
-      for (std::size_t banned_action : base_actions) {
-        if (plans.size() >= kMaxPlans || banned_action >= actions.size()) {
-          break;
-        }
-        std::fill(banned.begin(), banned.end(), 0);
-        banned[banned_action] = 1;
-        RuleKillPlan alt;
-        ok = exact ? solve_rule_kill_dp(actions, full_mask, rule_count,
-                                        banned, &alt)
-                   : solve_rule_kill_greedy(actions, full_mask, banned,
-                                            &alt);
-        if (ok) {
-          add_plan(alt);
-        }
+    if (stats.ones_trigger[pos] != 0 ||
+        stats.ones_notrigger[pos] != stats.notrigger_patterns_total) {
+      return false;
+    }
+  }
+  return literal_rejects_extra_negatives(trojan,
+                                         node_idx,
+                                         expected,
+                                         extra_neg_patterns);
+}
+
+bool reduce_model_to_stats_literal(const circuit& trojan,
+                                   const PatternStats& stats,
+                                   const std::vector<std::vector<int>>& extra_neg_patterns,
+                                   MiningResult* result) {
+  if (!result) {
+    return false;
+  }
+  for (const auto& rule : result->model.rules) {
+    for (const auto& term : rule.terms) {
+      if (term.first >= result->feature_nodes.size()) {
+        continue;
+      }
+      const int node_idx = result->feature_nodes[term.first];
+      const int expected = term.second ? 1 : 0;
+      if (!literal_matches_stats_trigger(trojan,
+                                         stats,
+                                         extra_neg_patterns,
+                                         node_idx,
+                                         expected)) {
+        continue;
+      }
+      const std::size_t feature_idx = term.first;
+      result->model.rules.clear();
+      result->model.rules.push_back(make_literal_rule(feature_idx, expected));
+      result->model.leaf_count = result->model.rules.size();
+      cout << "trigger_stats_literal "
+           << trojan.node_name(node_idx)
+           << "=" << expected << "\n";
+      return true;
+    }
+  }
+  return false;
+}
+
+SigWord word_mask_for(const TriggerSignatureContext& ctx, std::size_t w) {
+  return (w + 1 == ctx.words) ? ctx.last_mask : ~SigWord(0);
+}
+
+const SigWord* node_sig_ptr(const TriggerSignatureContext& ctx,
+                            std::size_t node_pos) {
+  return ctx.node_sigs.data() + node_pos * ctx.words;
+}
+
+bool sig_equal_to_words(const std::vector<SigWord>& a,
+                        const SigWord* b,
+                        const TriggerSignatureContext& ctx) {
+  if (a.size() != ctx.words) {
+    return false;
+  }
+  for (std::size_t w = 0; w < ctx.words; ++w) {
+    const SigWord mask = word_mask_for(ctx, w);
+    if ((a[w] & mask) != (b[w] & mask)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool sig_equal(const std::vector<SigWord>& a,
+               const std::vector<SigWord>& b,
+               const TriggerSignatureContext& ctx) {
+  if (a.size() != ctx.words || b.size() != ctx.words) {
+    return false;
+  }
+  for (std::size_t w = 0; w < ctx.words; ++w) {
+    const SigWord mask = word_mask_for(ctx, w);
+    if ((a[w] & mask) != (b[w] & mask)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::size_t sig_mismatch_count(const std::vector<SigWord>& a,
+                               const std::vector<SigWord>& b,
+                               const TriggerSignatureContext& ctx) {
+  std::size_t count = 0;
+  for (std::size_t w = 0; w < ctx.words; ++w) {
+    const SigWord mask = word_mask_for(ctx, w);
+    count += static_cast<std::size_t>(
+        __builtin_popcountll((a[w] ^ b[w]) & mask));
+  }
+  return count;
+}
+
+int sig_bit(const std::vector<SigWord>& sig, std::size_t row) {
+  return static_cast<int>((sig[row / 64] >> (row % 64)) & SigWord(1));
+}
+
+int literal_bit(const TriggerSignatureContext& ctx,
+                std::size_t node_pos,
+                int expected,
+                std::size_t row) {
+  const SigWord* sig = node_sig_ptr(ctx, node_pos);
+  const int bit = static_cast<int>((sig[row / 64] >> (row % 64)) & SigWord(1));
+  return expected ? bit : (bit ? 0 : 1);
+}
+
+void collect_signature_nontrigger_patterns(
+    const circuit& golden,
+    const circuit& trojan,
+    std::size_t target_count,
+    std::vector<std::vector<int>>* out) {
+  if (!out || out->size() >= target_count || target_count == 0) {
+    return;
+  }
+
+  circuit golden_eval = golden;
+  circuit trojan_eval = trojan;
+  packed_circuit golden_packed(golden_eval);
+  packed_circuit trojan_packed(trojan_eval);
+  golden_packed.prepare_batch();
+  trojan_packed.prepare_batch();
+
+  std::mt19937_64 rng(0x7631a5f00dULL);
+  const std::size_t pi_count = golden.pi_count();
+  const std::size_t max_attempts = target_count * 200 + 2000;
+  std::vector<SigWord> pi_bits(pi_count, 0);
+  std::size_t attempts = 0;
+
+  while (out->size() < target_count && attempts < max_attempts) {
+    const std::size_t block_size =
+        std::min<std::size_t>(packed_circuit::kWordBits,
+                              max_attempts - attempts);
+    if (block_size == 0) {
+      break;
+    }
+    for (std::size_t i = 0; i < pi_count; ++i) {
+      pi_bits[i] = rng();
+    }
+
+    try {
+      golden_packed.simulate_bits_fast(pi_bits.data(), block_size);
+      trojan_packed.simulate_bits_fast(pi_bits.data(), block_size);
+    } catch (const std::exception&) {
+      attempts += block_size;
+      continue;
+    }
+
+    const SigWord mask = packed_circuit::mask_for_count(block_size);
+    SigWord diff = 0;
+    for (std::size_t o = 0; o < trojan_eval.po_count(); ++o) {
+      diff |= (golden_packed.po_bits(o) ^ trojan_packed.po_bits(o));
+    }
+    SigWord accept = mask & ~diff;
+    while (accept && out->size() < target_count) {
+      const SigWord lsb = accept & (~accept + SigWord(1));
+      const std::size_t bit =
+          static_cast<std::size_t>(__builtin_ctzll(lsb));
+      std::vector<int> pattern(pi_count, 0);
+      for (std::size_t i = 0; i < pi_count; ++i) {
+        pattern[i] = static_cast<int>((pi_bits[i] >> bit) & SigWord(1));
+      }
+      out->push_back(std::move(pattern));
+      accept &= (accept - 1);
+    }
+    attempts += block_size;
+  }
+}
+
+bool build_trigger_signature_context(
+    const circuit& golden,
+    const circuit& trojan,
+    const PatternStats& stats,
+    const std::vector<std::vector<int>>& extra_neg_patterns,
+    const std::vector<int>& model_feature_nodes,
+    const std::vector<int>& candidate_nodes,
+    TriggerSignatureContext* ctx,
+    std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (!ctx) {
+    if (error) *error = "signature context output pointer is null";
+    return false;
+  }
+  *ctx = TriggerSignatureContext{};
+  if (stats.trigger_patterns.empty()) {
+    if (error) *error = "no trigger patterns for signature minimization";
+    return false;
+  }
+
+  constexpr std::size_t kMaxSignatureNegatives = 65536;
+  std::vector<std::vector<int>> neg_patterns;
+  neg_patterns.reserve(std::min(kMaxSignatureNegatives,
+                                extra_neg_patterns.size() + stats.trigger_patterns.size()));
+  for (const auto& pat : extra_neg_patterns) {
+    if (pat.size() == golden.pi_count()) {
+      neg_patterns.push_back(pat);
+      if (neg_patterns.size() >= kMaxSignatureNegatives) {
+        break;
       }
     }
   }
+  const std::size_t target_neg =
+      std::min<std::size_t>(kMaxSignatureNegatives,
+                            std::max<std::size_t>(stats.trigger_patterns.size(), 64));
+  collect_signature_nontrigger_patterns(golden, trojan, target_neg,
+                                        &neg_patterns);
 
-  std::sort(plans.begin(), plans.end(),
-            [](const RuleKillPlan& a, const RuleKillPlan& b) {
-              if (std::fabs(a.cost - b.cost) > 1.0e-9) {
-                return a.cost < b.cost;
-              }
-              return a.actions.size() < b.actions.size();
-            });
-  if (plans.size() > kMaxPlans) {
-    plans.resize(kMaxPlans);
+  ctx->pos_count = stats.trigger_patterns.size();
+  ctx->neg_count = neg_patterns.size();
+  ctx->total_count = ctx->pos_count + ctx->neg_count;
+  ctx->words = (ctx->total_count + 63) / 64;
+  ctx->last_mask =
+      packed_circuit::mask_for_count(ctx->total_count % 64 == 0
+                                         ? 64
+                                         : ctx->total_count % 64);
+  if (ctx->words == 0 || ctx->total_count == 0) {
+    if (error) *error = "empty signature pattern set";
+    return false;
   }
-  if (actions_out) {
-    *actions_out = std::move(actions);
+
+  auto add_node = [&](int idx) {
+    if (idx < 0 || static_cast<std::size_t>(idx) >= trojan.node_count()) {
+      return;
+    }
+    const cell& c = trojan.get_cell(idx);
+    if (c.ctype == CType::UNDEF) {
+      return;
+    }
+    if (ctx->node_pos.find(idx) != ctx->node_pos.end()) {
+      return;
+    }
+    ctx->node_pos[idx] = ctx->nodes.size();
+    ctx->nodes.push_back(idx);
+  };
+  for (int idx : model_feature_nodes) {
+    add_node(idx);
   }
-  if (plans.empty() && reason) {
-    *reason = "no cover plan found";
+  for (int idx : candidate_nodes) {
+    add_node(idx);
   }
-  return plans;
+  if (ctx->nodes.empty()) {
+    if (error) *error = "no nodes for signature minimization";
+    return false;
+  }
+
+  ctx->target_sig.assign(ctx->words, 0);
+  ctx->node_sigs.assign(ctx->nodes.size() * ctx->words, 0);
+
+  circuit sim_net = trojan;
+  packed_circuit sim(sim_net);
+  sim.prepare_batch();
+  std::vector<SigWord> pi_bits(trojan.pi_count(), 0);
+
+  for (std::size_t offset = 0; offset < ctx->total_count; offset += 64) {
+    const std::size_t block_count =
+        std::min<std::size_t>(64, ctx->total_count - offset);
+    std::fill(pi_bits.begin(), pi_bits.end(), SigWord(0));
+    for (std::size_t b = 0; b < block_count; ++b) {
+      const std::size_t row = offset + b;
+      const std::vector<int>& pattern =
+          row < ctx->pos_count ? stats.trigger_patterns[row]
+                               : neg_patterns[row - ctx->pos_count];
+      if (pattern.size() != pi_bits.size()) {
+        if (error) *error = "signature pattern PI count mismatch";
+        return false;
+      }
+      if (row < ctx->pos_count) {
+        ctx->target_sig[offset / 64] |= (SigWord(1) << b);
+      }
+      for (std::size_t pi = 0; pi < pi_bits.size(); ++pi) {
+        if (pattern[pi]) {
+          pi_bits[pi] |= (SigWord(1) << b);
+        }
+      }
+    }
+
+    try {
+      sim.simulate_bits_fast(pi_bits.data(), block_count);
+    } catch (const std::exception& e) {
+      if (error) *error = std::string("signature simulation error: ") + e.what();
+      return false;
+    }
+
+    const SigWord mask = packed_circuit::mask_for_count(block_count);
+    const std::size_t word = offset / 64;
+    for (std::size_t ni = 0; ni < ctx->nodes.size(); ++ni) {
+      ctx->node_sigs[ni * ctx->words + word] =
+          sim.node_bits(ctx->nodes[ni]) & mask;
+    }
+  }
+
+  return true;
+}
+
+bool compute_rule_signature(const TriggerSignatureContext& ctx,
+                            const std::vector<int>& feature_nodes,
+                            const DecisionTreeRule& rule,
+                            std::vector<SigWord>* out) {
+  if (!out) {
+    return false;
+  }
+  out->assign(ctx.words, 0);
+  for (std::size_t w = 0; w < ctx.words; ++w) {
+    (*out)[w] = word_mask_for(ctx, w);
+  }
+  for (const auto& term : rule.terms) {
+    if (term.first >= feature_nodes.size()) {
+      return false;
+    }
+    auto it = ctx.node_pos.find(feature_nodes[term.first]);
+    if (it == ctx.node_pos.end()) {
+      return false;
+    }
+    const SigWord* sig = node_sig_ptr(ctx, it->second);
+    for (std::size_t w = 0; w < ctx.words; ++w) {
+      const SigWord mask = word_mask_for(ctx, w);
+      const SigWord lit = term.second ? sig[w] : ((~sig[w]) & mask);
+      (*out)[w] &= lit;
+    }
+  }
+  return true;
+}
+
+bool compute_model_signature(const TriggerSignatureContext& ctx,
+                             const std::vector<int>& feature_nodes,
+                             const DecisionTreeModel& model,
+                             std::vector<SigWord>* out) {
+  if (!out) {
+    return false;
+  }
+  out->assign(ctx.words, 0);
+  std::vector<SigWord> rule_sig;
+  for (const auto& rule : model.rules) {
+    if (!compute_rule_signature(ctx, feature_nodes, rule, &rule_sig)) {
+      return false;
+    }
+    for (std::size_t w = 0; w < ctx.words; ++w) {
+      (*out)[w] |= rule_sig[w];
+      (*out)[w] &= word_mask_for(ctx, w);
+    }
+  }
+  return true;
+}
+
+bool find_literal_for_signature(const TriggerSignatureContext& ctx,
+                                const std::vector<SigWord>& target,
+                                int* node_idx,
+                                int* expected) {
+  if (node_idx) *node_idx = -1;
+  if (expected) *expected = 1;
+  for (std::size_t ni = 0; ni < ctx.nodes.size(); ++ni) {
+    const SigWord* sig = node_sig_ptr(ctx, ni);
+    if (sig_equal_to_words(target, sig, ctx)) {
+      if (node_idx) *node_idx = ctx.nodes[ni];
+      if (expected) *expected = 1;
+      return true;
+    }
+    bool inv_equal = true;
+    for (std::size_t w = 0; w < ctx.words; ++w) {
+      const SigWord mask = word_mask_for(ctx, w);
+      if ((target[w] & mask) != ((~sig[w]) & mask)) {
+        inv_equal = false;
+        break;
+      }
+    }
+    if (inv_equal) {
+      if (node_idx) *node_idx = ctx.nodes[ni];
+      if (expected) *expected = 0;
+      return true;
+    }
+  }
+  return false;
+}
+
+std::size_t ensure_feature_for_node(std::vector<int>* feature_nodes,
+                                    int node_idx) {
+  for (std::size_t i = 0; i < feature_nodes->size(); ++i) {
+    if ((*feature_nodes)[i] == node_idx) {
+      return i;
+    }
+  }
+  feature_nodes->push_back(node_idx);
+  return feature_nodes->size() - 1;
+}
+
+DecisionTreeRule make_literal_rule(std::size_t feature_idx, int expected) {
+  DecisionTreeRule rule;
+  rule.terms.push_back({feature_idx, expected ? 1 : 0});
+  return rule;
+}
+
+bool solve_hitting_set_exact(const std::vector<uint64_t>& constraints,
+                             std::size_t term_count,
+                             uint64_t* out_subset) {
+  if (!out_subset || term_count == 0 || term_count > 22) {
+    return false;
+  }
+  auto hits_all = [&](uint64_t subset) {
+    for (uint64_t c : constraints) {
+      if ((subset & c) == 0) {
+        return false;
+      }
+    }
+    return true;
+  };
+  for (std::size_t want = 1; want <= term_count; ++want) {
+    bool found = false;
+    uint64_t found_subset = 0;
+    std::function<void(std::size_t, std::size_t, uint64_t)> dfs =
+        [&](std::size_t start, std::size_t left, uint64_t subset) {
+          if (found) {
+            return;
+          }
+          if (left == 0) {
+            if (hits_all(subset)) {
+              found = true;
+              found_subset = subset;
+            }
+            return;
+          }
+          for (std::size_t i = start; i <= term_count - left; ++i) {
+            dfs(i + 1, left - 1, subset | (uint64_t{1} << i));
+            if (found) {
+              return;
+            }
+          }
+        };
+    dfs(0, want, 0);
+    if (found) {
+      *out_subset = found_subset;
+      return true;
+    }
+  }
+  return false;
+}
+
+uint64_t solve_hitting_set_greedy(const std::vector<uint64_t>& constraints,
+                                  std::size_t term_count) {
+  std::vector<char> covered(constraints.size(), 0);
+  std::size_t remaining = constraints.size();
+  uint64_t subset = 0;
+  while (remaining > 0) {
+    std::size_t best_term = term_count;
+    std::size_t best_gain = 0;
+    for (std::size_t ti = 0; ti < term_count; ++ti) {
+      if (subset & (uint64_t{1} << ti)) {
+        continue;
+      }
+      std::size_t gain = 0;
+      for (std::size_t ci = 0; ci < constraints.size(); ++ci) {
+        if (!covered[ci] && (constraints[ci] & (uint64_t{1} << ti))) {
+          gain += 1;
+        }
+      }
+      if (gain > best_gain) {
+        best_gain = gain;
+        best_term = ti;
+      }
+    }
+    if (best_term >= term_count || best_gain == 0) {
+      return (term_count >= 64) ? ~uint64_t{0}
+                                : ((uint64_t{1} << term_count) - 1);
+    }
+    subset |= (uint64_t{1} << best_term);
+    for (std::size_t ci = 0; ci < constraints.size(); ++ci) {
+      if (!covered[ci] && (constraints[ci] & (uint64_t{1} << best_term))) {
+        covered[ci] = 1;
+        remaining -= 1;
+      }
+    }
+  }
+  return subset;
+}
+
+bool minimize_rule_literals_by_signature(
+    const TriggerSignatureContext& ctx,
+    const std::vector<int>& feature_nodes,
+    const DecisionTreeRule& rule,
+    const std::vector<SigWord>& original_sig,
+    DecisionTreeRule* out_rule) {
+  if (!out_rule) {
+    return false;
+  }
+  *out_rule = rule;
+  const std::size_t term_count = rule.terms.size();
+  if (term_count <= 1 || term_count > 63) {
+    return false;
+  }
+
+  std::vector<std::size_t> node_positions;
+  node_positions.reserve(term_count);
+  for (const auto& term : rule.terms) {
+    if (term.first >= feature_nodes.size()) {
+      return false;
+    }
+    auto it = ctx.node_pos.find(feature_nodes[term.first]);
+    if (it == ctx.node_pos.end()) {
+      return false;
+    }
+    node_positions.push_back(it->second);
+  }
+
+  std::unordered_set<uint64_t> unique_constraints;
+  for (std::size_t row = 0; row < ctx.total_count; ++row) {
+    if (sig_bit(original_sig, row)) {
+      continue;
+    }
+    uint64_t violated = 0;
+    for (std::size_t ti = 0; ti < term_count; ++ti) {
+      const int lit_ok = literal_bit(ctx,
+                                     node_positions[ti],
+                                     rule.terms[ti].second,
+                                     row);
+      if (!lit_ok) {
+        violated |= (uint64_t{1} << ti);
+      }
+    }
+    if (violated == 0) {
+      return false;
+    }
+    unique_constraints.insert(violated);
+  }
+
+  if (unique_constraints.empty()) {
+    return false;
+  }
+  std::vector<uint64_t> constraints(unique_constraints.begin(),
+                                    unique_constraints.end());
+  uint64_t subset = 0;
+  const bool exact_ok =
+      solve_hitting_set_exact(constraints, term_count, &subset);
+  if (!exact_ok) {
+    subset = solve_hitting_set_greedy(constraints, term_count);
+  }
+  if (__builtin_popcountll(subset) >= static_cast<int>(term_count)) {
+    return false;
+  }
+
+  DecisionTreeRule minimized;
+  for (std::size_t ti = 0; ti < term_count; ++ti) {
+    if (subset & (uint64_t{1} << ti)) {
+      minimized.terms.push_back(rule.terms[ti]);
+    }
+  }
+  std::sort(minimized.terms.begin(), minimized.terms.end());
+
+  std::vector<SigWord> check_sig;
+  if (!compute_rule_signature(ctx, feature_nodes, minimized, &check_sig) ||
+      !sig_equal(check_sig, original_sig, ctx)) {
+    return false;
+  }
+
+  *out_rule = std::move(minimized);
+  return true;
+}
+
+bool signature_minimize_trigger_model(
+    const circuit& golden,
+    const circuit& trojan,
+    const PatternStats& stats,
+    const std::vector<std::vector<int>>& extra_neg_patterns,
+    const std::vector<int>& candidate_nodes,
+    MiningResult* result,
+    TriggerSigStats* sig_stats,
+    std::string* error) {
+  if (error) {
+    error->clear();
+  }
+  if (sig_stats) {
+    *sig_stats = TriggerSigStats{};
+  }
+  if (!result || result->model.rules.empty()) {
+    return true;
+  }
+
+  TriggerSignatureContext ctx;
+  if (!build_trigger_signature_context(golden,
+                                       trojan,
+                                       stats,
+                                       extra_neg_patterns,
+                                       result->feature_nodes,
+                                       candidate_nodes,
+                                       &ctx,
+                                       error)) {
+    return false;
+  }
+
+  TriggerSigStats local;
+  local.rules_before = result->model.rules.size();
+  local.literals_before = count_model_literals(result->model);
+
+  int whole_node = -1;
+  int whole_expected = 1;
+  if (find_literal_for_signature(ctx, ctx.target_sig,
+                                 &whole_node, &whole_expected)) {
+    const std::size_t feature_idx =
+        ensure_feature_for_node(&result->feature_nodes, whole_node);
+    result->model.rules.clear();
+    result->model.rules.push_back(make_literal_rule(feature_idx,
+                                                    whole_expected));
+    local.single_model = 1;
+  } else {
+    std::vector<DecisionTreeRule> new_rules;
+    new_rules.reserve(result->model.rules.size());
+    for (const auto& rule : result->model.rules) {
+      std::vector<SigWord> rule_sig;
+      if (!compute_rule_signature(ctx, result->feature_nodes, rule, &rule_sig)) {
+        new_rules.push_back(rule);
+        continue;
+      }
+
+      int node_idx = -1;
+      int expected = 1;
+      if (find_literal_for_signature(ctx, rule_sig, &node_idx, &expected)) {
+        const std::size_t feature_idx =
+            ensure_feature_for_node(&result->feature_nodes, node_idx);
+        new_rules.push_back(make_literal_rule(feature_idx, expected));
+        local.single_rule += 1;
+        continue;
+      }
+
+      DecisionTreeRule minimized;
+      if (minimize_rule_literals_by_signature(ctx,
+                                              result->feature_nodes,
+                                              rule,
+                                              rule_sig,
+                                              &minimized)) {
+        new_rules.push_back(std::move(minimized));
+        local.hit_rules += 1;
+      } else {
+        new_rules.push_back(rule);
+      }
+    }
+    result->model.rules = std::move(new_rules);
+    simplify_rules(&result->model.rules);
+  }
+
+  result->model.leaf_count = result->model.rules.size();
+  local.rules_after = result->model.rules.size();
+  local.literals_after = count_model_literals(result->model);
+
+  std::vector<SigWord> final_sig;
+  if (compute_model_signature(ctx, result->feature_nodes, result->model,
+                              &final_sig)) {
+    local.exact_mismatches =
+        sig_mismatch_count(final_sig, ctx.target_sig, ctx);
+  }
+
+  cout << "trigger_sig_patterns pos " << ctx.pos_count
+       << " neg " << ctx.neg_count
+       << " nodes " << ctx.nodes.size()
+       << " words " << ctx.words << "\n";
+  cout << "trigger_sig_minimize rules " << local.rules_before
+       << " -> " << local.rules_after
+       << " literals " << local.literals_before
+       << " -> " << local.literals_after
+       << " single_model " << local.single_model
+       << " single_rule " << local.single_rule
+       << " hit_rules " << local.hit_rules
+       << " exact_mismatch " << local.exact_mismatches << "\n";
+
+  if (sig_stats) {
+    *sig_stats = local;
+  }
+  return true;
 }
 
 }  // namespace
@@ -1246,6 +1956,7 @@ int main(int argc, char** argv) {
   bool did_rule_merge = false;
   int merged_match_idx = -1;
   bool fix_succeeded = false;
+  bool trigger_sig_single_kill = false;
 
   if (cec_round > 0) {
     cout << "cec_retry_round " << cec_round + 1 << "\n";
@@ -1614,12 +2325,96 @@ int main(int argc, char** argv) {
     }
     cerr << "[TIMING] final_mining: " << ms_since(t_phase) << " ms\n";
 
+    t_phase = std::chrono::steady_clock::now();
+    if (!fix_succeeded &&
+        !(result.model.rules.size() == 1U &&
+          result.model.rules[0].terms.size() == 1U)) {
+      circuit literal_cut;
+      int literal_cut_node = -1;
+      int literal_cut_value = 0;
+      long long literal_cut_area_delta = 0;
+      long long literal_cut_level_delta = 0;
+      std::string literal_cut_error;
+      if (try_verified_literal_patch_cut(golden,
+                                         working_trojan,
+                                         stats,
+                                         result,
+                                         &literal_cut,
+                                         &literal_cut_node,
+                                         &literal_cut_value,
+                                         &literal_cut_area_delta,
+                                         &literal_cut_level_delta,
+                                         &literal_cut_error)) {
+        (void)literal_cut_node;
+        (void)literal_cut_value;
+        fix_output_path = options.output_path.empty()
+                              ? derive_patched_path(options.trojan_path)
+                              : options.output_path;
+        if (!bench_io::write_bench_file(fix_output_path,
+                                        literal_cut,
+                                        &error)) {
+          cerr << "Write error: " << error << "\n";
+          return 1;
+        }
+        cout << "payload_fix_selected 1 area_delta "
+             << literal_cut_area_delta
+             << " level_delta " << literal_cut_level_delta << "\n";
+        cout << "payload_fix_bench " << fix_output_path << "\n";
+        fix_succeeded = true;
+      } else if (!literal_cut_error.empty()) {
+        cerr << "literal_patch_cut skipped: " << literal_cut_error << "\n";
+      }
+      cerr << "[TIMING] literal_patch_cut: " << ms_since(t_phase) << " ms\n";
+    }
+
+    t_phase = std::chrono::steady_clock::now();
+    if (fix_succeeded) {
+      cerr << "[TIMING] trigger_sig_minimize: 0 ms (patch cut selected)\n";
+    } else if (reduce_model_to_stats_literal(working_trojan,
+                                             stats,
+                                             extra_nontrigger_patterns,
+                                             &result)) {
+      trigger_sig_single_kill = true;
+      cout << "stats_literal_kill_candidate 1\n";
+      cerr << "[TIMING] trigger_sig_minimize: 0 ms (stats literal)\n";
+    } else if (result.model.rules.size() == 1U &&
+        result.model.rules[0].terms.size() == 1U) {
+      trigger_sig_single_kill = true;
+      cout << "tree_single_literal_kill_candidate 1\n";
+      cerr << "[TIMING] trigger_sig_minimize: 0 ms (skipped single literal)\n";
+    } else {
+      TriggerSigStats trigger_sig_stats;
+      std::string trigger_sig_error;
+      if (!signature_minimize_trigger_model(golden,
+                                            working_trojan,
+                                            stats,
+                                            extra_nontrigger_patterns,
+                                            candidate_indices,
+                                            &result,
+                                            &trigger_sig_stats,
+                                            &trigger_sig_error)) {
+        cerr << "trigger_sig_minimize skipped: " << trigger_sig_error << "\n";
+      }
+      trigger_sig_single_kill =
+          trigger_sig_stats.exact_mismatches == 0 &&
+          result.model.rules.size() == 1U &&
+          result.model.rules[0].terms.size() == 1U;
+      if (trigger_sig_single_kill) {
+        cout << "trigger_sig_single_literal_kill_candidate 1\n";
+      }
+      cerr << "[TIMING] trigger_sig_minimize: " << ms_since(t_phase) << " ms\n";
+    }
+
     cout << "training_set pos=" << result.data_pos
          << " neg=" << result.data_neg << '\n';
     cout << "hard_mined " << result.hard_added
          << " rounds " << result.rounds_used << '\n';
 
     cout << "mis match " << stats.mismatch_patterns << '\n';
+
+    if (fix_succeeded) {
+      break;
+    }
 
     if (!did_rule_merge && result.model.rules.size() > 1U) {
       circuit merged = working_trojan;
@@ -1653,301 +2448,84 @@ int main(int argc, char** argv) {
 
   t_phase = std::chrono::steady_clock::now();
   auto t_sub = std::chrono::steady_clock::now();
-  int kill_trigger_idx = -1;
-  int kill_value = 0;
-  std::string kill_error;
-  circuit killed = working_trojan;
-  if (try_kill_simple_trigger(killed,
-                              result.feature_nodes,
-                              result.model,
-                              &kill_trigger_idx,
-                              &kill_value,
-                              &kill_error)) {
-    std::size_t base_area = 0;
-    std::size_t base_level = 0;
-    std::size_t killed_area = 0;
-    std::size_t killed_level = 0;
-    try {
-      circuit base_eval = working_trojan;
-      base_eval.ensure_eval_order();
-      base_area = base_eval.area();
-      base_level = base_eval.level();
-      killed.ensure_eval_order();
-      killed_area = killed.area();
-      killed_level = killed.level();
-    } catch (const std::exception& e) {
-      cerr << "Payload kill area/level error: " << e.what() << "\n";
-      return 1;
-    }
 
-    cout << "payload_kill_trigger " << working_trojan.node_name(kill_trigger_idx)
-         << " forced " << kill_value << "\n";
-    cout << "payload_kill_area " << base_area << " -> " << killed_area
-         << " level " << base_level << " -> " << killed_level << "\n";
-
-    std::size_t mismatch_index = 0;
+  if (!fix_succeeded && trigger_sig_single_kill) {
+    int kill_trigger_idx = -1;
+    int kill_value = 0;
+    std::string kill_error;
+    circuit killed = working_trojan;
     t_sub = std::chrono::steady_clock::now();
-    if (!verify_patch_groundtruth(golden,
-                                  killed,
-                                  stats.trigger_patterns,
-                                  &mismatch_index,
-                                  &error)) {
-      cerr << "[TIMING]   kill_verify: " << ms_since(t_sub) << " ms (FAIL)\n";
-      cerr << "Payload kill verification failed: " << error;
-      if (!stats.trigger_patterns.empty()) {
-        cerr << " pattern " << mismatch_index;
-      }
-      cerr << "\n";
-      // Fall through to the payload-fix path instead of giving up.
-    } else {
-      cerr << "[TIMING]   kill_verify: " << ms_since(t_sub) << " ms (PASS)\n";
-      const long long delta_area =
-          static_cast<long long>(killed_area) -
-          static_cast<long long>(base_area);
-      const long long delta_level =
-          static_cast<long long>(killed_level) -
-          static_cast<long long>(base_level);
-
-      fix_output_path = options.output_path.empty()
-                            ? derive_patched_path(options.trojan_path)
-                            : options.output_path;
-      if (!bench_io::write_bench_file(fix_output_path, killed, &error)) {
-        cerr << "Write error: " << error << "\n";
-        return 1;
-      }
-      cout << "payload_fix_selected 1 area_delta " << delta_area
-           << " level_delta " << delta_level << "\n";
-      cout << "payload_fix_bench " << fix_output_path << "\n";
-      cerr << "[TIMING] kill+verify+write: " << ms_since(t_phase) << " ms\n";
-      fix_succeeded = true;
-    }
-  } else if (!kill_error.empty()) {
-    cerr << "payload_kill_trigger skipped: " << kill_error << "\n";
-  }
-
-  cerr << "[TIMING]   try_kill_simple: " << ms_since(t_sub) << " ms\n";
-  t_sub = std::chrono::steady_clock::now();
-
-  // When the trigger is a virtual AND node, expand to its constituent real
-  // signals and try killing each one.  This avoids the expensive payload-fix
-  // path (which can OOM on large circuits like AES).
-  if (kill_trigger_idx >= 0 &&
-      kill_error == "trigger is a virtual node (cannot kill directly)") {
-    const cell& vn_cell = working_trojan.get_cell(kill_trigger_idx);
-    if (vn_cell.ctype == CType::GATE && vn_cell.gtype == GType::AND &&
-        kill_value == 0 && !vn_cell.inputs.empty()) {
-      cout << "vn_expand_kill trying " << vn_cell.inputs.size()
-           << " constituent signals of "
-           << working_trojan.node_name(kill_trigger_idx) << "\n";
-      for (int inp_idx : vn_cell.inputs) {
-        int real_node = inp_idx;
-        int real_kill = 0;  // Force AND input to 0.
-        // Trace through NOT gate if present.
-        const cell& inp_cell = working_trojan.get_cell(inp_idx);
-        if (inp_cell.ctype == CType::GATE &&
-            inp_cell.gtype == GType::NOT &&
-            inp_cell.inputs.size() == 1U) {
-          // NOT(x)=0 means x=1.
-          real_node = inp_cell.inputs[0];
-          real_kill = 1;
-        }
-        // Skip if the real node is also a virtual node.
-        const std::string& rname = working_trojan.node_name(real_node);
-        if (rname.size() >= 3 &&
-            rname[0] == 'v' && rname[1] == 'n' && rname[2] == '_') {
-          continue;
-        }
-        // Skip if the real node is not a gate (e.g. PI).
-        const cell& real_cell = working_trojan.get_cell(real_node);
-        if (real_cell.ctype != CType::GATE) {
-          cerr << "vn_expand_kill: skip non-gate " << rname << "\n";
-          continue;
-        }
-        circuit trial = working_trojan;
-        trial.force_gate_const(real_node, real_kill);
-        std::size_t mismatch_index = 0;
-        if (verify_patch_groundtruth(golden,
-                                      trial,
-                                      stats.trigger_patterns,
-                                      &mismatch_index,
-                                      &error)) {
-          // Verification passed — compute area/level and write output.
-          std::size_t base_area = 0, base_level = 0;
-          std::size_t trial_area = 0, trial_level = 0;
-          try {
-            circuit base_eval = working_trojan;
-            base_eval.ensure_eval_order();
-            base_area = base_eval.area();
-            base_level = base_eval.level();
-            trial.ensure_eval_order();
-            trial_area = trial.area();
-            trial_level = trial.level();
-          } catch (const std::exception& e) {
-            cerr << "VN expand kill area/level error: " << e.what() << "\n";
-            return 1;
-          }
-          cout << "payload_kill_trigger "
-               << working_trojan.node_name(real_node)
-               << " forced " << real_kill
-               << " (expanded from "
-               << working_trojan.node_name(kill_trigger_idx) << ")\n";
-          cout << "payload_kill_area " << base_area << " -> " << trial_area
-               << " level " << base_level << " -> " << trial_level << "\n";
-          const long long delta_area =
-              static_cast<long long>(trial_area) -
-              static_cast<long long>(base_area);
-          const long long delta_level =
-              static_cast<long long>(trial_level) -
-              static_cast<long long>(base_level);
-          fix_output_path = options.output_path.empty()
-                                ? derive_patched_path(options.trojan_path)
-                                : options.output_path;
-          if (!bench_io::write_bench_file(fix_output_path, trial, &error)) {
-            cerr << "Write error: " << error << "\n";
-            return 1;
-          }
-          cout << "payload_fix_selected 1 area_delta " << delta_area
-               << " level_delta " << delta_level << "\n";
-          cout << "payload_fix_bench " << fix_output_path << "\n";
-          cerr << "[TIMING] vn_expand_kill+verify+write: " << ms_since(t_phase) << " ms\n";
-          fix_succeeded = true;
-          break;
-        } else {
-          cerr << "vn_expand_kill: " << working_trojan.node_name(real_node)
-               << " forced " << real_kill << " failed: " << error
-               << " pattern " << mismatch_index << "\n";
-        }
-      }
-      if (!fix_succeeded) {
-        cerr << "vn_expand_kill: no constituent signal passed verification\n";
-      }
-    }
-  }
-
-  cerr << "[TIMING]   vn_expand_kill: " << ms_since(t_sub) << " ms\n";
-  t_sub = std::chrono::steady_clock::now();
-
-  if (!fix_succeeded) {
-    std::vector<RuleKillAction> rule_kill_actions;
-    std::string rule_kill_reason;
-    std::vector<RuleKillPlan> rule_kill_plans =
-        build_rule_kill_plans(working_trojan,
-                              result.feature_nodes,
-                              result.model,
-                              &rule_kill_actions,
-                              &rule_kill_reason);
-    if (!rule_kill_plans.empty()) {
-      cout << "rule_kill_dp_actions " << rule_kill_actions.size()
-           << " plans " << rule_kill_plans.size()
-           << " rules " << result.model.rules.size() << "\n";
-
+    if (try_kill_simple_trigger(killed,
+                                result.feature_nodes,
+                                result.model,
+                                &kill_trigger_idx,
+                                &kill_value,
+                                &kill_error)) {
       std::size_t base_area = 0;
       std::size_t base_level = 0;
-      bool have_base_metrics = true;
+      std::size_t killed_area = 0;
+      std::size_t killed_level = 0;
       try {
         circuit base_eval = working_trojan;
         base_eval.ensure_eval_order();
         base_area = base_eval.area();
         base_level = base_eval.level();
+        killed.ensure_eval_order();
+        killed_area = killed.area();
+        killed_level = killed.level();
       } catch (const std::exception& e) {
-        have_base_metrics = false;
-        cerr << "rule_kill_dp baseline error: " << e.what() << "\n";
+        cerr << "trigger_sig_kill area/level error: " << e.what() << "\n";
+        return 1;
       }
 
-      if (have_base_metrics) {
-        for (std::size_t pi = 0; pi < rule_kill_plans.size(); ++pi) {
-          const RuleKillPlan& plan = rule_kill_plans[pi];
-          circuit trial = working_trojan;
-          bool plan_valid = true;
-          for (std::size_t action_idx : plan.actions) {
-            if (action_idx >= rule_kill_actions.size()) {
-              plan_valid = false;
-              break;
-            }
-            const RuleKillAction& action = rule_kill_actions[action_idx];
-            try {
-              trial.force_gate_const(action.node_idx, action.kill_value);
-            } catch (const std::exception& e) {
-              cerr << "rule_kill_dp action error: " << e.what() << "\n";
-              plan_valid = false;
-              break;
-            }
-          }
-          if (!plan_valid) {
-            continue;
-          }
+      cout << "trigger_sig_kill "
+           << working_trojan.node_name(kill_trigger_idx)
+           << " forced " << kill_value << "\n";
+      cout << "trigger_sig_kill_area " << base_area << " -> "
+           << killed_area << " level " << base_level << " -> "
+           << killed_level << "\n";
 
-          std::size_t mismatch_index = 0;
-          auto t_verify = std::chrono::steady_clock::now();
-          if (!verify_patch_groundtruth(golden,
-                                        trial,
-                                        stats.trigger_patterns,
-                                        &mismatch_index,
-                                        &error)) {
-            cerr << "rule_kill_dp_plan " << (pi + 1)
-                 << " failed: " << error;
-            if (!stats.trigger_patterns.empty()) {
-              cerr << " pattern " << mismatch_index;
-            }
-            cerr << "\n";
-            continue;
-          }
-          cerr << "[TIMING]   final_verify: " << ms_since(t_verify)
-               << " ms (PASS)\n";
-
-          std::size_t trial_area = 0;
-          std::size_t trial_level = 0;
-          try {
-            trial.ensure_eval_order();
-            trial_area = trial.area();
-            trial_level = trial.level();
-          } catch (const std::exception& e) {
-            cerr << "rule_kill_dp area/level error: " << e.what() << "\n";
-            continue;
-          }
-
-          cout << "rule_kill_dp_selected plan " << (pi + 1)
-               << " actions " << plan.actions.size()
-               << " cost " << plan.cost << "\n";
-          for (std::size_t action_idx : plan.actions) {
-            const RuleKillAction& action = rule_kill_actions[action_idx];
-            cout << "rule_kill_dp_action "
-                 << working_trojan.node_name(action.node_idx)
-                 << " forced " << action.kill_value
-                 << " covers " << __builtin_popcountll(action.cover_mask)
-                 << " fanout " << action.fanout
-                 << " cost " << action.cost << "\n";
-          }
-
-          const long long delta_area =
-              static_cast<long long>(trial_area) -
-              static_cast<long long>(base_area);
-          const long long delta_level =
-              static_cast<long long>(trial_level) -
-              static_cast<long long>(base_level);
-          fix_output_path = options.output_path.empty()
-                                ? derive_patched_path(options.trojan_path)
-                                : options.output_path;
-          if (!bench_io::write_bench_file(fix_output_path, trial, &error)) {
-            cerr << "Write error: " << error << "\n";
-            return 1;
-          }
-          cout << "payload_fix_selected 1 area_delta " << delta_area
-               << " level_delta " << delta_level << "\n";
-          cout << "payload_fix_bench " << fix_output_path << "\n";
-          cerr << "[TIMING] rule_kill+verify+write: "
-               << ms_since(t_phase) << " ms\n";
-          fix_succeeded = true;
-          break;
+      std::size_t mismatch_index = 0;
+      auto t_verify = std::chrono::steady_clock::now();
+      if (!verify_patch_groundtruth(golden,
+                                    killed,
+                                    stats.trigger_patterns,
+                                    &mismatch_index,
+                                    &error)) {
+        cerr << "[TIMING]   trigger_sig_kill_verify: "
+             << ms_since(t_verify) << " ms (FAIL)\n";
+        cerr << "trigger_sig_kill verification failed: " << error;
+        if (!stats.trigger_patterns.empty()) {
+          cerr << " pattern " << mismatch_index;
         }
+        cerr << "\n";
+      } else {
+        cerr << "[TIMING]   trigger_sig_kill_verify: "
+             << ms_since(t_verify) << " ms (PASS)\n";
+        const long long delta_area =
+            static_cast<long long>(killed_area) -
+            static_cast<long long>(base_area);
+        const long long delta_level =
+            static_cast<long long>(killed_level) -
+            static_cast<long long>(base_level);
+        fix_output_path = options.output_path.empty()
+                              ? derive_patched_path(options.trojan_path)
+                              : options.output_path;
+        if (!bench_io::write_bench_file(fix_output_path, killed, &error)) {
+          cerr << "Write error: " << error << "\n";
+          return 1;
+        }
+        cout << "payload_fix_selected 1 area_delta " << delta_area
+             << " level_delta " << delta_level << "\n";
+        cout << "payload_fix_bench " << fix_output_path << "\n";
+        fix_succeeded = true;
       }
-    } else if (!rule_kill_reason.empty()) {
-      cerr << "rule_kill_dp skipped: " << rule_kill_reason << "\n";
+    } else if (!kill_error.empty()) {
+      cerr << "trigger_sig_kill skipped: " << kill_error << "\n";
     }
+    cerr << "[TIMING]   trigger_sig_kill: " << ms_since(t_sub) << " ms\n";
+    t_sub = std::chrono::steady_clock::now();
   }
-
-  cerr << "[TIMING]   rule_kill_dp: " << ms_since(t_sub) << " ms\n";
-  t_sub = std::chrono::steady_clock::now();
 
   if (!fix_succeeded) {
     std::vector<int> payload_fix_nodes;
