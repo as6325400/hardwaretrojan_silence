@@ -853,6 +853,7 @@ struct TriggerSigStats {
 };
 
 struct RuleSynthTelemetry {
+  std::size_t candidate_count = 0;
   std::size_t dt_builds = 0;
   std::size_t strict_dt_builds = 0;
   std::size_t training_data_builds = 0;
@@ -861,6 +862,12 @@ struct RuleSynthTelemetry {
   std::size_t phase_rules = 0;
   std::size_t phase_literals = 0;
   std::size_t phase_depth = 0;
+  RuleOptimizerStats optimizer_stats;
+  std::size_t optimizer_calls = 0;
+  std::size_t optimizer_accepted = 0;
+  std::size_t optimizer_checks = 0;
+  std::size_t optimizer_counterexamples = 0;
+  double optimizer_solver_ms = 0.0;
 };
 
 struct LiteralPatchCutCandidate {
@@ -1952,6 +1959,14 @@ int main(int argc, char** argv) {
        << " rule_method " << rule_method_name(options.rule_method)
        << " force_split " << (options.force_split ? 1 : 0)
        << " strict_retry " << (options.strict_retry ? 1 : 0) << "\n";
+  if (options.rule_method == RuleMethod::z3_pb) {
+    cout << "rule_optimizer_config"
+         << " timeout_ms " << options.rule_opt_timeout_ms
+         << " max_rounds " << options.rule_opt_max_rounds
+         << " cex_batch " << options.rule_opt_cex_batch
+         << " max_clauses " << options.rule_opt_max_clauses
+         << " max_literals " << options.rule_opt_max_literals << "\n";
+  }
 
   const int kMaxCecRounds = 5;
   std::vector<std::vector<int>> extra_trigger_patterns;
@@ -1983,6 +1998,20 @@ int main(int argc, char** argv) {
       rule_synth_telemetry.strict_dt_builds += mining_result.strict_dt_builds;
       rule_synth_telemetry.training_data_builds +=
           mining_result.training_data_builds;
+      rule_synth_telemetry.optimizer_calls +=
+          mining_result.rule_optimizer_calls;
+      rule_synth_telemetry.optimizer_accepted +=
+          mining_result.rule_optimizer_accepted;
+      rule_synth_telemetry.optimizer_checks +=
+          mining_result.rule_optimizer_checks;
+      rule_synth_telemetry.optimizer_counterexamples +=
+          mining_result.rule_optimizer_counterexamples;
+      rule_synth_telemetry.optimizer_solver_ms +=
+          mining_result.rule_optimizer_solver_ms;
+      if (mining_result.rule_optimizer_calls != 0) {
+        rule_synth_telemetry.optimizer_stats =
+            mining_result.rule_optimizer_stats;
+      }
     };
     t_phase = std::chrono::steady_clock::now();
     try {
@@ -2070,6 +2099,7 @@ int main(int argc, char** argv) {
                   merged_match_idx) == candidate_indices.end()) {
       candidate_indices.push_back(merged_match_idx);
     }
+    rule_synth_telemetry.candidate_count = candidate_indices.size();
 
     const auto t_rule_synth = std::chrono::steady_clock::now();
 
@@ -2332,6 +2362,18 @@ int main(int argc, char** argv) {
       mining_options.include_pi = options.include_pi;
       mining_options.force_split = options.force_split;
       mining_options.strict_retry = options.strict_retry;
+      mining_options.enable_rule_optimizer =
+          options.rule_method == RuleMethod::z3_pb;
+      mining_options.rule_optimizer_options.timeout_ms =
+          options.rule_opt_timeout_ms;
+      mining_options.rule_optimizer_options.max_rounds =
+          options.rule_opt_max_rounds;
+      mining_options.rule_optimizer_options.counterexample_batch_size =
+          options.rule_opt_cex_batch;
+      mining_options.rule_optimizer_options.max_clauses =
+          options.rule_opt_max_clauses;
+      mining_options.rule_optimizer_options.max_literals_per_clause =
+          options.rule_opt_max_literals;
 
       if (!run_mining(golden,
                       working_trojan,
@@ -2365,6 +2407,7 @@ int main(int argc, char** argv) {
          << " strategy " << rule_method_name(options.rule_method)
          << " cec_attempt " << (cec_round + 1)
          << " synth_pass " << synth_pass
+         << " candidate_count " << rule_synth_telemetry.candidate_count
          << " dt_builds " << rule_synth_telemetry.dt_builds
          << " strict_dt_builds " << rule_synth_telemetry.strict_dt_builds
          << " training_data_builds "
@@ -2374,10 +2417,49 @@ int main(int argc, char** argv) {
          << " phase_rules " << rule_synth_telemetry.phase_rules
          << " phase_literals " << rule_synth_telemetry.phase_literals
          << " phase_depth " << rule_synth_telemetry.phase_depth
+         << " optimizer_status "
+         << (rule_synth_telemetry.optimizer_calls == 0
+                 ? "disabled"
+                 : rule_synth_telemetry.optimizer_stats.status)
+         << " optimizer_calls " << rule_synth_telemetry.optimizer_calls
+         << " optimizer_accepted "
+         << (rule_synth_telemetry.optimizer_stats.accepted ? 1 : 0)
+         << " optimizer_accepted_calls "
+         << rule_synth_telemetry.optimizer_accepted
+         << " optimizer_optimal "
+         << (rule_synth_telemetry.optimizer_stats.optimal ? 1 : 0)
+         << " optimizer_verified "
+         << (rule_synth_telemetry.optimizer_stats.verified ? 1 : 0)
+         << " optimizer_candidates "
+         << rule_synth_telemetry.optimizer_stats.unique_candidate_features
+         << " optimizer_signatures "
+         << rule_synth_telemetry.optimizer_stats.unique_pattern_signatures
+         << " optimizer_checks " << rule_synth_telemetry.optimizer_checks
+         << " optimizer_cex "
+         << rule_synth_telemetry.optimizer_counterexamples
+         << " optimizer_rules_before "
+         << rule_synth_telemetry.optimizer_stats.rules_before
+         << " optimizer_rules_after "
+         << rule_synth_telemetry.optimizer_stats.rules_after
+         << " optimizer_literals_before "
+         << rule_synth_telemetry.optimizer_stats.literals_before
+         << " optimizer_literals_after "
+         << rule_synth_telemetry.optimizer_stats.literals_after
+         << " optimizer_solver_ms "
+         << rule_synth_telemetry.optimizer_solver_ms
          << " final_rules " << result.model.rules.size()
          << " final_literals " << count_model_literals(result.model)
          << " final_depth " << result.model.max_depth_used
          << " synth_ms " << rule_synth_ms << "\n";
+    if (rule_synth_telemetry.optimizer_calls != 0 &&
+        !rule_synth_telemetry.optimizer_stats.reason.empty()) {
+      std::string safe_reason = rule_synth_telemetry.optimizer_stats.reason;
+      for (char& ch : safe_reason) {
+        if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+      }
+      if (safe_reason.size() > 512) safe_reason.resize(512);
+      cout << "rule_optimizer_reason " << std::quoted(safe_reason) << "\n";
+    }
 
     t_phase = std::chrono::steady_clock::now();
     if (!fix_succeeded &&

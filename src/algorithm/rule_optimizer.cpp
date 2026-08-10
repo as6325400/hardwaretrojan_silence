@@ -152,6 +152,7 @@ struct PatternSignature {
 
 struct SignatureBuildResult {
   std::vector<PatternSignature> patterns;
+  std::size_t total_unique = 0;
   std::size_t conflicts = 0;
 };
 
@@ -213,6 +214,7 @@ SignatureBuildResult build_pattern_signatures(
   }
 
   SignatureBuildResult result;
+  result.total_unique = table.size();
   result.patterns.reserve(table.size());
   for (auto& entry : table) {
     const Aggregate& aggregate = entry.second;
@@ -434,6 +436,9 @@ RuleOptimizationResult optimize_dnf_rules_z3_pb(
 
   SignatureBuildResult signature_result =
       build_pattern_signatures(features, labels, candidates);
+  stats.unique_pattern_signatures = signature_result.total_unique;
+  stats.duplicate_pattern_rows =
+      stats.input_rows - stats.unique_pattern_signatures;
   stats.conflicting_signatures = signature_result.conflicts;
   if (signature_result.conflicts != 0) {
     stats.status = "infeasible";
@@ -444,7 +449,6 @@ RuleOptimizationResult optimize_dnf_rules_z3_pb(
   }
 
   const std::vector<PatternSignature>& patterns = signature_result.patterns;
-  stats.unique_pattern_signatures = patterns.size();
   for (const auto& pattern : patterns) {
     if (pattern.label == 1) {
       stats.positive_signatures += 1;
@@ -452,9 +456,6 @@ RuleOptimizationResult optimize_dnf_rules_z3_pb(
       stats.negative_signatures += 1;
     }
   }
-  stats.duplicate_pattern_rows =
-      stats.input_rows - stats.unique_pattern_signatures;
-
   stats.clause_limit = options.max_clauses == 0
                            ? baseline_model.rules.size()
                            : options.max_clauses;

@@ -89,4 +89,3 @@ RuleOptimizationResult optimize_dnf_rules_z3_pb(
     const std::vector<std::size_t>& raw_dt_candidate_features,
     const DecisionTreeModel& baseline_model,
     const RuleOptimizerOptions& options = RuleOptimizerOptions{});
-

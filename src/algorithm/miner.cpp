@@ -1371,7 +1371,8 @@ bool run_mining_loop(const circuit& golden,
                      MiningResult* result,
                      std::string* error,
                      const std::vector<VirtualNodeDef>* virtual_defs = nullptr,
-                     bool strict_phase = false) {
+                     bool strict_phase = false,
+                     const RuleOptimizerOptions* rule_optimizer_options = nullptr) {
   const std::size_t total_rounds = std::max<std::size_t>(1, rounds);
   result->feature_nodes = feature_nodes;
   result->hard_added = 0;
@@ -1393,6 +1394,23 @@ bool run_mining_loop(const circuit& golden,
       result->strict_dt_builds += 1;
     }
 
+    // Keep the union from the raw positive DT paths.  This snapshot must be
+    // taken before the greedy rule simplifier removes literals.
+    std::vector<std::size_t> raw_dt_candidate_features;
+    if (rule_optimizer_options) {
+      for (const auto& rule : result->model.rules) {
+        for (const auto& term : rule.terms) {
+          raw_dt_candidate_features.push_back(term.first);
+        }
+      }
+      std::sort(raw_dt_candidate_features.begin(),
+                raw_dt_candidate_features.end());
+      raw_dt_candidate_features.erase(
+          std::unique(raw_dt_candidate_features.begin(),
+                      raw_dt_candidate_features.end()),
+          raw_dt_candidate_features.end());
+    }
+
     const std::size_t rules_before = result->model.rules.size();
     const std::size_t lits_before = count_rule_literals(result->model.rules);
     simplify_rules(&result->model.rules);
@@ -1406,6 +1424,64 @@ bool run_mining_loop(const circuit& golden,
                 << " -> " << rules_after
                 << " literals " << lits_before
                 << " -> " << lits_after << "\n";
+    }
+
+    if (rule_optimizer_options) {
+      RuleOptimizerOptions effective_options = *rule_optimizer_options;
+      const std::size_t baseline_rules = result->model.rules.size();
+      if (effective_options.max_clauses == 0) {
+        effective_options.max_clauses = baseline_rules;
+      } else {
+        effective_options.max_clauses =
+            std::min(effective_options.max_clauses, baseline_rules);
+      }
+      RuleOptimizationResult optimized = optimize_dnf_rules_z3_pb(
+          data->features,
+          data->labels,
+          raw_dt_candidate_features,
+          result->model,
+          effective_options);
+      result->rule_optimizer_stats = optimized.stats;
+      result->rule_optimizer_calls += 1;
+      result->rule_optimizer_checks += optimized.stats.solver_checks;
+      result->rule_optimizer_counterexamples +=
+          optimized.stats.counterexamples_added;
+      result->rule_optimizer_solver_ms += optimized.stats.solver_ms;
+      if (optimized.stats.accepted && optimized.stats.verified) {
+        result->model = std::move(optimized.model);
+        result->rule_optimizer_accepted += 1;
+      }
+      std::cout << "rule_optimizer status " << optimized.stats.status
+                << " accepted " << (optimized.stats.accepted ? 1 : 0)
+                << " optimal " << (optimized.stats.optimal ? 1 : 0)
+                << " candidates " << optimized.stats.unique_candidate_features
+                << " signatures " << optimized.stats.unique_pattern_signatures
+                << " checks " << optimized.stats.solver_checks
+                << " cex " << optimized.stats.counterexamples_added
+                << " rules " << optimized.stats.rules_before
+                << " -> " << optimized.stats.rules_after
+                << " literals " << optimized.stats.literals_before
+                << " -> " << optimized.stats.literals_after
+                << " solver_ms " << optimized.stats.solver_ms << "\n";
+    }
+
+    // Simplification and PB optimization may change the model learned by
+    // train_model.  Recompute exact training errors before strict retry and
+    // before reporting telemetry.
+    result->train_pos = 0;
+    result->train_neg = 0;
+    result->train_false_pos = 0;
+    result->train_false_neg = 0;
+    for (std::size_t i = 0; i < data->features.row_count; ++i) {
+      const bool prediction =
+          eval_rules_colmajor(result->model.rules, data->features, i);
+      if (data->labels[i] == 1) {
+        result->train_pos += 1;
+        if (!prediction) result->train_false_neg += 1;
+      } else {
+        result->train_neg += 1;
+        if (prediction) result->train_false_pos += 1;
+      }
     }
 
     const std::size_t add_cap = (round + 1 < total_rounds) ? max_add : 0;
@@ -1483,6 +1559,12 @@ bool run_mining(const circuit& golden,
   result->dt_builds = 0;
   result->strict_dt_builds = 0;
   result->training_data_builds = 0;
+  result->rule_optimizer_stats = RuleOptimizerStats{};
+  result->rule_optimizer_calls = 0;
+  result->rule_optimizer_accepted = 0;
+  result->rule_optimizer_checks = 0;
+  result->rule_optimizer_counterexamples = 0;
+  result->rule_optimizer_solver_ms = 0.0;
   if (candidate_gate_indices.empty()) {
     if (error) {
       *error = "No candidate nets available for mining";
@@ -1559,7 +1641,11 @@ bool run_mining(const circuit& golden,
                        target_rate,
                        result,
                        error,
-                       virtual_defs)) {
+                       virtual_defs,
+                       false,
+                       options.enable_rule_optimizer
+                           ? &options.rule_optimizer_options
+                           : nullptr)) {
     if (error && error->empty()) {
       *error = "Failed to run mining loop";
     }
@@ -1599,7 +1685,10 @@ bool run_mining(const circuit& golden,
                         result,
                         error,
                         virtual_defs,
-                        true)) {
+                        true,
+                        options.enable_rule_optimizer
+                            ? &options.rule_optimizer_options
+                            : nullptr)) {
       std::cout << "strict_features " << strict_features.size()
                 << " strict_depth " << strict_options.max_depth << "\n";
     } else {

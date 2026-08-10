@@ -11,7 +11,8 @@ enum class ParseStatus {
 
 enum class RuleMethod {
   vn_retrain,
-  dt
+  dt,
+  z3_pb
 };
 
 const char* rule_method_name(RuleMethod method);
@@ -31,6 +32,11 @@ struct AppOptions {
   bool strict_retry = true;
   bool no_virtual = false;
   RuleMethod rule_method = RuleMethod::vn_retrain;
+  unsigned rule_opt_timeout_ms = 10000;
+  std::size_t rule_opt_max_rounds = 100;
+  std::size_t rule_opt_cex_batch = 5;
+  std::size_t rule_opt_max_clauses = 8;
+  std::size_t rule_opt_max_literals = 10;
 };
 
 ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::string* error); // Parse CLI args into AppOptions.

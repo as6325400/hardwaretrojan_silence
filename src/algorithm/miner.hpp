@@ -7,6 +7,7 @@
 
 #include "../core/circuit.hpp"
 #include "decision_tree.hpp"
+#include "rule_optimizer.hpp"
 #include "virtual_node.hpp"
 
 struct MiningOptions {
@@ -18,6 +19,8 @@ struct MiningOptions {
   bool include_pi = false;
   bool force_split = false;
   bool strict_retry = true;
+  bool enable_rule_optimizer = false;
+  RuleOptimizerOptions rule_optimizer_options;
 };
 
 struct MiningResult {
@@ -37,6 +40,12 @@ struct MiningResult {
   std::size_t dt_builds = 0;
   std::size_t strict_dt_builds = 0;
   std::size_t training_data_builds = 0;
+  RuleOptimizerStats rule_optimizer_stats;
+  std::size_t rule_optimizer_calls = 0;
+  std::size_t rule_optimizer_accepted = 0;
+  std::size_t rule_optimizer_checks = 0;
+  std::size_t rule_optimizer_counterexamples = 0;
+  double rule_optimizer_solver_ms = 0.0;
 };
 
 struct NegSampleTrace {

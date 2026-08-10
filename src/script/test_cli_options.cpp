@@ -49,6 +49,24 @@ bool expect_error(std::vector<std::string> args,
   return true;
 }
 
+bool expect_z3_options(std::vector<std::string> args) {
+  AppOptions options;
+  std::string error;
+  const ParseStatus status = parse(std::move(args), &options, &error);
+  if (status != ParseStatus::ok ||
+      options.rule_method != RuleMethod::z3_pb ||
+      options.rule_opt_timeout_ms != 0 ||
+      options.rule_opt_max_rounds != 7 ||
+      options.rule_opt_cex_batch != 3 ||
+      options.rule_opt_max_clauses != 0 ||
+      options.rule_opt_max_literals != 4) {
+    std::cerr << "z3 option parse failed: status="
+              << static_cast<int>(status) << " error=" << error << "\n";
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -79,10 +97,30 @@ int main() {
                            {"--rule-method", "vn-retrain", "--no-virtual"});
   ok &= expect_error(conflicting_alias, "conflicts", "conflicting alias");
 
-  auto future_method = positional;
-  future_method.insert(future_method.end(), {"--rule-method", "z3-pb"});
-  ok &= expect_error(future_method, "Invalid --rule-method",
-                     "future method rejected");
+  auto explicit_z3 = positional;
+  explicit_z3.insert(explicit_z3.end(), {"--rule-method", "z3-pb"});
+  ok &= expect_method(explicit_z3, RuleMethod::z3_pb, "explicit z3-pb");
+
+  auto configured_z3 = positional;
+  configured_z3.insert(configured_z3.end(),
+                       {"--rule-method", "z3-pb",
+                        "--rule-opt-timeout-ms", "0",
+                        "--rule-opt-max-rounds", "7",
+                        "--rule-opt-cex-batch", "3",
+                        "--rule-opt-max-clauses", "0",
+                        "--rule-opt-max-literals", "4"});
+  ok &= expect_z3_options(configured_z3);
+
+  auto conflicting_z3_alias = positional;
+  conflicting_z3_alias.insert(conflicting_z3_alias.end(),
+                              {"--rule-method", "z3-pb", "--no-virtual"});
+  ok &= expect_error(conflicting_z3_alias, "conflicts",
+                     "z3-pb conflicts with no-virtual");
+
+  auto zero_rounds = positional;
+  zero_rounds.insert(zero_rounds.end(),
+                     {"--rule-opt-max-rounds", "0"});
+  ok &= expect_error(zero_rounds, "must be positive", "zero rounds");
 
   if (!ok) {
     return EXIT_FAILURE;
