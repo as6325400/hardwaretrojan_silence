@@ -1,0 +1,72 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage{CJK}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{indentfirst}
+\usepackage[margin=2cm]{geometry}
+\usepackage{amsmath}
+\usepackage{tikz}
+
+\hyphenpenalty=10000
+\tolerance=100
+\begin{document}
+\begin{CJK}{UTF8}{bkai}
+\title{\bf Research Methodology I}
+\date{\today}
+\author{ID: 114062584\ \ \ \ \ Name: Tzu-Sian Wang (王子銜)}
+\maketitle
+\begin{center}
+\textbf{Automatic Hardware Trojan Repair via Decision Tree Mining and MaxSAT}
+\end{center}
+\end{CJK}
+%%----------------------------------
+
+\vspace{0.1cm} {\fontsize{16pt}{20pt}\selectfont \noindent {\bf I. Introduction}}
+
+\quad
+
+Hardware Trojans are malicious modifications inserted during chip design or fabrication. They are engineered to stay dormant under normal operation and to activate only under rare trigger inputs, so they almost never surface during conventional functional verification. As gate counts scale into the millions on untrusted supply chains, automatically detecting and repairing such Trojans after fabrication has become a central hardware-security problem. This work tackles the post-fabrication repair side: given a Trojan-infected netlist and a small set of input patterns that expose erroneous outputs, we automatically infer the trigger condition and synthesize a patched circuit functionally equivalent to the golden specification.
+
+\vspace{0.1cm} {\fontsize{16pt}{20pt}\selectfont \noindent {\bf II. Problem Formulation}}
+
+\quad
+
+The objective is to produce a patched netlist that is functionally indistinguishable from the golden reference while minimizing area and delay overhead.
+\begin{enumerate}
+    \item \textbf{Given:}
+    \begin{enumerate}
+        \item A golden circuit $C_g$ accessible only as a behavioral black-box.
+        \item A Trojan-infected gate-level netlist $C_t$ as a directed acyclic graph.
+        \item Error patterns $E = \{e_1,\dots,e_n\}$ with $C_t(e_i) \neq C_g(e_i)$.
+    \end{enumerate}
+    \item \textbf{Objective:} produce $C_p$ such that $\forall p \in \{0,1\}^{|PI|}: C_p(p) = C_g(p)$, while minimizing $|C_p|-|C_t|$ and $\text{lvl}(C_p)-\text{lvl}(C_t)$.
+    \item \textbf{Constraints:} the learned trigger must achieve zero false positives on the negative pattern population, and the patched circuit must pass an ABC Combinational Equivalence Check (CEC) against $C_g$.
+\end{enumerate}
+
+\vspace{0.1cm} {\fontsize{16pt}{20pt}\selectfont \noindent {\bf III. Implementation}}
+
+\begin{figure}[htp]
+    \centering
+    \includegraphics[width=0.85\linewidth]{image.png}
+    \caption{End-to-end execution pipeline of the Trojan repair framework.}
+    \label{fig:flow}
+\end{figure}
+
+\noindent Figure~\ref{fig:flow} shows the six-stage iterative pipeline:
+\begin{enumerate}
+    \item \textbf{Groundtruth simulation:} simulate $E$ on $C_g$ and $C_t$ to obtain trigger / non-trigger sample sets; additional random patterns populate the negative pool.
+    \item \textbf{Candidate gate selection:} all gates of $C_t$ are taken as features for trigger learning (optionally including primary inputs); artifacts from previous patching iterations are filtered out.
+    \item \textbf{Virtual Node (VN) generation:} a preliminary tree identifies important signals; a signature-based generator then enumerates pairwise/triple AND combinations of those signals, ranked by an F1 / precision / recall objective on the bit-packed pos/neg signature. Only VNs referenced by the final rules are inserted into the netlist, preventing area inflation.
+    \item \textbf{Decision tree rule mining:} a CART tree is trained on a 1:50 pos/neg sample, yielding a DNF $\text{trigger}=r_1\lor\dots\lor r_N$ with each $r_i$ a conjunction of literals. Hard-negative mining iteratively adds misclassified non-trigger patterns; a strict-retry mode forces unbounded depth with PIs added as features until zero false positives are reached.
+    \item \textbf{Three-tier patch strategy:} given the mined DNF, three repair strategies are attempted in order of cost: (a) \textit{Trigger Kill} -- force a single literal common to every rule to a constant, near-zero area; (b) \textit{VN Expand Kill} -- when the killable gate is a Virtual AND, expand it and try each constituent (tracking NOT inversions); (c) \textit{MaxSAT Payload Fix} -- introduce a Boolean $\text{flip}_g$ per candidate gate in the fan-in cone of erroneous POs (excluding a forbidden mask that protects trigger-detection logic), XOR-compose each gate with its flip variable, and ask Z3 Optimize to minimize $\sum \text{flip}_g$ subject to every patched PO matching golden on every trigger pattern. Fix nodes are wrapped with a MUX (or simplified to XOR) controlled by an ABC-synthesized trigger condition.
+    \item \textbf{CEC verification with counter-example feedback:} ABC's CEC checks the patched netlist against $C_g$; on failure, the counter-example PIs are added to the trigger set and the pipeline re-runs (up to five rounds), closing the loop between sample-based learning and formal verification.
+\end{enumerate}
+
+\noindent To keep the loop tractable the simulator evaluates 64 patterns per 64-bit word via bit-parallel packed simulation, with optional CUDA acceleration for circuits beyond 50K gates.
+
+\vspace{0.1cm}{\fontsize{16pt}{20pt}\selectfont \noindent {\bf IV. Conclusion}}
+
+\quad
+
+This work presents an end-to-end framework for automatic Hardware Trojan repair that bridges decision-tree rule mining and formal verification. The three-tier patch strategy escalates from constant propagation through Virtual Node expansion to MaxSAT-driven gate flipping, while the CEC counter-example loop progressively refines the trigger condition. In our experiments, the majority of cases converge in a single round; about 20\% require 1--4 CEC retries, and only a small number of complex Trojans remain unresolved after five rounds, indicating that the proposed pipeline is a practical candidate for post-fabrication hardware-security flows.
+\end{document}

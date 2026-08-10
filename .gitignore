@@ -9,4 +9,5 @@ abc_docs.txt
 **/__pycache__/**
 /.venv
 /generated_datasets
+/validation
 abc
