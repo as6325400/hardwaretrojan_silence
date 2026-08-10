@@ -1,0 +1,227 @@
+{
+  "schema_version": "multi-trojan-experiment-matrix/1",
+  "dataset_schema_version": "v4-multi-independent-trojan/1",
+  "groundtruth_schema_version": "v4-groundtruth-1",
+  "description": "Reproducible master-thesis matrix. Pilot/development seeds, final core seeds, and held-out OOD circuits are disjoint.",
+  "benchmark_catalog": {
+    "c880": {
+      "path": "benchmarks/c880.bench",
+      "sha256": "6c8940cdbd4b59e3bb170ca7c1ba1474832fcbab54d240244daa1e9c0281bc70",
+      "primary_inputs": 60,
+      "primary_outputs": 26,
+      "gate_assignments": 383,
+      "size_class": "small"
+    },
+    "c2670": {
+      "path": "benchmarks/c2670.bench",
+      "sha256": "f9cea6f6734725b8ce22c938e5c71ba527a998880b10ed7253b948974c23d928",
+      "primary_inputs": 233,
+      "primary_outputs": 140,
+      "gate_assignments": 1193,
+      "size_class": "small"
+    },
+    "c3540": {
+      "path": "benchmarks/c3540.bench",
+      "sha256": "57c629ae6bbb9cd259b8d322b72524c4bc362d688e250f34f0eee05214f5db3b",
+      "primary_inputs": 50,
+      "primary_outputs": 22,
+      "gate_assignments": 1669,
+      "size_class": "small"
+    },
+    "c5315": {
+      "path": "benchmarks/c5315.bench",
+      "sha256": "5da6e65f5df89a390ce8403909545cbfd0ca71db32eb51d63d74db5da9312a24",
+      "primary_inputs": 178,
+      "primary_outputs": 123,
+      "gate_assignments": 2307,
+      "size_class": "small"
+    },
+    "c6288": {
+      "path": "benchmarks/c6288.bench",
+      "sha256": "b7e64afe37123a653194d74d560268881afa4b7a776e0dda584ec0e43a0bcce7",
+      "primary_inputs": 32,
+      "primary_outputs": 32,
+      "gate_assignments": 2416,
+      "size_class": "small"
+    },
+    "c7552": {
+      "path": "benchmarks/c7552.bench",
+      "sha256": "209d2aa40b31abec1b114c50feef69797511c040b93cf55e7ab4933ad508f56a",
+      "primary_inputs": 207,
+      "primary_outputs": 108,
+      "gate_assignments": 3512,
+      "size_class": "small"
+    },
+    "div": {
+      "path": "benchmarks/div.bench",
+      "sha256": "dcc589d650ea9f4a2d094b5d1f38206f2e258406b38706b23248f29b904d7ca6",
+      "primary_inputs": 128,
+      "primary_outputs": 128,
+      "gate_assignments": 101826,
+      "size_class": "medium"
+    },
+    "mem_ctrl": {
+      "path": "benchmarks/mem_ctrl.bench",
+      "sha256": "bef1125cbcd1b38162865cec0fc9052782c319b95db1dc560042ba3702c0a831",
+      "primary_inputs": 1204,
+      "primary_outputs": 1231,
+      "gate_assignments": 83949,
+      "size_class": "medium"
+    },
+    "aes": {
+      "path": "benchmarks/aes.bench",
+      "sha256": "7aac57e8dc8b84c0eed97e2dc60be53da917d7ef3f43af7eaf771ffc8e88149e",
+      "primary_inputs": 7105,
+      "primary_outputs": 6976,
+      "gate_assignments": 491808,
+      "size_class": "large_ood"
+    },
+    "gps": {
+      "path": "benchmarks/gps.bench",
+      "sha256": "72cb0bc29290206db421644995f9ff021d201e938413d540ac53ec96a784b2f4",
+      "primary_inputs": 10297,
+      "primary_outputs": 10287,
+      "gate_assignments": 577885,
+      "size_class": "large_ood"
+    },
+    "mor1kx": {
+      "path": "benchmarks/mor1kx.bench",
+      "sha256": "db6717f470e9a38567d71a8937167a642ab94741b1884420cd31af301f1bd4b1",
+      "primary_inputs": 30015,
+      "primary_outputs": 30087,
+      "gate_assignments": 373804,
+      "size_class": "large_ood"
+    }
+  },
+  "defaults": {
+    "payload_type": "XOR_TOGGLE",
+    "victim_placement": "random",
+    "trigger_gate": "AND",
+    "trigger_topology": "disjoint",
+    "payload_topology": "distinct_victims_same_depth",
+    "payload_cone_overlap": "unconstrained",
+    "require_distinct_victims": true,
+    "require_per_instance_singleton_witness": true,
+    "groundtruth_witnesses_per_mask": 16,
+    "groundtruth_hard_negatives_per_case": 256
+  },
+  "groundtruth_profiles": {
+    "pilot": {
+      "witnesses_per_requested_mask": 16,
+      "hard_negatives_per_case": 256,
+      "purpose": "Fast pipeline and satisfiability validation, including large circuits."
+    },
+    "release": {
+      "singleton_witnesses_per_instance": 64,
+      "pair_witnesses_per_pair": 32,
+      "all_on_witnesses_per_case": 32,
+      "hard_negatives_per_case": 512,
+      "purpose": "Frozen thesis dataset; deduplicate patterns globally within each case."
+    }
+  },
+  "trigger_topology_parameters": {
+    "disjoint": {
+      "generator_trigger_overlap": 0.0
+    },
+    "shared_trigger_literals": {
+      "generator_trigger_overlap": 0.5,
+      "constraint": "At least one unique PI literal remains per Trojan instance."
+    }
+  },
+  "phases": [
+    {
+      "id": "pilot_dev",
+      "enabled": true,
+      "split": "development",
+      "groundtruth_profile": "pilot",
+      "victim_placement": "output-near",
+      "purpose": "Pipeline shake-down and parameter selection; never report these cases as untouched final results.",
+      "circuits": ["c880", "c2670", "c3540", "c5315", "c6288", "c7552"],
+      "trojan_counts": [2, 3],
+      "trigger_sizes": [3, 5],
+      "trigger_topologies": ["disjoint"],
+      "seeds": [1000, 1001, 1002, 1003, 1004],
+      "expected_case_count": 120
+    },
+    {
+      "id": "core_final",
+      "enabled": true,
+      "split": "final_in_distribution",
+      "groundtruth_profile": "release",
+      "victim_placement": "random",
+      "purpose": "Frozen-seed final experiment: six ISCAS circuits plus two larger designs.",
+      "circuits": ["c880", "c2670", "c3540", "c5315", "c6288", "c7552", "div", "mem_ctrl"],
+      "trojan_counts": [1, 2, 3],
+      "trigger_sizes": [3, 5],
+      "trigger_topologies": ["disjoint"],
+      "seeds": [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009],
+      "expected_case_count": 480
+    },
+    {
+      "id": "heldout_ood",
+      "enabled": true,
+      "split": "heldout_ood",
+      "groundtruth_profile": "release",
+      "preflight_groundtruth_profile": "pilot",
+      "victim_placement": "random",
+      "purpose": "No tuning on these large circuits; evaluate transfer after all settings are frozen.",
+      "circuits": ["aes", "gps", "mor1kx"],
+      "trojan_counts": [2, 3],
+      "trigger_sizes": [5],
+      "trigger_topologies": ["disjoint"],
+      "seeds": [9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009],
+      "expected_case_count": 60
+    },
+    {
+      "id": "five_trojan_stress",
+      "enabled": true,
+      "split": "stress",
+      "groundtruth_profile": "pilot",
+      "victim_placement": "random",
+      "purpose": "Optional complexity stress test; keep separate from the primary success-rate denominator.",
+      "circuits": ["c7552", "div", "mem_ctrl"],
+      "trojan_counts": [5],
+      "trigger_sizes": [5],
+      "trigger_topologies": ["disjoint"],
+      "seeds": [9500, 9501, 9502, 9503, 9504],
+      "expected_case_count": 15
+    },
+    {
+      "id": "shared_trigger_challenge",
+      "enabled": true,
+      "split": "topology_challenge",
+      "groundtruth_profile": "pilot",
+      "victim_placement": "random",
+      "purpose": "Measure degradation when Trojan instances share trigger literals but retain a unique PI literal and distinct victims.",
+      "circuits": ["c880", "c2670", "c7552"],
+      "trojan_counts": [2, 3],
+      "trigger_sizes": [3, 5],
+      "trigger_topologies": ["shared_trigger_literals"],
+      "seeds": [6000, 6001, 6002, 6003, 6004],
+      "expected_case_count": 60
+    },
+    {
+      "id": "unsupported_topology_extension",
+      "enabled": false,
+      "split": "future_challenge",
+      "groundtruth_profile": "pilot",
+      "victim_placement": "random",
+      "purpose": "Reserved until the generator supports payload-cone overlap or cascaded Trojan dependencies.",
+      "circuits": ["c880", "c2670", "c7552"],
+      "trojan_counts": [2, 3],
+      "trigger_sizes": [3, 5],
+      "trigger_topologies": ["payload_overlap_not_a_trigger_topology", "cascaded_not_supported"],
+      "seeds": [12000, 12001, 12002, 12003, 12004],
+      "expected_case_count": 120
+    }
+  ],
+  "reporting_policy": {
+    "primary_unit": "independently generated case",
+    "primary_metric": "all_trojans_repaired_and_abc_cec_pass_rate",
+    "required_strata": ["split", "benchmark", "trojan_count", "trigger_size", "trigger_topology", "payload_topology"],
+    "failure_outcomes": ["cec_fail", "partial_repair", "timeout", "oom", "generator_failure", "groundtruth_failure"],
+    "confidence_interval": "Wilson 95% interval for rates; bootstrap 95% interval for median runtime/area delta",
+    "seed_freeze_rule": "Do not replace failed seeds. Report every scheduled matrix cell and its failure category.",
+    "heldout_rule": "No thresholds, algorithm flags, or generator settings may be tuned using heldout_ood."
+  }
+}

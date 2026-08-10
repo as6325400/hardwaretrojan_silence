@@ -19,13 +19,15 @@ class batch_simulator {
 
   // Auto-selects GPU (node_count >= kGpuThreshold) or CPU.
   // partner_nodes: other circuit's node count, for shared VRAM budgeting.
-  explicit batch_simulator(circuit& c, std::size_t partner_nodes = 0);
+  explicit batch_simulator(circuit& c, std::size_t partner_nodes = 0,
+                           std::size_t max_word_blocks_hint = 0);
   ~batch_simulator();
 
   batch_simulator(const batch_simulator&) = delete;
   batch_simulator& operator=(const batch_simulator&) = delete;
 
   bool is_gpu() const { return use_gpu_; }
+  const std::string& gpu_init_error() const { return gpu_init_error_; }
   std::size_t max_wb() const { return max_wb_; }
   std::size_t num_nodes() const;
   std::size_t num_pis() const;
@@ -73,6 +75,7 @@ class batch_simulator {
  private:
   circuit* base_;
   bool use_gpu_ = false;
+  std::string gpu_init_error_;
   std::size_t max_wb_ = 0;
   std::size_t last_num_wb_ = 0;
   std::size_t last_count_ = 0;

@@ -12,31 +12,49 @@
 // batch_simulator
 // ---------------------------------------------------------------------------
 
-batch_simulator::batch_simulator(circuit& c, std::size_t partner_nodes)
+batch_simulator::batch_simulator(circuit& c, std::size_t partner_nodes,
+                                 std::size_t max_word_blocks_hint)
     : base_(&c) {
   base_->ensure_eval_order();
-  const std::size_t nodes = base_->node_count();
   const std::size_t pis = base_->pi_count();
 
 #ifdef USE_CUDA
+  const std::size_t nodes = base_->node_count();
   if (nodes >= kGpuThreshold) {
     try {
       max_wb_ = gpu_compute_max_word_blocks(nodes, partner_nodes, pis, 0);
+      if (max_word_blocks_hint > 0) {
+        max_wb_ = std::min(max_wb_, max_word_blocks_hint);
+      }
       gpu_ = new GpuCircuit(*base_, max_wb_);
-      cudaMalloc(&d_pi_bits_, pis * max_wb_ * sizeof(word_t));
+      const cudaError_t allocation =
+          cudaMalloc(&d_pi_bits_, pis * max_wb_ * sizeof(word_t));
+      if (allocation != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaMalloc PI buffer: ") +
+                                 cudaGetErrorString(allocation));
+      }
       h_pi_.resize(pis * max_wb_, 0);
       use_gpu_ = true;
       return;
-    } catch (...) {
+    } catch (const std::exception& e) {
+      gpu_init_error_ = e.what();
       // GPU init failed — fall through to CPU.
+      if (gpu_) { delete gpu_; gpu_ = nullptr; }
+      if (d_pi_bits_) { cudaFree(d_pi_bits_); d_pi_bits_ = nullptr; }
+    } catch (...) {
+      gpu_init_error_ = "non-standard GPU initialization exception";
       if (gpu_) { delete gpu_; gpu_ = nullptr; }
       if (d_pi_bits_) { cudaFree(d_pi_bits_); d_pi_bits_ = nullptr; }
     }
   }
+#else
+  (void)partner_nodes;
 #endif
 
   // CPU path (OpenMP parallel).
-  max_wb_ = 256;  // 256 * 64 = 16384 patterns per chunk.
+  max_wb_ = max_word_blocks_hint > 0
+                ? std::min<std::size_t>(256, max_word_blocks_hint)
+                : 256;  // 256 * 64 = 16384 patterns per chunk.
   h_pi_.resize(pis * max_wb_, 0);
 }
 

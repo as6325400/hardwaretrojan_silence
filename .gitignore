@@ -8,4 +8,5 @@ abc_docs.txt
 **/*.bench
 **/__pycache__/**
 /.venv
+/generated_datasets
 abc
