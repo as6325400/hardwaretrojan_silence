@@ -41,7 +41,23 @@ check_method() {
     local summary_count
     summary_count=$(grep -c '^rule_synth_summary ' "$stdout_file")
     [[ "$summary_count" -ge 1 ]]
+    local apply_count
+    apply_count=$(grep -c '^rule_apply_summary ' "$stdout_file")
+    [[ "$apply_count" -eq "$summary_count" ]]
     [[ "$(summary_value strategy "$stdout_file")" == "$expected_method" ]]
+    awk '
+        /^rule_apply_summary / {
+            rules = 0
+            literals = 0
+            for (i = 2; i < NF; i += 2) {
+                if ($i == "effective_rules") rules = $(i + 1)
+                if ($i == "effective_literals") literals = $(i + 1)
+            }
+            if (rules < 1 || literals < 1) exit 1
+            seen += 1
+        }
+        END { if (seen < 1) exit 1 }
+    ' "$stdout_file"
 
     local logged_builds
     local summary_builds
