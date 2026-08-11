@@ -10,6 +10,12 @@
 #include "rule_optimizer.hpp"
 #include "virtual_node.hpp"
 
+enum class MiningRuleOptimizer {
+  none,
+  z3_pb,
+  milp_cover
+};
+
 struct MiningOptions {
   std::size_t max_depth = 10;
   std::size_t neg_ratio = 50;
@@ -19,7 +25,7 @@ struct MiningOptions {
   bool include_pi = false;
   bool force_split = false;
   bool strict_retry = true;
-  bool enable_rule_optimizer = false;
+  MiningRuleOptimizer rule_optimizer = MiningRuleOptimizer::none;
   RuleOptimizerOptions rule_optimizer_options;
 };
 

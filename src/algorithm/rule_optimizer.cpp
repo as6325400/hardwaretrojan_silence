@@ -385,6 +385,9 @@ RuleOptimizationResult optimize_dnf_rules_z3_pb(
   RuleOptimizationResult result;
   result.model = baseline_model;
   RuleOptimizerStats& stats = result.stats;
+  stats.solver_backend = "z3-pb";
+  stats.backend_available = true;
+  stats.solver_version = Z3_get_full_version();
   stats.input_rows = features.row_count;
   stats.raw_candidate_features = raw_dt_candidate_features.size();
   stats.rules_before = baseline_model.rules.size();

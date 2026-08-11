@@ -12,6 +12,8 @@ const char* rule_method_name(RuleMethod method) {
       return "dt";
     case RuleMethod::z3_pb:
       return "z3-pb";
+    case RuleMethod::milp_cover:
+      return "milp-cover";
   }
   return "unknown";
 }
@@ -22,10 +24,10 @@ void print_usage(const char* prog) {
             << " <golden_bench> <trojan_bench> <groundtruth_log> [output_bench]"
                " [--depth N] [--neg-ratio N]"
                " [--mine-rounds N] [--mine-max N]"
-               " [--rule-method vn-retrain|dt|z3-pb]"
+               " [--rule-method vn-retrain|dt|z3-pb|milp-cover]"
                " [--rule-opt-timeout-ms N] [--rule-opt-max-rounds N]"
                " [--rule-opt-cex-batch N] [--rule-opt-max-clauses N]"
-               " [--rule-opt-max-literals N]"
+               " [--rule-opt-max-literals N] [--rule-cover-max-terms N]"
                " [--force-split] [--no-strict] [--no-virtual]\n";
 }
 
@@ -65,10 +67,11 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
   std::string rule_method = "vn-retrain";
   CLI::Option* rule_method_option =
       app.add_option("--rule-method", rule_method,
-                     "Rule synthesis method: vn-retrain, dt, or z3-pb");
+                     "Rule synthesis method: vn-retrain, dt, z3-pb, or "
+                     "milp-cover");
   CLI::Option* opt_timeout =
       app.add_option("--rule-opt-timeout-ms", out->rule_opt_timeout_ms,
-                     "Shared Z3-PB wall-clock budget in milliseconds");
+                     "Shared optimizer wall-clock budget in milliseconds");
   CLI::Option* opt_rounds =
       app.add_option("--rule-opt-max-rounds", out->rule_opt_max_rounds,
                      "Maximum Z3-PB CEGIS checks");
@@ -77,10 +80,14 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
                      "Counterexample signatures added per Z3-PB round");
   CLI::Option* opt_clauses =
       app.add_option("--rule-opt-max-clauses", out->rule_opt_max_clauses,
-                     "Z3-PB DNF clause cap (0 uses baseline rule count)");
+                     "Optimizer DNF clause cap (0 uses baseline rule count)");
   CLI::Option* opt_literals =
       app.add_option("--rule-opt-max-literals", out->rule_opt_max_literals,
-                     "Z3-PB literals per clause cap (0 uses baseline maximum)");
+                     "Optimizer literals per clause cap (0 uses baseline "
+                     "maximum)");
+  CLI::Option* cover_terms =
+      app.add_option("--rule-cover-max-terms", out->rule_cover_max_terms,
+                     "MILP cover term-pool cap");
   app.add_option("--output", out->output_path, "Output path (alternative)");
 
   // --no-strict disables strict_retry (inverted flag)
@@ -105,10 +112,10 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
   const bool rule_method_explicit = rule_method_option->count() > 0;
   const bool no_virtual_explicit = no_virtual_option->count() > 0;
   if (rule_method != "vn-retrain" && rule_method != "dt" &&
-      rule_method != "z3-pb") {
+      rule_method != "z3-pb" && rule_method != "milp-cover") {
     if (error) {
       *error = "Invalid --rule-method '" + rule_method +
-               "' (expected vn-retrain, dt, or z3-pb)";
+               "' (expected vn-retrain, dt, z3-pb, or milp-cover)";
     }
     return ParseStatus::error;
   }
@@ -126,6 +133,8 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
     out->rule_method = RuleMethod::dt;
   } else if (rule_method == "z3-pb") {
     out->rule_method = RuleMethod::z3_pb;
+  } else if (rule_method == "milp-cover") {
+    out->rule_method = RuleMethod::milp_cover;
   } else {
     out->rule_method = RuleMethod::vn_retrain;
   }
@@ -139,12 +148,33 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
     if (error) *error = "--rule-opt-cex-batch must be positive";
     return ParseStatus::error;
   }
-  if (out->rule_method != RuleMethod::z3_pb &&
+  const bool optimizer_method =
+      out->rule_method == RuleMethod::z3_pb ||
+      out->rule_method == RuleMethod::milp_cover;
+  if (!optimizer_method &&
       (opt_timeout->count() || opt_rounds->count() || opt_cex->count() ||
-       opt_clauses->count() || opt_literals->count())) {
+       opt_clauses->count() || opt_literals->count() || cover_terms->count())) {
     if (error) {
-      *error = "--rule-opt-* options require --rule-method z3-pb";
+      *error =
+          "rule optimizer options require --rule-method z3-pb or milp-cover";
     }
+    return ParseStatus::error;
+  }
+  if (out->rule_method == RuleMethod::z3_pb && cover_terms->count()) {
+    if (error) {
+      *error = "--rule-cover-max-terms requires --rule-method milp-cover";
+    }
+    return ParseStatus::error;
+  }
+  if (out->rule_method == RuleMethod::milp_cover &&
+      (opt_rounds->count() || opt_cex->count())) {
+    if (error) {
+      *error = "--rule-opt-max-rounds and --rule-opt-cex-batch apply only to z3-pb";
+    }
+    return ParseStatus::error;
+  }
+  if (out->rule_cover_max_terms == 0) {
+    if (error) *error = "--rule-cover-max-terms must be positive";
     return ParseStatus::error;
   }
 

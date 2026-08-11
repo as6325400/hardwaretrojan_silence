@@ -67,6 +67,23 @@ bool expect_z3_options(std::vector<std::string> args) {
   return true;
 }
 
+bool expect_milp_options(std::vector<std::string> args) {
+  AppOptions options;
+  std::string error;
+  const ParseStatus status = parse(std::move(args), &options, &error);
+  if (status != ParseStatus::ok ||
+      options.rule_method != RuleMethod::milp_cover ||
+      options.rule_opt_timeout_ms != 0 ||
+      options.rule_opt_max_clauses != 3 ||
+      options.rule_opt_max_literals != 4 ||
+      options.rule_cover_max_terms != 123) {
+    std::cerr << "milp option parse failed: status="
+              << static_cast<int>(status) << " error=" << error << "\n";
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -101,6 +118,12 @@ int main() {
   explicit_z3.insert(explicit_z3.end(), {"--rule-method", "z3-pb"});
   ok &= expect_method(explicit_z3, RuleMethod::z3_pb, "explicit z3-pb");
 
+  auto explicit_milp = positional;
+  explicit_milp.insert(explicit_milp.end(),
+                       {"--rule-method", "milp-cover"});
+  ok &= expect_method(explicit_milp, RuleMethod::milp_cover,
+                      "explicit milp-cover");
+
   auto configured_z3 = positional;
   configured_z3.insert(configured_z3.end(),
                        {"--rule-method", "z3-pb",
@@ -111,11 +134,27 @@ int main() {
                         "--rule-opt-max-literals", "4"});
   ok &= expect_z3_options(configured_z3);
 
+  auto configured_milp = positional;
+  configured_milp.insert(configured_milp.end(),
+                         {"--rule-method", "milp-cover",
+                          "--rule-opt-timeout-ms", "0",
+                          "--rule-opt-max-clauses", "3",
+                          "--rule-opt-max-literals", "4",
+                          "--rule-cover-max-terms", "123"});
+  ok &= expect_milp_options(configured_milp);
+
   auto conflicting_z3_alias = positional;
   conflicting_z3_alias.insert(conflicting_z3_alias.end(),
                               {"--rule-method", "z3-pb", "--no-virtual"});
   ok &= expect_error(conflicting_z3_alias, "conflicts",
                      "z3-pb conflicts with no-virtual");
+
+  auto conflicting_milp_alias = positional;
+  conflicting_milp_alias.insert(
+      conflicting_milp_alias.end(),
+      {"--rule-method", "milp-cover", "--no-virtual"});
+  ok &= expect_error(conflicting_milp_alias, "conflicts",
+                     "milp-cover conflicts with no-virtual");
 
   auto zero_rounds = positional;
   zero_rounds.insert(zero_rounds.end(),
@@ -126,8 +165,36 @@ int main() {
   ignored_optimizer_option.insert(ignored_optimizer_option.end(),
                                   {"--rule-opt-max-clauses", "2"});
   ok &= expect_error(ignored_optimizer_option,
-                     "require --rule-method z3-pb",
+                     "require --rule-method z3-pb or milp-cover",
                      "optimizer option with VN strategy");
+
+  auto cover_option_with_z3 = positional;
+  cover_option_with_z3.insert(
+      cover_option_with_z3.end(),
+      {"--rule-method", "z3-pb", "--rule-cover-max-terms", "10"});
+  ok &= expect_error(cover_option_with_z3, "requires --rule-method milp-cover",
+                     "cover option with z3-pb");
+
+  auto z3_option_with_milp = positional;
+  z3_option_with_milp.insert(
+      z3_option_with_milp.end(),
+      {"--rule-method", "milp-cover", "--rule-opt-max-rounds", "7"});
+  ok &= expect_error(z3_option_with_milp, "apply only to z3-pb",
+                     "z3-only option with milp-cover");
+
+  auto z3_cex_option_with_milp = positional;
+  z3_cex_option_with_milp.insert(
+      z3_cex_option_with_milp.end(),
+      {"--rule-method", "milp-cover", "--rule-opt-cex-batch", "7"});
+  ok &= expect_error(z3_cex_option_with_milp, "apply only to z3-pb",
+                     "z3 cex option with milp-cover");
+
+  auto zero_cover_terms = positional;
+  zero_cover_terms.insert(
+      zero_cover_terms.end(),
+      {"--rule-method", "milp-cover", "--rule-cover-max-terms", "0"});
+  ok &= expect_error(zero_cover_terms, "must be positive",
+                     "zero cover term cap");
 
   if (!ok) {
     return EXIT_FAILURE;

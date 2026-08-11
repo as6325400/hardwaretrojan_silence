@@ -21,6 +21,7 @@
 #include "algorithm/pattern_sampler.hpp"
 #include "algorithm/payload_analysis.hpp"
 #include "algorithm/rule_patch.hpp"
+#include "algorithm/set_cover_optimizer.hpp"
 #include "algorithm/trigger_fixer.hpp"
 #include "algorithm/virtual_node.hpp"
 #include "core/circuit_compare.hpp"
@@ -1994,6 +1995,12 @@ int main(int argc, char** argv) {
     print_usage(argv[0]);
     return 1;
   }
+  if (options.rule_method == RuleMethod::milp_cover &&
+      !highs_set_cover_backend_available()) {
+    cerr << "milp-cover requires a build with the HiGHS backend; set "
+            "HIGHS_ROOT and rebuild\n";
+    return 1;
+  }
 
   circuit golden;
   circuit trojan;
@@ -2023,13 +2030,20 @@ int main(int argc, char** argv) {
        << " rule_method " << rule_method_name(options.rule_method)
        << " force_split " << (options.force_split ? 1 : 0)
        << " strict_retry " << (options.strict_retry ? 1 : 0) << "\n";
-  if (options.rule_method == RuleMethod::z3_pb) {
+  if (options.rule_method == RuleMethod::z3_pb ||
+      options.rule_method == RuleMethod::milp_cover) {
     cout << "rule_optimizer_config"
+         << " backend " << rule_method_name(options.rule_method)
          << " timeout_ms " << options.rule_opt_timeout_ms
-         << " max_rounds " << options.rule_opt_max_rounds
-         << " cex_batch " << options.rule_opt_cex_batch
          << " max_clauses " << options.rule_opt_max_clauses
-         << " max_literals " << options.rule_opt_max_literals << "\n";
+         << " max_literals " << options.rule_opt_max_literals;
+    if (options.rule_method == RuleMethod::z3_pb) {
+      cout << " max_rounds " << options.rule_opt_max_rounds
+           << " cex_batch " << options.rule_opt_cex_batch;
+    } else {
+      cout << " max_pool_terms " << options.rule_cover_max_terms;
+    }
+    cout << "\n";
   }
 
   const int kMaxCecRounds = 5;
@@ -2426,8 +2440,11 @@ int main(int argc, char** argv) {
       mining_options.include_pi = options.include_pi;
       mining_options.force_split = options.force_split;
       mining_options.strict_retry = options.strict_retry;
-      mining_options.enable_rule_optimizer =
-          options.rule_method == RuleMethod::z3_pb;
+      if (options.rule_method == RuleMethod::z3_pb) {
+        mining_options.rule_optimizer = MiningRuleOptimizer::z3_pb;
+      } else if (options.rule_method == RuleMethod::milp_cover) {
+        mining_options.rule_optimizer = MiningRuleOptimizer::milp_cover;
+      }
       mining_options.rule_optimizer_options.timeout_ms =
           options.rule_opt_timeout_ms;
       mining_options.rule_optimizer_options.max_rounds =
@@ -2438,6 +2455,8 @@ int main(int argc, char** argv) {
           options.rule_opt_max_clauses;
       mining_options.rule_optimizer_options.max_literals_per_clause =
           options.rule_opt_max_literals;
+      mining_options.rule_optimizer_options.max_pool_terms =
+          options.rule_cover_max_terms;
 
       if (!run_mining(golden,
                       working_trojan,
@@ -2515,6 +2534,77 @@ int main(int argc, char** argv) {
          << rule_synth_telemetry.optimizer_stats.literals_after
          << " optimizer_solver_ms "
          << rule_synth_telemetry.optimizer_solver_ms
+         << " optimizer_backend "
+         << (rule_synth_telemetry.optimizer_stats.solver_backend.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.solver_backend)
+         << " optimizer_version "
+         << (rule_synth_telemetry.optimizer_stats.solver_version.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.solver_version)
+         << " cover_pool_complete "
+         << (rule_synth_telemetry.optimizer_stats.pool_complete ? 1 : 0)
+         << " cover_rules_optimal "
+         << (rule_synth_telemetry.optimizer_stats.rules_optimal ? 1 : 0)
+         << " cover_literals_optimal "
+         << (rule_synth_telemetry.optimizer_stats.literals_optimal ? 1 : 0)
+         << " cover_terms_generated "
+         << rule_synth_telemetry.optimizer_stats.pool_terms_generated
+         << " cover_terms_unique "
+         << rule_synth_telemetry.optimizer_stats.pool_terms_unique
+         << " cover_terms_final "
+         << rule_synth_telemetry.optimizer_stats.pool_terms_final
+         << " cover_variables "
+         << rule_synth_telemetry.optimizer_stats.master_variables
+         << " cover_constraints "
+         << rule_synth_telemetry.optimizer_stats.master_constraints
+         << " cover_nonzeros "
+         << rule_synth_telemetry.optimizer_stats.master_nonzeros
+         << " cover_term_ms "
+         << rule_synth_telemetry.optimizer_stats.term_generation_ms
+         << " lp1_status "
+         << (rule_synth_telemetry.optimizer_stats.lp1_status.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.lp1_status)
+         << " lp1_objective "
+         << rule_synth_telemetry.optimizer_stats.lp1_objective
+         << " lp1_iterations "
+         << rule_synth_telemetry.optimizer_stats.lp1_iterations
+         << " mip1_status "
+         << (rule_synth_telemetry.optimizer_stats.mip1_status.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.mip1_status)
+         << " mip1_objective "
+         << rule_synth_telemetry.optimizer_stats.mip1_objective
+         << " mip1_bound "
+         << rule_synth_telemetry.optimizer_stats.mip1_dual_bound
+         << " mip1_gap "
+         << rule_synth_telemetry.optimizer_stats.mip1_gap
+         << " mip1_nodes "
+         << rule_synth_telemetry.optimizer_stats.mip1_nodes
+         << " lp2_status "
+         << (rule_synth_telemetry.optimizer_stats.lp2_status.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.lp2_status)
+         << " lp2_objective "
+         << rule_synth_telemetry.optimizer_stats.lp2_objective
+         << " lp2_iterations "
+         << rule_synth_telemetry.optimizer_stats.lp2_iterations
+         << " mip2_status "
+         << (rule_synth_telemetry.optimizer_stats.mip2_status.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.mip2_status)
+         << " mip2_objective "
+         << rule_synth_telemetry.optimizer_stats.mip2_objective
+         << " mip2_bound "
+         << rule_synth_telemetry.optimizer_stats.mip2_dual_bound
+         << " mip2_gap "
+         << rule_synth_telemetry.optimizer_stats.mip2_gap
+         << " mip2_nodes "
+         << rule_synth_telemetry.optimizer_stats.mip2_nodes
+         << " mip_nodes "
+         << (rule_synth_telemetry.optimizer_stats.mip1_nodes +
+             rule_synth_telemetry.optimizer_stats.mip2_nodes)
          << " synthesized_rules " << result.model.rules.size()
          << " synthesized_literals " << count_model_literals(result.model)
          << " synthesized_depth " << max_model_rule_literals(result.model)

@@ -13,6 +13,7 @@
 
 #include "../core/packed_circuit.hpp"
 #include "rule_patch.hpp"
+#include "set_cover_optimizer.hpp"
 #include "virtual_node.hpp"
 
 #ifdef USE_CUDA
@@ -1372,6 +1373,8 @@ bool run_mining_loop(const circuit& golden,
                      std::string* error,
                      const std::vector<VirtualNodeDef>* virtual_defs = nullptr,
                      bool strict_phase = false,
+                     MiningRuleOptimizer optimizer_backend =
+                         MiningRuleOptimizer::none,
                      const RuleOptimizerOptions* rule_optimizer_options = nullptr) {
   const std::size_t total_rounds = std::max<std::size_t>(1, rounds);
   result->feature_nodes = feature_nodes;
@@ -1432,12 +1435,22 @@ bool run_mining_loop(const circuit& golden,
       if (effective_options.max_clauses == 0) {
         effective_options.max_clauses = baseline_rules;
       }
-      RuleOptimizationResult optimized = optimize_dnf_rules_z3_pb(
-          data->features,
-          data->labels,
-          raw_dt_candidate_features,
-          result->model,
-          effective_options);
+      RuleOptimizationResult optimized;
+      if (optimizer_backend == MiningRuleOptimizer::milp_cover) {
+        optimized = optimize_dnf_rules_highs_set_cover(
+            data->features,
+            data->labels,
+            raw_dt_candidate_features,
+            result->model,
+            effective_options);
+      } else {
+        optimized = optimize_dnf_rules_z3_pb(
+            data->features,
+            data->labels,
+            raw_dt_candidate_features,
+            result->model,
+            effective_options);
+      }
       result->rule_optimizer_stats = optimized.stats;
       result->rule_optimizer_calls += 1;
       result->rule_optimizer_checks += optimized.stats.solver_checks;
@@ -1640,7 +1653,8 @@ bool run_mining(const circuit& golden,
                        error,
                        virtual_defs,
                        false,
-                       options.enable_rule_optimizer
+                       options.rule_optimizer,
+                       options.rule_optimizer != MiningRuleOptimizer::none
                            ? &options.rule_optimizer_options
                            : nullptr)) {
     if (error && error->empty()) {
@@ -1683,7 +1697,8 @@ bool run_mining(const circuit& golden,
                         error,
                         virtual_defs,
                         true,
-                        options.enable_rule_optimizer
+                        options.rule_optimizer,
+                        options.rule_optimizer != MiningRuleOptimizer::none
                             ? &options.rule_optimizer_options
                             : nullptr)) {
       std::cout << "strict_features " << strict_features.size()

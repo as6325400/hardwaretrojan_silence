@@ -4,8 +4,12 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
-make -C src ../bin/main ../bin/script/test_cli_options -j4 >/dev/null
+highs_root=${HIGHS_ROOT:-"$HOME/.local/or-tools"}
+make -C src HIGHS_ROOT="$highs_root" \
+    ../bin/main ../bin/script/test_cli_options \
+    ../bin/script/test_set_cover_optimizer -j4 >/dev/null
 bin/script/test_cli_options
+bin/script/test_set_cover_optimizer
 
 test_tmp=$(mktemp -d /tmp/rule-method-selftest.XXXXXX)
 trap 'rm -rf "$test_tmp"' EXIT
@@ -93,5 +97,21 @@ check_method z3-pb-timeout z3-pb --rule-method z3-pb --rule-opt-timeout-ms 0
 [[ "$(summary_value strategy "$test_tmp/z3-pb-timeout.out")" == "z3-pb" ]]
 [[ "$(summary_value optimizer_status "$test_tmp/z3-pb-timeout.out")" == "timeout" ]]
 [[ "$(summary_value optimizer_accepted "$test_tmp/z3-pb-timeout.out")" == "0" ]]
+
+check_method milp-cover milp-cover --rule-method milp-cover
+[[ "$(summary_value optimizer_status "$test_tmp/milp-cover.out")" == "accepted" ]]
+[[ "$(summary_value optimizer_accepted "$test_tmp/milp-cover.out")" -ge 1 ]]
+[[ "$(summary_value optimizer_backend "$test_tmp/milp-cover.out")" == \
+    "highs-set-cover-milp" ]]
+[[ "$(summary_value cover_pool_complete "$test_tmp/milp-cover.out")" == "1" ]]
+[[ "$(summary_value cover_rules_optimal "$test_tmp/milp-cover.out")" == "1" ]]
+[[ "$(summary_value cover_literals_optimal "$test_tmp/milp-cover.out")" == "1" ]]
+[[ "$(summary_value mip1_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
+[[ "$(summary_value mip2_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
+
+check_method milp-cover-timeout milp-cover --rule-method milp-cover \
+    --rule-opt-timeout-ms 0
+[[ "$(summary_value optimizer_status "$test_tmp/milp-cover-timeout.out")" == "timeout" ]]
+[[ "$(summary_value optimizer_accepted "$test_tmp/milp-cover-timeout.out")" == "0" ]]
 
 echo "rule_method_telemetry_tests PASS"

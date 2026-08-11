@@ -6,12 +6,12 @@
 
 #include "decision_tree.hpp"
 
-// Exact bounded-DNF rule optimization over Boolean (0-1) variables.  The
-// implementation uses Z3 Optimize as a pseudo-Boolean / MaxSMT backend; it is
-// ILP-equivalent for this Boolean model, but it is not an LP-relaxation MILP
-// solver and therefore does not expose a MILP optimality gap.
+// Shared bounds for exact finite-table bounded-DNF rule optimization.  The
+// Z3 path uses pseudo-Boolean / MaxSMT variables; the set-cover path builds an
+// explicit prime-implicant pool and solves LP/MIP masters with HiGHS.
 struct RuleOptimizerOptions {
-  // Total solver wall-clock budget shared by every CEGIS Optimize check.
+  // Backend wall-clock budget.  Z3-PB shares it across CEGIS Optimize checks;
+  // HiGHS set-cover shares it across term generation and all LP/MIP phases.
   // A value of zero is an immediate, deterministic timeout.
   unsigned timeout_ms = 10000;
 
@@ -28,11 +28,25 @@ struct RuleOptimizerOptions {
 
   // Zero means use the largest baseline clause, with a minimum cap of one.
   std::size_t max_literals_per_clause = 0;
+
+  // Maximum number of unique prime-implicant terms generated for the
+  // weighted set-cover backend.  Zero disables this guard.  The backend only
+  // reports a globally optimal bounded-DNF result when term enumeration is
+  // complete.
+  std::size_t max_pool_terms = 200000;
+
+  // Guard for partial states explored while enumerating prime implicants.
+  // A state cap is needed in addition to max_pool_terms because an
+  // exponential search may visit many internal states before producing a
+  // single term.  Zero disables this guard.
+  std::size_t max_pool_states = 2000000;
 };
 
 struct RuleOptimizerStats {
-  // Stable machine-readable status: accepted, invalid, infeasible, timeout,
-  // unknown, max_rounds, or verification_failed.
+  // Stable machine-readable status.  Common values are accepted, invalid,
+  // infeasible, timeout, unknown, max_rounds, and verification_failed.  An
+  // optional backend can additionally report backend_unavailable or a safe
+  // resource guard such as pool_limit.
   std::string status = "invalid";
   std::string reason;
 
@@ -74,6 +88,59 @@ struct RuleOptimizerStats {
   double preprocessing_ms = 0.0;
   double solver_ms = 0.0;
   double total_ms = 0.0;
+
+  // Optional backend-specific telemetry.  The Z3-PB path may leave these at
+  // their defaults; the HiGHS set-cover path fills them explicitly.
+  std::string solver_backend;
+  std::string solver_version;
+  bool backend_available = false;
+  bool pool_complete = false;
+  bool rules_optimal = false;
+  bool literals_optimal = false;
+
+  std::size_t pool_hyperedges = 0;
+  std::size_t pool_redundant_hyperedges = 0;
+  std::size_t pool_terms_generated = 0;
+  std::size_t pool_terms_unique = 0;
+  std::size_t pool_terms_coverage_deduplicated = 0;
+  std::size_t pool_terms_final = 0;
+  std::size_t pool_terms_unsafe = 0;
+  std::size_t pool_states_explored = 0;
+  bool pool_state_limit_hit = false;
+  bool pool_depth_limit_hit = false;
+  std::size_t master_variables = 0;
+  std::size_t master_constraints = 0;
+  std::size_t master_nonzeros = 0;
+
+  std::string lp1_status;
+  std::string mip1_status;
+  std::string lp2_status;
+  std::string mip2_status;
+  double lp1_objective = 0.0;
+  double mip1_objective = 0.0;
+  double mip1_dual_bound = 0.0;
+  double mip1_gap = 0.0;
+  double lp2_objective = 0.0;
+  double mip2_objective = 0.0;
+  double mip2_dual_bound = 0.0;
+  double mip2_gap = 0.0;
+  std::size_t lp1_iterations = 0;
+  std::size_t mip1_nodes = 0;
+  std::size_t lp2_iterations = 0;
+  std::size_t mip2_nodes = 0;
+  std::size_t lp1_dual_nonzero = 0;
+  std::size_t lp2_dual_nonzero = 0;
+  double lp1_dual_min = 0.0;
+  double lp1_dual_max = 0.0;
+  double lp1_dual_sum_abs = 0.0;
+  double lp2_dual_min = 0.0;
+  double lp2_dual_max = 0.0;
+  double lp2_dual_sum_abs = 0.0;
+  double term_generation_ms = 0.0;
+  double lp1_ms = 0.0;
+  double mip1_ms = 0.0;
+  double lp2_ms = 0.0;
+  double mip2_ms = 0.0;
 };
 
 struct RuleOptimizationResult {

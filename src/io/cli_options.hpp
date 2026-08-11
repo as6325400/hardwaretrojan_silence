@@ -12,7 +12,8 @@ enum class ParseStatus {
 enum class RuleMethod {
   vn_retrain,
   dt,
-  z3_pb
+  z3_pb,
+  milp_cover
 };
 
 const char* rule_method_name(RuleMethod method);
@@ -39,6 +40,7 @@ struct AppOptions {
   // value is honored even when it is larger than the baseline rule count.
   std::size_t rule_opt_max_clauses = 0;
   std::size_t rule_opt_max_literals = 10;
+  std::size_t rule_cover_max_terms = 200000;
 };
 
 ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::string* error); // Parse CLI args into AppOptions.
