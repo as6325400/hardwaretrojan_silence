@@ -56,31 +56,42 @@ Path(sys.argv[4]).write_text(
 )
 if method == "z3-pb":
     print("rule_synth_summary strategy z3-pb cec_attempt 1 synth_pass 1 "
-          "dt_builds 1 candidate_count 17 solver_status optimal "
+          "rule_build_attempt 1 dt_builds 1 candidate_count 17 solver_status optimal "
           "pb_variables 13 final_rules 2 final_literals 3 final_depth 2 synth_ms 4.5")
     print("rule_synth_summary strategy z3-pb cec_attempt 2 synth_pass 1 "
-          "dt_builds 2 candidate_count 19 solver_status optimal "
+          "rule_build_attempt 2 dt_builds 2 candidate_count 19 solver_status optimal "
           "pb_variables 15 final_rules 1 final_literals 2 final_depth 1 synth_ms 5.5")
     print("rule_apply_summary strategy z3-pb cec_attempt 1 synth_pass 1 "
-          "source signature_minimize rule_model_used 1 effective_rules 2 "
+          "rule_build_attempt 1 source signature_minimize rule_model_used 1 effective_rules 2 "
           "effective_literals 3 effective_depth 2")
     print("rule_apply_summary strategy z3-pb cec_attempt 2 synth_pass 1 "
-          "source literal_patch_cut rule_model_used 0 effective_rules 1 "
+          "rule_build_attempt 2 source literal_patch_cut rule_model_used 0 effective_rules 1 "
           "effective_literals 1 effective_depth 1")
+    if "--rule-formal-refine" in sys.argv:
+        print("rule_miter_summary strategy z3-pb cec_attempt 1 synth_pass 1 "
+              "rule_build_attempt 1 refine_rounds 1 status counterexamples "
+              "proved 0 returned 2 added 2 checks 2 total_ms 2.5")
+        print("rule_miter_summary strategy z3-pb cec_attempt 2 synth_pass 1 "
+              "rule_build_attempt 2 refine_rounds 1 status proved "
+              "proved 1 returned 0 added 0 checks 2 total_ms 1.5")
 elif method == "milp-cover":
     print("rule_synth_summary strategy milp-cover cec_attempt 1 synth_pass 1 "
-          "dt_builds 1 candidate_count 17 optimizer_status accepted "
+          "rule_build_attempt 1 dt_builds 1 candidate_count 17 optimizer_status accepted "
           "cover_variables 7 mip_nodes 3 synthesized_rules 1 "
           "synthesized_literals 2 synthesized_depth 2 synth_ms 3.5")
     print("rule_apply_summary strategy milp-cover cec_attempt 1 synth_pass 1 "
-          "source signature_minimize rule_model_used 1 effective_rules 1 "
+          "rule_build_attempt 1 source signature_minimize rule_model_used 1 effective_rules 1 "
           "effective_literals 2 effective_depth 2")
+    if "--rule-formal-refine" in sys.argv:
+        print("rule_miter_summary strategy milp-cover cec_attempt 1 synth_pass 1 "
+              "rule_build_attempt 1 refine_rounds 0 status proved "
+              "proved 1 returned 0 added 0 checks 2 total_ms 1.0")
 else:
     print("rule_synth_summary strategy vn-retrain cec_attempt 1 synth_pass 1 "
-          "dt_builds 3 vn_generated 4 vn_used 1 final_rules 2 "
+          "rule_build_attempt 1 dt_builds 3 vn_generated 4 vn_used 1 final_rules 2 "
           "final_literals 4 final_depth 3 synth_ms 12.5")
     print("rule_apply_summary strategy vn-retrain cec_attempt 1 synth_pass 1 "
-          "source signature_minimize rule_model_used 1 effective_rules 2 "
+          "rule_build_attempt 1 source signature_minimize rule_model_used 1 effective_rules 2 "
           "effective_literals 3 effective_depth 2")
 print("payload_fix_selected 1 area_delta 999 level_delta 999")
 print("cec_rounds 1")
@@ -224,9 +235,16 @@ class SummaryParserTest(unittest.TestCase):
         stdout = (
             "noise\n"
             "rule_synth_summary strategy z3-pb cec_attempt 1 "
-            "solver_status optimal pb_variables 31 synth_ms 1.25\n"
+            "rule_build_attempt 1 solver_status optimal pb_variables 31 synth_ms 1.25\n"
             "rule_synth_summary strategy z3-pb cec_attempt 2 "
-            "solver_status optimal pb_variables 29 synth_ms 2.75\n"
+            "rule_build_attempt 2 solver_status optimal pb_variables 29 synth_ms 2.75\n"
+            "rule_apply_summary rule_build_attempt 1 source rule_model\n"
+            "rule_apply_summary rule_build_attempt 2 source literal_patch_cut\n"
+            # Deliberately reverse miter order: association must use the ID.
+            "rule_miter_summary rule_build_attempt 2 status proved proved 1 "
+            "total_ms 1.5\n"
+            "rule_miter_summary rule_build_attempt 1 status counterexamples "
+            "proved 0 returned 2 total_ms 2.5\n"
         )
         summaries = runner.parse_rule_synth_summaries(stdout)
         self.assertEqual(len(summaries), 2)
@@ -241,6 +259,32 @@ class SummaryParserTest(unittest.TestCase):
         )
         self.assertEqual(apply[0]["source"], "literal_patch_cut")
         self.assertEqual(apply[0]["effective_rules"], 1)
+
+        parsed = runner.parse_main_output(stdout, "")
+        self.assertEqual(parsed["rule_miter_summary_count"], 2)
+        self.assertEqual(
+            parsed["rule_miter_aggregates"]["numeric_sum"]["total_ms"], 4.0
+        )
+        self.assertEqual(parsed["rule_build_attempt_count"], 2)
+        attempts = {
+            item["rule_build_attempt"]: item
+            for item in parsed["rule_build_attempts"]
+        }
+        self.assertEqual(
+            attempts[1]["rule_miter_summaries"][0]["status"],
+            "counterexamples",
+        )
+        self.assertEqual(
+            attempts[2]["rule_miter_summaries"][0]["status"], "proved"
+        )
+        self.assertEqual(
+            parsed["rule_build_unlinked_summaries"],
+            {
+                "rule_synth_summaries": [],
+                "rule_apply_summaries": [],
+                "rule_miter_summaries": [],
+            },
+        )
 
 
 class EndToEndTest(RunnerFixture):
@@ -275,6 +319,8 @@ class EndToEndTest(RunnerFixture):
         z3_record = by_method["z3-pb"]
         self.assertEqual(z3_record["parsed"]["rule_synth_summary_count"], 2)
         self.assertEqual(z3_record["parsed"]["rule_apply_summary_count"], 2)
+        self.assertEqual(z3_record["parsed"]["rule_miter_summary_count"], 0)
+        self.assertEqual(z3_record["parsed"]["rule_build_attempt_count"], 2)
         self.assertEqual(
             z3_record["parsed"]["rule_synth_aggregates"]["last"]["solver_status"],
             "optimal",
@@ -295,6 +341,7 @@ class EndToEndTest(RunnerFixture):
         self.assertEqual(rows["z3-pb"]["summary_numeric_sum_synth_ms"], "10.0")
         self.assertEqual(rows["z3-pb"]["apply_last_source"], "literal_patch_cut")
         self.assertEqual(rows["z3-pb"]["apply_last_effective_literals"], "1")
+        self.assertEqual(rows["z3-pb"]["rule_miter_summary_count"], "0")
 
         with mock.patch.dict(
             os.environ, {"FAKE_INVOCATION_COUNTER": str(self.counter)}, clear=False
@@ -313,6 +360,66 @@ class EndToEndTest(RunnerFixture):
         self.assertEqual(record["main"]["returncode"], 0)
         self.assertEqual(record["status"], "CEC_FAIL")
         self.assertFalse(record["success"])
+
+    def test_formal_options_target_optimizer_methods_and_export_miter_data(self) -> None:
+        formal_args = self.args(
+            "--rule-formal-refine",
+            "--rule-formal-timeout-ms", "0",
+            "--rule-formal-max-rounds", "3",
+            "--rule-formal-cex-batch", "4",
+        )
+        self.assertEqual(runner.main(formal_args), 0)
+
+        vn_record = json.loads(
+            (self.output / "records" / "case1--vn-retrain.json").read_text()
+        )
+        z3_record = json.loads(
+            (self.output / "records" / "case1--z3-pb.json").read_text()
+        )
+        self.assertNotIn("--rule-formal-refine", vn_record["command"])
+        self.assertIn("--rule-formal-refine", z3_record["command"])
+        for option, value in (
+            ("--rule-formal-timeout-ms", "0"),
+            ("--rule-formal-max-rounds", "3"),
+            ("--rule-formal-cex-batch", "4"),
+        ):
+            index = z3_record["command"].index(option)
+            self.assertEqual(z3_record["command"][index + 1], value)
+
+        parsed = z3_record["parsed"]
+        self.assertEqual(parsed["rule_miter_summary_count"], 2)
+        self.assertEqual(parsed["rule_build_attempt_count"], 2)
+        self.assertEqual(
+            parsed["rule_build_attempts"][1]["rule_miter_summaries"][0][
+                "status"
+            ],
+            "proved",
+        )
+        self.assertEqual(
+            parsed["rule_miter_aggregates"]["numeric_sum"]["total_ms"], 4.0
+        )
+
+        context = json.loads((self.output / "run_context.json").read_text())
+        self.assertTrue(context["rule_formal_refine"])
+        self.assertEqual(context["rule_formal_timeout_ms"], 0)
+        summary = json.loads((self.output / "summary.json").read_text())
+        self.assertEqual(summary["schema_version"], runner.SUMMARY_SCHEMA_VERSION)
+        self.assertEqual(summary["invocation"]["rule_formal_cex_batch"], 4)
+        with (self.output / "results.csv").open(
+            newline="", encoding="utf-8"
+        ) as source:
+            rows = {row["method"]: row for row in csv.DictReader(source)}
+        self.assertEqual(rows["z3-pb"]["miter_last_status"], "proved")
+        self.assertEqual(rows["z3-pb"]["miter_numeric_sum_total_ms"], "4.0")
+        self.assertEqual(rows["z3-pb"]["rule_miter_summary_count"], "2")
+        linked = json.loads(rows["z3-pb"]["rule_build_attempts_json"])
+        self.assertEqual(linked[0]["rule_build_attempt"], 1)
+
+    def test_formal_knobs_require_refine_flag(self) -> None:
+        self.assertEqual(
+            runner.main(self.args("--rule-formal-timeout-ms", "10")), 2
+        )
+        self.assertFalse(self.output.exists())
 
     def test_external_cec_equivalence_marker_requires_zero_exit(self) -> None:
         with mock.patch.dict(
@@ -420,6 +527,65 @@ class EndToEndTest(RunnerFixture):
         self.assertEqual(row["method"], "milp-cover")
         self.assertEqual(row["highs_library_sha256"], highs_identity["sha256"])
         self.assertEqual(row["summary_last_cover_variables"], "7")
+
+    def test_milp_cover_passes_p4_options_and_records_configuration(self) -> None:
+        with mock.patch.dict(
+            os.environ, self.highs_environment(), clear=False
+        ):
+            self.assertEqual(
+                runner.main(
+                    self.args(
+                        "--method", "z3-pb",
+                        "--method", "milp-cover",
+                        "--highs-library", str(self.highs_path),
+                        "--rule-cover-fourth-objective", "logic-risk",
+                        "--rule-cover-logic-risk-unique-weight", "0.1",
+                        "--rule-cover-logic-risk-fanout-weight", "0.2",
+                        "--rule-cover-logic-risk-timing-weight", "0.7",
+                        "--rule-cover-phase4-timeout-ms", "0",
+                    )
+                ),
+                0,
+            )
+
+        z3_record = json.loads(
+            (self.output / "records" / "case1--z3-pb.json").read_text()
+        )
+        milp_record = json.loads(
+            (self.output / "records" / "case1--milp-cover.json").read_text()
+        )
+        self.assertNotIn("--rule-cover-fourth-objective", z3_record["command"])
+        expected = (
+            ("--rule-cover-fourth-objective", "logic-risk"),
+            ("--rule-cover-logic-risk-unique-weight", "0.1"),
+            ("--rule-cover-logic-risk-fanout-weight", "0.2"),
+            ("--rule-cover-logic-risk-timing-weight", "0.7"),
+            ("--rule-cover-phase4-timeout-ms", "0"),
+        )
+        for option, value in expected:
+            index = milp_record["command"].index(option)
+            self.assertEqual(milp_record["command"][index + 1], value)
+        context = json.loads((self.output / "run_context.json").read_text())
+        self.assertEqual(context["rule_cover_fourth_objective"], "logic-risk")
+        self.assertEqual(
+            context["rule_cover_logic_risk_weights"],
+            {"unique": 0.1, "fanout": 0.2, "timing": 0.7},
+        )
+        self.assertEqual(context["rule_cover_phase4_timeout_ms"], 0)
+        summary = json.loads((self.output / "summary.json").read_text())
+        self.assertEqual(
+            summary["invocation"]["rule_cover_fourth_objective"],
+            "logic-risk",
+        )
+
+    def test_p4_options_require_milp_cover(self) -> None:
+        self.assertEqual(
+            runner.main(
+                self.args("--rule-cover-fourth-objective", "logic-risk")
+            ),
+            2,
+        )
+        self.assertFalse(self.output.exists())
 
     def test_milp_cover_requires_highs_library_option(self) -> None:
         self.assertEqual(
