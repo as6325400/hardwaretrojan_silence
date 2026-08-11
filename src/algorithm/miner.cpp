@@ -801,6 +801,15 @@ bool build_training_data(const circuit& golden,
 
     std::vector<GpuCircuit::word_t> h_diff_mask(max_wb);
     unsigned long long gpu_seed = 42ULL;
+    // Strict retry replays the random-negative trace on either backend.  When
+    // a trace is requested, generate PI words on the host in block-major RNG
+    // order and upload them, matching the replay loops below exactly.  The
+    // no-trace path keeps the faster device-side Philox generator.
+    std::mt19937_64 trace_rng(neg_trace ? neg_trace->seed : 1337);
+    std::vector<GpuCircuit::word_t> h_trace_pi;
+    if (neg_trace) {
+      h_trace_pi.resize(num_pis * max_wb);
+    }
     std::size_t attempts = 0;
 
     while (data->neg_count < target_negatives && attempts < max_attempts) {
@@ -814,8 +823,19 @@ bool build_training_data(const circuit& golden,
           std::min(remaining_wb, need_wb));
       if (num_wb == 0) break;
 
-      gpu_generate_random_pi(d_pi_bits, num_pis, num_wb, gpu_seed);
-      gpu_seed += num_pis * num_wb + 1;
+      if (neg_trace) {
+        for (std::size_t wb = 0; wb < num_wb; ++wb) {
+          for (std::size_t pi = 0; pi < num_pis; ++pi) {
+            h_trace_pi[pi * num_wb + wb] = trace_rng();
+          }
+        }
+        cudaMemcpy(d_pi_bits, h_trace_pi.data(),
+                   num_pis * num_wb * sizeof(GpuCircuit::word_t),
+                   cudaMemcpyHostToDevice);
+      } else {
+        gpu_generate_random_pi(d_pi_bits, num_pis, num_wb, gpu_seed);
+        gpu_seed += num_pis * num_wb + 1;
+      }
       gpu_golden.simulate(d_pi_bits, num_wb);
       gpu_trojan.simulate(d_pi_bits, num_wb);
       gpu_compare_po(gpu_golden, gpu_trojan, d_diff_mask, num_wb,
