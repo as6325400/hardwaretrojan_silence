@@ -15,6 +15,22 @@ enum class RuleCoverThirdObjective {
   unique_inverters
 };
 
+// Optional circuit-derived metadata for the final logic-risk tie-break.  The
+// values are deliberately technology independent: base_fanout counts current
+// graph consumers and arrival_level is a unit-gate topological level.  They
+// are proxies, not cell-library area, delay, capacitance, or STA slack.
+struct RuleCoverFeatureMetric {
+  std::size_t base_fanout = 0;
+  std::size_t arrival_level = 0;
+};
+
+struct RuleCoverCostContext {
+  // Indexed exactly like PackedFeatureMatrix columns.  A context is usable
+  // only when this vector covers every matrix feature.
+  std::vector<RuleCoverFeatureMetric> features;
+  std::size_t circuit_level = 0;
+};
+
 // Shared bounds for exact finite-table bounded-DNF rule optimization.  The
 // Z3 path uses pseudo-Boolean / MaxSMT variables; the set-cover path builds an
 // explicit prime-implicant pool and solves LP/MIP masters with HiGHS.
@@ -59,6 +75,22 @@ struct RuleOptimizerOptions {
   // shares the remaining global optimizer deadline.  Zero deterministically
   // accepts the already verified MIP2 model without starting LP3.
   std::uint64_t phase3_timeout_ms =
+      std::numeric_limits<std::uint64_t>::max();
+
+  // Optional fourth lexicographic objective.  It fixes the exact rule,
+  // literal, and unique-inverter optima before minimizing a normalized sum of
+  // distinct feature taps, fanout-load stress, and unit-gate logical depth.
+  // The objective is intentionally described as a logic-risk proxy: it is not
+  // physical area or static timing analysis.
+  bool cover_logic_risk_proxy = false;
+  double logic_risk_unique_feature_weight = 0.25;
+  double logic_risk_fanout_weight = 0.25;
+  double logic_risk_timing_weight = 0.50;
+
+  // Optional wall-clock sub-budget for LP4/MIP4.  The default shares the
+  // remaining global deadline.  Zero accepts the already full-table-verified
+  // MIP3 result without claiming proxy or overall optimality.
+  std::uint64_t phase4_timeout_ms =
       std::numeric_limits<std::uint64_t>::max();
 };
 
@@ -120,12 +152,30 @@ struct RuleOptimizerStats {
   // hardware_optimal is meaningful only when a requested third objective
   // reached MIP optimality and its extracted model passed full verification.
   bool hardware_optimal = false;
+  // logic_risk_optimal is meaningful only for a requested fourth objective
+  // with a valid RuleCoverCostContext and a verified optimal MIP4 result.
+  bool logic_risk_optimal = false;
   // A true value means the accepted model is the independently verified MIP2
   // incumbent; rules/literals remain optimal, but stats.optimal is false.
   bool phase3_timeout_fallback = false;
+  bool phase4_timeout_fallback = false;
+  bool phase4_unavailable_fallback = false;
   std::string third_objective;
+  std::string fourth_objective;
   std::uint64_t phase3_timeout_ms =
       std::numeric_limits<std::uint64_t>::max();
+  std::uint64_t phase4_timeout_ms =
+      std::numeric_limits<std::uint64_t>::max();
+  bool logic_risk_context_available = false;
+  std::string logic_risk_context_reason;
+  double logic_risk_unique_feature_weight = 0.0;
+  double logic_risk_fanout_weight = 0.0;
+  double logic_risk_timing_weight = 0.0;
+  double logic_risk_max_fanout_log = 0.0;
+  double logic_risk_unique_denominator = 1.0;
+  double logic_risk_fanout_denominator = 1.0;
+  double logic_risk_timing_denominator = 1.0;
+  std::size_t logic_risk_or_depth = 0;
 
   std::size_t pool_hyperedges = 0;
   std::size_t pool_redundant_hyperedges = 0;
@@ -145,6 +195,26 @@ struct RuleOptimizerStats {
   std::size_t inverter_link_constraints = 0;
   std::size_t unique_inverters_before = 0;
   std::size_t unique_inverters_after = 0;
+  std::size_t logic_risk_feature_variables = 0;
+  std::size_t logic_risk_feature_link_constraints = 0;
+  std::size_t unique_features_before = 0;
+  std::size_t unique_features_after = 0;
+  std::size_t feature_loads_before = 0;
+  std::size_t feature_loads_after = 0;
+  double fanout_stress_before = 0.0;
+  double fanout_stress_after = 0.0;
+  std::size_t max_term_arrival_before = 0;
+  std::size_t max_term_arrival_after = 0;
+  std::size_t match_depth_proxy_before = 0;
+  std::size_t match_depth_proxy_after = 0;
+  double logic_risk_unique_component_before = 0.0;
+  double logic_risk_unique_component_after = 0.0;
+  double logic_risk_fanout_component_before = 0.0;
+  double logic_risk_fanout_component_after = 0.0;
+  double logic_risk_timing_component_before = 0.0;
+  double logic_risk_timing_component_after = 0.0;
+  double logic_risk_objective_before = 0.0;
+  double logic_risk_objective_after = 0.0;
 
   std::string lp1_status;
   std::string mip1_status;
@@ -152,6 +222,8 @@ struct RuleOptimizerStats {
   std::string mip2_status;
   std::string lp3_status;
   std::string mip3_status;
+  std::string lp4_status;
+  std::string mip4_status;
   double lp1_objective = 0.0;
   double mip1_objective = 0.0;
   double mip1_dual_bound = 0.0;
@@ -164,15 +236,22 @@ struct RuleOptimizerStats {
   double mip3_objective = 0.0;
   double mip3_dual_bound = 0.0;
   double mip3_gap = 0.0;
+  double lp4_objective = 0.0;
+  double mip4_objective = 0.0;
+  double mip4_dual_bound = 0.0;
+  double mip4_gap = 0.0;
   std::size_t lp1_iterations = 0;
   std::size_t mip1_nodes = 0;
   std::size_t lp2_iterations = 0;
   std::size_t mip2_nodes = 0;
   std::size_t lp3_iterations = 0;
   std::size_t mip3_nodes = 0;
+  std::size_t lp4_iterations = 0;
+  std::size_t mip4_nodes = 0;
   std::size_t lp1_dual_nonzero = 0;
   std::size_t lp2_dual_nonzero = 0;
   std::size_t lp3_dual_nonzero = 0;
+  std::size_t lp4_dual_nonzero = 0;
   double lp1_dual_min = 0.0;
   double lp1_dual_max = 0.0;
   double lp1_dual_sum_abs = 0.0;
@@ -182,6 +261,9 @@ struct RuleOptimizerStats {
   double lp3_dual_min = 0.0;
   double lp3_dual_max = 0.0;
   double lp3_dual_sum_abs = 0.0;
+  double lp4_dual_min = 0.0;
+  double lp4_dual_max = 0.0;
+  double lp4_dual_sum_abs = 0.0;
   double term_generation_ms = 0.0;
   double lp1_ms = 0.0;
   double mip1_ms = 0.0;
@@ -189,6 +271,8 @@ struct RuleOptimizerStats {
   double mip2_ms = 0.0;
   double lp3_ms = 0.0;
   double mip3_ms = 0.0;
+  double lp4_ms = 0.0;
+  double mip4_ms = 0.0;
 };
 
 struct RuleOptimizationResult {

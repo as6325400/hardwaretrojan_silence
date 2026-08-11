@@ -127,6 +127,248 @@ bool validate_input(const PackedFeatureMatrix& features,
   return true;
 }
 
+std::size_t ceil_log2_size(std::size_t value) {
+  if (value <= 1) return 0;
+  std::size_t depth = 0;
+  std::size_t covered = 1;
+  while (covered < value) {
+    if (covered > std::numeric_limits<std::size_t>::max() / 2U) {
+      return std::numeric_limits<std::size_t>::max();
+    }
+    covered *= 2U;
+    depth += 1;
+  }
+  return depth;
+}
+
+bool checked_size_add(std::size_t lhs,
+                      std::size_t rhs,
+                      std::size_t* result) {
+  if (!result || rhs > std::numeric_limits<std::size_t>::max() - lhs) {
+    return false;
+  }
+  *result = lhs + rhs;
+  return true;
+}
+
+bool term_arrival_level(const DecisionTreeRule& rule,
+                        const RuleCoverCostContext& context,
+                        std::size_t* result,
+                        std::string* reason) {
+  if (!result) return false;
+  if (rule.terms.empty()) {
+    *result = 0;
+    return true;
+  }
+  std::vector<std::pair<std::size_t, int>> terms = rule.terms;
+  std::sort(terms.begin(), terms.end());
+  std::vector<std::size_t> current;
+  current.reserve(terms.size());
+  for (const auto& literal : terms) {
+    if (literal.first >= context.features.size()) {
+      if (reason) *reason = "logic-risk literal feature is out of range";
+      return false;
+    }
+    std::size_t arrival =
+        context.features[literal.first].arrival_level;
+    if (literal.second == 0 &&
+        !checked_size_add(arrival, 1, &arrival)) {
+      if (reason) *reason = "logic-risk inverter arrival overflows";
+      return false;
+    }
+    current.push_back(arrival);
+  }
+  // Mirrors rule_patch.cpp's deterministic pairwise balanced AND builder.
+  while (current.size() > 1U) {
+    std::vector<std::size_t> next;
+    next.reserve((current.size() + 1U) / 2U);
+    for (std::size_t index = 0; index < current.size(); index += 2U) {
+      if (index + 1U == current.size()) {
+        next.push_back(current[index]);
+        continue;
+      }
+      std::size_t combined = std::max(current[index], current[index + 1U]);
+      if (!checked_size_add(combined, 1, &combined)) {
+        if (reason) *reason = "logic-risk AND arrival overflows";
+        return false;
+      }
+      next.push_back(combined);
+    }
+    current.swap(next);
+  }
+  *result = current.front();
+  return true;
+}
+
+struct LogicRiskScales {
+  double max_fanout_log = 0.0;
+  double unique_denominator = 1.0;
+  double fanout_denominator = 1.0;
+  double timing_denominator = 1.0;
+  std::size_t or_depth = 0;
+};
+
+struct LogicRiskComponents {
+  std::size_t unique_features = 0;
+  std::size_t feature_loads = 0;
+  double fanout_stress = 0.0;
+  std::size_t max_term_arrival = 0;
+  std::size_t match_depth = 0;
+  double unique_component = 0.0;
+  double fanout_component = 0.0;
+  double timing_component = 0.0;
+  double objective = 0.0;
+};
+
+LogicRiskScales make_logic_risk_scales(
+    const RuleCoverCostContext& context,
+    std::size_t fixed_rule_count,
+    std::size_t fixed_literal_count,
+    std::size_t literal_limit) {
+  LogicRiskScales scales;
+  for (const auto& metric : context.features) {
+    scales.max_fanout_log = std::max(
+        scales.max_fanout_log,
+        std::log1p(static_cast<double>(metric.base_fanout)));
+  }
+  scales.unique_denominator = static_cast<double>(std::max<std::size_t>(
+      1, std::min(fixed_literal_count, context.features.size())));
+  scales.fanout_denominator =
+      static_cast<double>(std::max<std::size_t>(1, fixed_literal_count));
+  std::size_t timing_limit = context.circuit_level;
+  std::size_t extra = ceil_log2_size(literal_limit);
+  if (extra != std::numeric_limits<std::size_t>::max()) {
+    extra += 1U;
+  }
+  if (extra == std::numeric_limits<std::size_t>::max() ||
+      !checked_size_add(timing_limit, extra, &timing_limit)) {
+    timing_limit = std::numeric_limits<std::size_t>::max();
+  }
+  scales.timing_denominator =
+      static_cast<double>(std::max<std::size_t>(1, timing_limit));
+  scales.or_depth = ceil_log2_size(fixed_rule_count);
+  return scales;
+}
+
+double normalized_fanout(const RuleCoverFeatureMetric& metric,
+                         const LogicRiskScales& scales) {
+  if (scales.max_fanout_log <= 0.0) return 0.0;
+  return std::log1p(static_cast<double>(metric.base_fanout)) /
+         scales.max_fanout_log;
+}
+
+bool compute_logic_risk_components(
+    const DecisionTreeModel& model,
+    const RuleCoverCostContext& context,
+    const LogicRiskScales& scales,
+    const RuleOptimizerOptions& options,
+    LogicRiskComponents* result,
+    std::string* reason) {
+  if (!result) return false;
+  *result = LogicRiskComponents{};
+  std::vector<char> used(context.features.size(), 0);
+  std::vector<char> negative_used(context.features.size(), 0);
+  std::vector<std::size_t> positive_loads(context.features.size(), 0);
+  for (const auto& rule : model.rules) {
+    std::size_t arrival = 0;
+    if (!term_arrival_level(rule, context, &arrival, reason)) return false;
+    result->max_term_arrival =
+        std::max(result->max_term_arrival, arrival);
+    for (const auto& literal : rule.terms) {
+      if (literal.first >= context.features.size()) {
+        if (reason) *reason = "logic-risk model feature is out of range";
+        return false;
+      }
+      used[literal.first] = 1;
+      if (literal.second == 0) {
+        negative_used[literal.first] = 1;
+      } else if (positive_loads[literal.first] ==
+                 std::numeric_limits<std::size_t>::max()) {
+        if (reason) *reason = "logic-risk positive load count overflows";
+        return false;
+      } else {
+        positive_loads[literal.first] += 1;
+      }
+    }
+  }
+  for (std::size_t feature = 0; feature < context.features.size(); ++feature) {
+    result->unique_features += used[feature] ? 1U : 0U;
+    std::size_t load = positive_loads[feature];
+    if (negative_used[feature] && !checked_size_add(load, 1, &load)) {
+      if (reason) *reason = "logic-risk feature load count overflows";
+      return false;
+    }
+    if (!checked_size_add(result->feature_loads, load,
+                          &result->feature_loads)) {
+      if (reason) *reason = "logic-risk total load count overflows";
+      return false;
+    }
+    result->fanout_stress +=
+        normalized_fanout(context.features[feature], scales) *
+        static_cast<double>(load);
+  }
+  if (scales.or_depth == std::numeric_limits<std::size_t>::max() ||
+      !checked_size_add(result->max_term_arrival, scales.or_depth,
+                        &result->match_depth)) {
+    if (reason) *reason = "logic-risk match depth overflows";
+    return false;
+  }
+  result->unique_component =
+      static_cast<double>(result->unique_features) /
+      scales.unique_denominator;
+  result->fanout_component =
+      result->fanout_stress / scales.fanout_denominator;
+  result->timing_component =
+      static_cast<double>(result->match_depth) /
+      scales.timing_denominator;
+  result->objective =
+      options.logic_risk_unique_feature_weight *
+          result->unique_component +
+      options.logic_risk_fanout_weight * result->fanout_component +
+      options.logic_risk_timing_weight * result->timing_component;
+  if (!std::isfinite(result->fanout_stress) ||
+      !std::isfinite(result->unique_component) ||
+      !std::isfinite(result->fanout_component) ||
+      !std::isfinite(result->timing_component) ||
+      !std::isfinite(result->objective)) {
+    if (reason) *reason = "logic-risk component is not finite";
+    return false;
+  }
+  return true;
+}
+
+void assign_logic_risk_components(const LogicRiskComponents& components,
+                                  bool before,
+                                  RuleOptimizerStats* stats) {
+  if (before) {
+    stats->unique_features_before = components.unique_features;
+    stats->feature_loads_before = components.feature_loads;
+    stats->fanout_stress_before = components.fanout_stress;
+    stats->max_term_arrival_before = components.max_term_arrival;
+    stats->match_depth_proxy_before = components.match_depth;
+    stats->logic_risk_unique_component_before =
+        components.unique_component;
+    stats->logic_risk_fanout_component_before =
+        components.fanout_component;
+    stats->logic_risk_timing_component_before =
+        components.timing_component;
+    stats->logic_risk_objective_before = components.objective;
+  } else {
+    stats->unique_features_after = components.unique_features;
+    stats->feature_loads_after = components.feature_loads;
+    stats->fanout_stress_after = components.fanout_stress;
+    stats->max_term_arrival_after = components.max_term_arrival;
+    stats->match_depth_proxy_after = components.match_depth;
+    stats->logic_risk_unique_component_after =
+        components.unique_component;
+    stats->logic_risk_fanout_component_after =
+        components.fanout_component;
+    stats->logic_risk_timing_component_after =
+        components.timing_component;
+    stats->logic_risk_objective_after = components.objective;
+  }
+}
+
 std::vector<Word> active_feature_signature(
     const PackedFeatureMatrix& features, std::size_t feature) {
   const std::size_t words =
@@ -147,10 +389,16 @@ std::vector<Word> active_feature_signature(
 
 std::vector<std::size_t> deduplicate_candidate_features(
     const PackedFeatureMatrix& features,
-    const std::vector<std::size_t>& raw_candidates) {
+    const std::vector<std::size_t>& raw_candidates,
+    bool preserve_logic_cost_alternatives) {
   std::vector<std::size_t> sorted = raw_candidates;
   std::sort(sorted.begin(), sorted.end());
   sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+
+  // Truth-equivalent feature nodes can have different circuit fanout and
+  // arrival metadata.  Phase 4 must retain those physical-node alternatives;
+  // the default and inverter-only paths preserve the smaller legacy master.
+  if (preserve_logic_cost_alternatives) return sorted;
 
   // Iterating sorted feature indices and using emplace selects the smallest
   // deterministic representative for each finite-table truth signature.
@@ -1263,6 +1511,450 @@ MasterPhaseResult solve_inverter_phase(
   return result;
 }
 
+struct LogicRiskMasterData {
+  std::vector<std::size_t> features;
+  std::vector<std::vector<HighsInt>> terms_by_feature;
+  std::vector<std::size_t> term_arrivals;
+  std::size_t incidences = 0;
+  std::size_t max_term_arrival = 0;
+  LogicRiskScales scales;
+};
+
+bool build_logic_risk_master_data(
+    const std::vector<CoverTerm>& terms,
+    const RuleCoverCostContext& context,
+    std::size_t fixed_rule_count,
+    std::size_t fixed_literal_count,
+    std::size_t literal_limit,
+    Clock::time_point deadline,
+    LogicRiskMasterData* result,
+    std::string* reason) {
+  if (!result) return false;
+  *result = LogicRiskMasterData{};
+  result->scales = make_logic_risk_scales(
+      context, fixed_rule_count, fixed_literal_count, literal_limit);
+  result->term_arrivals.resize(terms.size(), 0);
+  std::map<std::size_t, std::vector<HighsInt>> by_feature;
+  for (std::size_t term = 0; term < terms.size(); ++term) {
+    if ((term & 1023U) == 0U && Clock::now() >= deadline) {
+      if (reason) *reason =
+          "phase-4 deadline expired building logic-risk data";
+      return false;
+    }
+    if (!term_arrival_level(terms[term].rule, context,
+                            &result->term_arrivals[term], reason)) {
+      return false;
+    }
+    result->max_term_arrival = std::max(
+        result->max_term_arrival, result->term_arrivals[term]);
+    for (const auto& literal : terms[term].rule.terms) {
+      if (literal.first >= context.features.size()) {
+        if (reason) *reason =
+            "logic-risk term feature metadata is out of range";
+        return false;
+      }
+      by_feature[literal.first].push_back(static_cast<HighsInt>(term));
+    }
+  }
+  result->features.reserve(by_feature.size());
+  result->terms_by_feature.reserve(by_feature.size());
+  for (auto& entry : by_feature) {
+    if (Clock::now() >= deadline) {
+      if (reason) *reason =
+          "phase-4 deadline expired finalizing feature incidence";
+      return false;
+    }
+    if (entry.second.size() >
+        std::numeric_limits<std::size_t>::max() - result->incidences) {
+      if (reason) *reason = "logic-risk feature incidence overflows";
+      return false;
+    }
+    result->features.push_back(entry.first);
+    result->incidences += entry.second.size();
+    result->terms_by_feature.push_back(std::move(entry.second));
+  }
+  return Clock::now() < deadline;
+}
+
+MasterPhaseResult solve_logic_risk_phase(
+    const std::vector<CoverTerm>& terms,
+    const std::vector<std::vector<HighsInt>>& coverage_rows,
+    const InverterMasterData& inverter_data,
+    const LogicRiskMasterData& risk_data,
+    const RuleCoverCostContext& context,
+    const RuleOptimizerOptions& options,
+    std::size_t clause_limit,
+    std::size_t fixed_rule_count,
+    std::size_t fixed_literal_count,
+    std::size_t fixed_inverter_count,
+    bool integer,
+    Clock::time_point deadline,
+    std::size_t* master_variables,
+    std::size_t* master_constraints,
+    std::size_t* master_nonzeros,
+    std::size_t* feature_link_constraints) {
+  const Clock::time_point phase_start = Clock::now();
+  MasterPhaseResult result;
+  if (phase_start >= deadline) {
+    result.status = "Time limit";
+    result.error = "phase-4 deadline expired before logic-risk phase";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  if (inverter_data.features.size() !=
+          inverter_data.terms_by_feature.size() ||
+      risk_data.features.size() != risk_data.terms_by_feature.size() ||
+      risk_data.term_arrivals.size() != terms.size()) {
+    result.status = "Model error";
+    result.error = "logic-risk master data dimensions are inconsistent";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  const std::size_t highs_max = static_cast<std::size_t>(
+      std::numeric_limits<HighsInt>::max());
+  if (terms.size() > highs_max || coverage_rows.size() > highs_max ||
+      inverter_data.features.size() > highs_max ||
+      risk_data.features.size() > highs_max) {
+    result.status = "Model error";
+    result.error = "logic-risk master exceeds HiGHS index range";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  std::size_t inverter_offset = terms.size();
+  std::size_t feature_offset = 0;
+  std::size_t depth_column = 0;
+  std::size_t variable_size = 0;
+  if (!checked_size_add(inverter_offset, inverter_data.features.size(),
+                        &feature_offset) ||
+      !checked_size_add(feature_offset, risk_data.features.size(),
+                        &depth_column) ||
+      !checked_size_add(depth_column, 1, &variable_size) ||
+      variable_size > highs_max) {
+    result.status = "Model error";
+    result.error = "logic-risk variable count exceeds HiGHS index range";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+
+  Highs highs;
+  std::string option_error;
+  if (!checked_highs_option(&highs, "output_flag", false, &option_error) ||
+      !checked_highs_option(&highs, "threads", 1, &option_error) ||
+      !checked_highs_option(&highs, "parallel", std::string("off"),
+                            &option_error) ||
+      !checked_highs_option(&highs, "random_seed", 0, &option_error) ||
+      !checked_highs_option(&highs, "mip_rel_gap", 0.0, &option_error) ||
+      !checked_highs_option(&highs, "mip_abs_gap", 0.0, &option_error)) {
+    result.status = "Option error";
+    result.error = option_error;
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+
+  std::vector<double> costs(variable_size, 0.0);
+  const double unique_unit =
+      options.logic_risk_unique_feature_weight /
+      risk_data.scales.unique_denominator;
+  const double fanout_unit =
+      options.logic_risk_fanout_weight /
+      risk_data.scales.fanout_denominator;
+  const double timing_unit =
+      options.logic_risk_timing_weight /
+      risk_data.scales.timing_denominator;
+  for (std::size_t term = 0; term < terms.size(); ++term) {
+    for (const auto& literal : terms[term].rule.terms) {
+      if (literal.second != 0) {
+        costs[term] += fanout_unit * normalized_fanout(
+            context.features[literal.first], risk_data.scales);
+      }
+    }
+  }
+  for (std::size_t inverter = 0;
+       inverter < inverter_data.features.size(); ++inverter) {
+    const std::size_t feature = inverter_data.features[inverter];
+    if (feature >= context.features.size()) {
+      result.status = "Model error";
+      result.error = "logic-risk inverter feature is out of range";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+    costs[inverter_offset + inverter] =
+        fanout_unit * normalized_fanout(context.features[feature],
+                                        risk_data.scales);
+  }
+  for (std::size_t feature = 0;
+       feature < risk_data.features.size(); ++feature) {
+    costs[feature_offset + feature] = unique_unit;
+  }
+  costs[depth_column] = timing_unit;
+  for (double cost : costs) {
+    if (!std::isfinite(cost) || cost < 0.0) {
+      result.status = "Model error";
+      result.error = "logic-risk objective coefficient is invalid";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+  }
+
+  std::vector<double> lower(variable_size, 0.0);
+  std::vector<double> upper(variable_size, 1.0);
+  upper[depth_column] = static_cast<double>(risk_data.max_term_arrival);
+  const HighsInt variable_count = static_cast<HighsInt>(variable_size);
+  if (!highs_status_ok(highs.addCols(variable_count, costs.data(),
+                                     lower.data(), upper.data(), 0,
+                                     nullptr, nullptr, nullptr))) {
+    result.status = "Model error";
+    result.error = "HiGHS failed to add logic-risk variables";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  const double objective_offset =
+      options.logic_risk_timing_weight *
+      static_cast<double>(risk_data.scales.or_depth) /
+      risk_data.scales.timing_denominator;
+  if (!std::isfinite(objective_offset) ||
+      !highs_status_ok(highs.changeObjectiveOffset(objective_offset))) {
+    result.status = "Model error";
+    result.error = "HiGHS rejected the logic-risk OR-depth offset";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  if (integer && depth_column != 0) {
+    std::vector<HighsVarType> integrality(
+        depth_column, HighsVarType::kInteger);
+    if (!highs_status_ok(highs.changeColsIntegrality(
+            0, static_cast<HighsInt>(depth_column - 1U),
+            integrality.data()))) {
+      result.status = "Model error";
+      result.error = "HiGHS failed to mark logic-risk variables binary";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+  }
+
+  std::size_t row_count = 0;
+  std::size_t nonzeros = 0;
+  std::size_t feature_rows = 0;
+  auto record_row = [&](std::size_t row_nonzeros) {
+    if (row_count >= highs_max || row_nonzeros > highs_max - nonzeros) {
+      return false;
+    }
+    row_count += 1;
+    nonzeros += row_nonzeros;
+    return true;
+  };
+  auto add_row = [&](double row_lower, double row_upper,
+                     const std::vector<HighsInt>& indices,
+                     const std::vector<double>& values,
+                     const char* message) {
+    if (indices.size() != values.size() || indices.size() > highs_max ||
+        !record_row(indices.size()) ||
+        !highs_status_ok(highs.addRow(
+            row_lower, row_upper, static_cast<HighsInt>(indices.size()),
+            indices.empty() ? nullptr : indices.data(),
+            values.empty() ? nullptr : values.data()))) {
+      result.status = "Model error";
+      result.error = message;
+      return false;
+    }
+    return true;
+  };
+
+  std::vector<HighsInt> indices;
+  std::vector<double> values;
+  for (std::size_t positive = 0; positive < coverage_rows.size(); ++positive) {
+    if ((positive & 127U) == 0U && Clock::now() >= deadline) {
+      result.status = "Time limit";
+      result.error = "phase-4 deadline expired building coverage rows";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+    indices = coverage_rows[positive];
+    values.assign(indices.size(), 1.0);
+    if (indices.empty() ||
+        !add_row(1.0, kHighsInf, indices, values,
+                 "HiGHS failed to add a logic-risk coverage row")) {
+      if (indices.empty()) {
+        result.status = "Infeasible";
+        result.error = "a positive signature has no logic-risk term";
+      }
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+  }
+
+  indices.resize(terms.size());
+  values.assign(terms.size(), 1.0);
+  for (std::size_t term = 0; term < terms.size(); ++term) {
+    indices[term] = static_cast<HighsInt>(term);
+  }
+  if (!add_row(-kHighsInf, static_cast<double>(clause_limit),
+               indices, values,
+               "HiGHS failed to add the logic-risk clause limit") ||
+      !add_row(static_cast<double>(fixed_rule_count),
+               static_cast<double>(fixed_rule_count), indices, values,
+               "HiGHS failed to fix the logic-risk rule count")) {
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  for (std::size_t term = 0; term < terms.size(); ++term) {
+    values[term] = static_cast<double>(terms[term].rule.terms.size());
+  }
+  if (!add_row(static_cast<double>(fixed_literal_count),
+               static_cast<double>(fixed_literal_count), indices, values,
+               "HiGHS failed to fix the logic-risk literal count")) {
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+
+  // Recreate the exact expected-zero-literal OR and explicitly fix its sum to
+  // I*.  This prevents phase 4 from trading the proven inverter optimum for a
+  // lower weighted proxy value.
+  for (std::size_t inverter = 0;
+       inverter < inverter_data.features.size(); ++inverter) {
+    const HighsInt inverter_col = static_cast<HighsInt>(
+        inverter_offset + inverter);
+    const auto& using_terms = inverter_data.terms_by_feature[inverter];
+    for (HighsInt term_col : using_terms) {
+      indices = {term_col, inverter_col};
+      values = {-1.0, 1.0};
+      if (!add_row(0.0, kHighsInf, indices, values,
+                   "HiGHS failed to add a phase-4 inverter lower link")) {
+        result.elapsed = elapsed_ms(phase_start);
+        return result;
+      }
+    }
+    indices = using_terms;
+    values.assign(indices.size(), -1.0);
+    indices.push_back(inverter_col);
+    values.push_back(1.0);
+    if (!add_row(-kHighsInf, 0.0, indices, values,
+                 "HiGHS failed to add a phase-4 inverter upper link")) {
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+  }
+  if (inverter_data.features.empty()) {
+    if (fixed_inverter_count != 0) {
+      result.status = "Model error";
+      result.error = "fixed inverter count has no phase-4 variables";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+  } else {
+    indices.resize(inverter_data.features.size());
+    values.assign(indices.size(), 1.0);
+    for (std::size_t inverter = 0;
+         inverter < inverter_data.features.size(); ++inverter) {
+      indices[inverter] = static_cast<HighsInt>(inverter_offset + inverter);
+    }
+    if (!add_row(static_cast<double>(fixed_inverter_count),
+                 static_cast<double>(fixed_inverter_count), indices, values,
+                 "HiGHS failed to fix the optimal inverter count")) {
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+  }
+
+  // q_f is the exact OR of all selected terms using feature f in either
+  // polarity.  It models the number of distinct feature taps.
+  for (std::size_t feature = 0;
+       feature < risk_data.features.size(); ++feature) {
+    const HighsInt feature_col = static_cast<HighsInt>(
+        feature_offset + feature);
+    const auto& using_terms = risk_data.terms_by_feature[feature];
+    for (HighsInt term_col : using_terms) {
+      indices = {term_col, feature_col};
+      values = {-1.0, 1.0};
+      if (!add_row(0.0, kHighsInf, indices, values,
+                   "HiGHS failed to add a feature-OR lower link")) {
+        result.elapsed = elapsed_ms(phase_start);
+        return result;
+      }
+      feature_rows += 1;
+    }
+    indices = using_terms;
+    values.assign(indices.size(), -1.0);
+    indices.push_back(feature_col);
+    values.push_back(1.0);
+    if (!add_row(-kHighsInf, 0.0, indices, values,
+                 "HiGHS failed to add a feature-OR upper link")) {
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+    feature_rows += 1;
+  }
+
+  const HighsInt depth_col = static_cast<HighsInt>(depth_column);
+  for (std::size_t term = 0; term < terms.size(); ++term) {
+    indices = {static_cast<HighsInt>(term), depth_col};
+    values = {-static_cast<double>(risk_data.term_arrivals[term]), 1.0};
+    if (!add_row(0.0, kHighsInf, indices, values,
+                 "HiGHS failed to add a selected-term depth row")) {
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+  }
+
+  if (master_variables) *master_variables = variable_size;
+  if (master_constraints) *master_constraints = row_count;
+  if (master_nonzeros) *master_nonzeros = nonzeros;
+  if (feature_link_constraints) *feature_link_constraints = feature_rows;
+  if (Clock::now() >= deadline) {
+    result.status = "Time limit";
+    result.error = "phase-4 deadline expired before logic-risk run";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  const double seconds = std::max(
+      0.001,
+      std::chrono::duration<double>(deadline - Clock::now()).count());
+  if (!checked_highs_option(&highs, "time_limit", seconds, &option_error)) {
+    result.status = "Option error";
+    result.error = option_error;
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+
+  result.invoked = true;
+  const HighsStatus run_status = highs.run();
+  result.status = highs.modelStatusToString(highs.getModelStatus());
+  if (!highs_status_ok(run_status)) {
+    result.error = "HiGHS logic-risk run returned an error";
+  }
+  result.optimal = highs.getModelStatus() == HighsModelStatus::kOptimal;
+  const HighsInfo& info = highs.getInfo();
+  if (info.valid) {
+    result.objective = info.objective_function_value;
+    result.dual_bound = info.mip_dual_bound;
+    result.gap = info.mip_gap;
+    if (info.simplex_iteration_count > 0) {
+      result.simplex_iterations =
+          static_cast<std::size_t>(info.simplex_iteration_count);
+    }
+    if (info.mip_node_count > 0) {
+      result.mip_nodes = static_cast<std::size_t>(info.mip_node_count);
+    }
+  }
+  const HighsSolution& solution = highs.getSolution();
+  if (solution.value_valid) result.column_values = solution.col_value;
+  if (!integer && solution.dual_valid &&
+      solution.row_dual.size() >= coverage_rows.size() &&
+      !coverage_rows.empty()) {
+    result.dual_min = solution.row_dual[0];
+    result.dual_max = solution.row_dual[0];
+    for (std::size_t row = 0; row < coverage_rows.size(); ++row) {
+      const double dual = solution.row_dual[row];
+      result.dual_min = std::min(result.dual_min, dual);
+      result.dual_max = std::max(result.dual_max, dual);
+      result.dual_sum_abs += std::fabs(dual);
+      if (std::fabs(dual) > 1.0e-9) result.dual_nonzero += 1;
+    }
+  }
+  result.elapsed = elapsed_ms(phase_start);
+  return result;
+}
+
 void assign_lp3_phase(const MasterPhaseResult& phase,
                       RuleOptimizerStats* stats) {
   stats->lp3_status = phase.status;
@@ -1283,6 +1975,28 @@ void assign_mip3_phase(const MasterPhaseResult& phase,
   stats->mip3_gap = phase.gap;
   stats->mip3_nodes = phase.mip_nodes;
   stats->mip3_ms = phase.elapsed;
+}
+
+void assign_lp4_phase(const MasterPhaseResult& phase,
+                      RuleOptimizerStats* stats) {
+  stats->lp4_status = phase.status;
+  stats->lp4_objective = phase.objective;
+  stats->lp4_iterations = phase.simplex_iterations;
+  stats->lp4_dual_nonzero = phase.dual_nonzero;
+  stats->lp4_dual_min = phase.dual_min;
+  stats->lp4_dual_max = phase.dual_max;
+  stats->lp4_dual_sum_abs = phase.dual_sum_abs;
+  stats->lp4_ms = phase.elapsed;
+}
+
+void assign_mip4_phase(const MasterPhaseResult& phase,
+                       RuleOptimizerStats* stats) {
+  stats->mip4_status = phase.status;
+  stats->mip4_objective = phase.objective;
+  stats->mip4_dual_bound = phase.dual_bound;
+  stats->mip4_gap = phase.gap;
+  stats->mip4_nodes = phase.mip_nodes;
+  stats->mip4_ms = phase.elapsed;
 }
 
 void assign_lp_phase(const MasterPhaseResult& phase,
@@ -1358,7 +2072,8 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     const std::vector<int>& labels,
     const std::vector<std::size_t>& raw_dt_candidate_features,
     const DecisionTreeModel& baseline_model,
-    const RuleOptimizerOptions& options) {
+    const RuleOptimizerOptions& options,
+    const RuleCoverCostContext* cost_context) {
   const Clock::time_point total_start = Clock::now();
   RuleOptimizationResult result;
   result.model = baseline_model;
@@ -1386,10 +2101,18 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
               RuleCoverThirdObjective::unique_inverters
           ? "unique_inverters"
           : "none";
+  stats.fourth_objective =
+      options.cover_logic_risk_proxy ? "logic_risk_proxy" : "none";
   stats.phase3_timeout_ms = options.phase3_timeout_ms;
+  stats.phase4_timeout_ms = options.phase4_timeout_ms;
+  stats.logic_risk_unique_feature_weight =
+      options.logic_risk_unique_feature_weight;
+  stats.logic_risk_fanout_weight = options.logic_risk_fanout_weight;
+  stats.logic_risk_timing_weight = options.logic_risk_timing_weight;
 
 #ifndef USE_HIGHS
   (void)labels;
+  (void)cost_context;
   stats.status = "backend_unavailable";
   stats.reason = "HiGHS support was not compiled (USE_HIGHS is disabled)";
   finish_stats(&result, total_start);
@@ -1404,6 +2127,47 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     stats.status = "invalid";
     finish_stats(&result, total_start);
     return result;
+  }
+  bool logic_risk_context_usable = false;
+  if (options.cover_logic_risk_proxy) {
+    const bool finite_weights =
+        std::isfinite(options.logic_risk_unique_feature_weight) &&
+        std::isfinite(options.logic_risk_fanout_weight) &&
+        std::isfinite(options.logic_risk_timing_weight);
+    const bool nonnegative_weights =
+        options.logic_risk_unique_feature_weight >= 0.0 &&
+        options.logic_risk_fanout_weight >= 0.0 &&
+        options.logic_risk_timing_weight >= 0.0;
+    if (!finite_weights || !nonnegative_weights) {
+      stats.status = "invalid";
+      stats.reason =
+          "logic-risk weights must be finite and nonnegative";
+      finish_stats(&result, total_start);
+      return result;
+    }
+    if (options.cover_third_objective !=
+        RuleCoverThirdObjective::unique_inverters) {
+      stats.status = "invalid";
+      stats.reason =
+          "logic-risk phase requires the unique-inverter third objective";
+      finish_stats(&result, total_start);
+      return result;
+    }
+    if (!cost_context) {
+      stats.logic_risk_context_reason =
+          "logic-risk cost context is missing";
+    } else if (cost_context->features.size() != features.feature_count) {
+      stats.logic_risk_context_reason =
+          "logic-risk feature metadata size does not match the matrix";
+    } else if (options.logic_risk_unique_feature_weight == 0.0 &&
+               options.logic_risk_fanout_weight == 0.0 &&
+               options.logic_risk_timing_weight == 0.0) {
+      stats.logic_risk_context_reason =
+          "all logic-risk objective weights are zero";
+    } else {
+      logic_risk_context_usable = true;
+      stats.logic_risk_context_available = true;
+    }
   }
   for (int label : labels) {
     if (label == 1) {
@@ -1429,7 +2193,8 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
   const Clock::time_point preprocessing_start = Clock::now();
 
   const std::vector<std::size_t> candidates =
-      deduplicate_candidate_features(features, raw_dt_candidate_features);
+      deduplicate_candidate_features(features, raw_dt_candidate_features,
+                                     options.cover_logic_risk_proxy);
   stats.unique_candidate_features = candidates.size();
   stats.duplicate_candidate_features =
       raw_dt_candidate_features.size() - candidates.size();
@@ -1566,13 +2331,16 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
   // For the optional inverter objective, equally short alternatives must be
   // retained when their expected-zero feature sets are incomparable.  A term
   // whose zero-feature set is a superset is exact-dominated for every possible
-  // union with other selected terms and can still be removed.
+  // union with other selected terms and can still be removed.  Phase 4 also
+  // depends on feature identity, fanout, arrival, and cross-term reuse, so it
+  // retains every nonduplicate equally short alternative.
   std::map<std::vector<Word>, CoverTerm> by_coverage;
   std::map<std::vector<Word>, std::vector<CoverTerm>>
       alternatives_by_coverage;
   const bool optimize_unique_inverters =
       options.cover_third_objective ==
       RuleCoverThirdObjective::unique_inverters;
+  const bool optimize_logic_risk = options.cover_logic_risk_proxy;
   std::size_t materialized_terms = 0;
   for (const auto& entry : unique_term_keys) {
     if ((materialized_terms++ & 255U) == 0U && Clock::now() >= deadline) {
@@ -1619,6 +2387,11 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     }
     if (term.rule.terms.size() > shortest) {
       stats.pool_terms_coverage_deduplicated += 1;
+      continue;
+    }
+
+    if (optimize_logic_risk) {
+      alternatives.push_back(std::move(term));
       continue;
     }
 
@@ -2087,16 +2860,359 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     return result;
   }
 
-  result.model = std::move(candidate_model);
+  const std::size_t optimal_inverter_count =
+      static_cast<std::size_t>(rounded_inverters);
+  stats.hardware_optimal = true;
+
+  if (!optimize_logic_risk) {
+    result.model = std::move(candidate_model);
+    stats.accepted = true;
+    stats.optimal = stats.pool_complete && stats.rules_optimal &&
+                    stats.literals_optimal && stats.hardware_optimal;
+    stats.status = "accepted";
+    stats.reason.clear();
+    stats.rules_after = result.model.rules.size();
+    stats.literals_after = count_literals(result.model);
+    stats.unique_inverters_after = selected_inverters.size();
+    stats.rounds_used = 1;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+
+  LogicRiskComponents mip3_logic_components;
+  bool have_mip3_logic_components = false;
+  auto accept_verified_mip3 =
+      [&](const std::string& status, const std::string& reason,
+          bool timed_out, bool unavailable) -> RuleOptimizationResult {
+    result.model = candidate_model;
+    stats.accepted = true;
+    stats.verified = true;
+    stats.optimal = false;
+    stats.hardware_optimal = true;
+    stats.logic_risk_optimal = false;
+    stats.phase4_timeout_fallback = timed_out;
+    stats.phase4_unavailable_fallback = unavailable;
+    stats.status = status;
+    stats.reason = reason;
+    stats.verification_false_positive = 0;
+    stats.verification_false_negative = 0;
+    stats.rules_after = result.model.rules.size();
+    stats.literals_after = count_literals(result.model);
+    stats.unique_inverters_after = selected_inverters.size();
+    if (have_mip3_logic_components) {
+      assign_logic_risk_components(mip3_logic_components, false, &stats);
+    }
+    stats.rounds_used = 1;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  };
+
+  if (!logic_risk_context_usable || !cost_context) {
+    return accept_verified_mip3(
+        "accepted_phase4_unavailable",
+        stats.logic_risk_context_reason.empty()
+            ? "logic-risk cost context is unavailable"
+            : stats.logic_risk_context_reason,
+        false, true);
+  }
+
+  const LogicRiskScales preliminary_scales = make_logic_risk_scales(
+      *cost_context, optimal_rule_count, optimal_literal_count,
+      stats.literal_limit);
+  stats.logic_risk_max_fanout_log = preliminary_scales.max_fanout_log;
+  stats.logic_risk_unique_denominator =
+      preliminary_scales.unique_denominator;
+  stats.logic_risk_fanout_denominator =
+      preliminary_scales.fanout_denominator;
+  stats.logic_risk_timing_denominator =
+      preliminary_scales.timing_denominator;
+  stats.logic_risk_or_depth = preliminary_scales.or_depth;
+  LogicRiskComponents baseline_logic_components;
+  std::string component_error;
+  if (!compute_logic_risk_components(
+          baseline_model, *cost_context, preliminary_scales, options,
+          &baseline_logic_components, &component_error) ||
+      !compute_logic_risk_components(
+          candidate_model, *cost_context, preliminary_scales, options,
+          &mip3_logic_components, &component_error)) {
+    stats.logic_risk_context_available = false;
+    stats.logic_risk_context_reason = component_error.empty()
+                                          ? "logic-risk context is unusable"
+                                          : component_error;
+    return accept_verified_mip3("accepted_phase4_unavailable",
+                                stats.logic_risk_context_reason,
+                                false, true);
+  }
+  have_mip3_logic_components = true;
+  assign_logic_risk_components(baseline_logic_components, true, &stats);
+
+  if (options.phase4_timeout_ms == 0) {
+    return accept_verified_mip3(
+        "accepted_phase4_timeout",
+        "phase-4 wall-clock sub-budget is zero", true, false);
+  }
+
+  Clock::time_point phase4_deadline = deadline;
+  if (options.phase4_timeout_ms !=
+      std::numeric_limits<std::uint64_t>::max()) {
+    const Clock::time_point phase4_start = Clock::now();
+    using Phase4Milliseconds = std::chrono::milliseconds;
+    using Phase4Rep = Phase4Milliseconds::rep;
+    if (options.phase4_timeout_ms <=
+        static_cast<std::uint64_t>(
+            std::numeric_limits<Phase4Rep>::max())) {
+      const Phase4Milliseconds requested(static_cast<Phase4Rep>(
+          options.phase4_timeout_ms));
+      if (requested < deadline - phase4_start) {
+        phase4_deadline = phase4_start + requested;
+      }
+    }
+  }
+
+  LogicRiskMasterData risk_data;
+  std::string risk_data_error;
+  if (!build_logic_risk_master_data(
+          terms, *cost_context, optimal_rule_count, optimal_literal_count,
+          stats.literal_limit, phase4_deadline, &risk_data,
+          &risk_data_error)) {
+    if (Clock::now() >= phase4_deadline) {
+      return accept_verified_mip3(
+          "accepted_phase4_timeout",
+          risk_data_error.empty()
+              ? "phase-4 deadline expired building logic-risk data"
+              : risk_data_error,
+          true, false);
+    }
+    stats.status = "unknown";
+    stats.reason = risk_data_error.empty()
+                       ? "failed to build phase-4 logic-risk data"
+                       : risk_data_error;
+    stats.verified = false;
+    stats.hardware_optimal = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+  stats.logic_risk_feature_variables = risk_data.features.size();
+
+  MasterPhaseResult lp4 = solve_logic_risk_phase(
+      terms, coverage_rows, inverter_data, risk_data, *cost_context, options,
+      stats.clause_limit, optimal_rule_count, optimal_literal_count,
+      optimal_inverter_count, false, phase4_deadline,
+      &stats.master_variables, &stats.master_constraints,
+      &stats.master_nonzeros, &stats.logic_risk_feature_link_constraints);
+  stats.solver_checks += lp4.invoked ? 1 : 0;
+  assign_lp4_phase(lp4, &stats);
+  if (!lp4.optimal) {
+    if (phase_failure_status(lp4.status) == "timeout") {
+      return accept_verified_mip3(
+          "accepted_phase4_timeout",
+          lp4.error.empty() ? "HiGHS LP4 reached the phase-4 deadline"
+                            : lp4.error,
+          true, false);
+    }
+    stats.status = phase_failure_status(lp4.status);
+    stats.reason = lp4.error.empty()
+                       ? "HiGHS LP4 did not reach optimality: " + lp4.status
+                       : lp4.error;
+    stats.verified = false;
+    stats.hardware_optimal = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+  if (!std::isfinite(lp4.objective) || lp4.objective < -1.0e-7) {
+    stats.status = "verification_failed";
+    stats.reason = "HiGHS LP4 returned an invalid objective";
+    stats.verified = false;
+    stats.hardware_optimal = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+  if (Clock::now() >= phase4_deadline) {
+    return accept_verified_mip3(
+        "accepted_phase4_timeout",
+        "phase-4 deadline expired after HiGHS LP4", true, false);
+  }
+
+  MasterPhaseResult mip4 = solve_logic_risk_phase(
+      terms, coverage_rows, inverter_data, risk_data, *cost_context, options,
+      stats.clause_limit, optimal_rule_count, optimal_literal_count,
+      optimal_inverter_count, true, phase4_deadline,
+      &stats.master_variables, &stats.master_constraints,
+      &stats.master_nonzeros, &stats.logic_risk_feature_link_constraints);
+  stats.solver_checks += mip4.invoked ? 1 : 0;
+  assign_mip4_phase(mip4, &stats);
+  if (!mip4.optimal) {
+    if (phase_failure_status(mip4.status) == "timeout") {
+      return accept_verified_mip3(
+          "accepted_phase4_timeout",
+          mip4.error.empty() ? "HiGHS MIP4 reached the phase-4 deadline"
+                             : mip4.error,
+          true, false);
+    }
+    stats.status = phase_failure_status(mip4.status);
+    stats.reason = mip4.error.empty()
+                       ? "HiGHS MIP4 did not reach optimality: " + mip4.status
+                       : mip4.error;
+    stats.verified = false;
+    stats.hardware_optimal = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+  if (Clock::now() >= phase4_deadline) {
+    return accept_verified_mip3(
+        "accepted_phase4_timeout",
+        "phase-4 deadline expired after HiGHS MIP4", true, false);
+  }
+
+  std::size_t p4_variable_count = terms.size();
+  if (!checked_size_add(p4_variable_count, inverter_data.features.size(),
+                        &p4_variable_count) ||
+      !checked_size_add(p4_variable_count, risk_data.features.size(),
+                        &p4_variable_count) ||
+      !checked_size_add(p4_variable_count, 1, &p4_variable_count) ||
+      !std::isfinite(mip4.objective) || mip4.objective < -1.0e-7 ||
+      mip4.column_values.size() != p4_variable_count ||
+      lp4.objective > mip4.objective +
+                          1.0e-7 * (1.0 + std::fabs(mip4.objective))) {
+    stats.status = "verification_failed";
+    stats.reason = "HiGHS MIP4 returned an invalid proxy solution";
+    stats.verified = false;
+    stats.hardware_optimal = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+
+  DecisionTreeModel p4_model;
+  std::set<std::size_t> p4_inverters;
+  if (!extract_term_model(terms, mip4.column_values, optimal_rule_count,
+                          optimal_literal_count, &p4_model,
+                          &stats.reason, &p4_inverters) ||
+      p4_inverters.size() != optimal_inverter_count) {
+    stats.status = "verification_failed";
+    if (stats.reason.empty()) {
+      stats.reason = "MIP4 model violates the fixed inverter optimum";
+    }
+    stats.verified = false;
+    stats.hardware_optimal = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+
+  std::set<std::size_t> p4_features;
+  for (const auto& rule : p4_model.rules) {
+    for (const auto& literal : rule.terms) {
+      p4_features.insert(literal.first);
+    }
+  }
+  const std::size_t p4_inverter_offset = terms.size();
+  const std::size_t p4_feature_offset =
+      p4_inverter_offset + inverter_data.features.size();
+  bool valid_auxiliary_columns = true;
+  auto valid_binary = [](double value) {
+    return std::isfinite(value) &&
+           std::fabs(value - std::round(value)) <= 1.0e-6 &&
+           value >= -1.0e-6 && value <= 1.0 + 1.0e-6;
+  };
+  for (std::size_t inverter = 0;
+       inverter < inverter_data.features.size(); ++inverter) {
+    const double value =
+        mip4.column_values[p4_inverter_offset + inverter];
+    if (!valid_binary(value) ||
+        (value > 0.5) !=
+            (p4_inverters.count(inverter_data.features[inverter]) != 0)) {
+      valid_auxiliary_columns = false;
+      break;
+    }
+  }
+  for (std::size_t feature = 0;
+       valid_auxiliary_columns && feature < risk_data.features.size();
+       ++feature) {
+    const double value = mip4.column_values[p4_feature_offset + feature];
+    if (!valid_binary(value) ||
+        (value > 0.5) !=
+            (p4_features.count(risk_data.features[feature]) != 0)) {
+      valid_auxiliary_columns = false;
+      break;
+    }
+  }
+
+  LogicRiskComponents p4_components;
+  component_error.clear();
+  if (!valid_auxiliary_columns ||
+      !compute_logic_risk_components(
+          p4_model, *cost_context, risk_data.scales, options,
+          &p4_components, &component_error)) {
+    stats.status = "verification_failed";
+    stats.reason = valid_auxiliary_columns
+                       ? component_error
+                       : "MIP4 q/z columns violate their exact OR definitions";
+    stats.verified = false;
+    stats.hardware_optimal = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+  const double depth_value = mip4.column_values.back();
+  const bool depth_lower_bound_valid =
+      std::isfinite(depth_value) && depth_value >= -1.0e-6 &&
+      depth_value + 1.0e-6 >=
+          static_cast<double>(p4_components.max_term_arrival);
+  const bool depth_exact_when_weighted =
+      options.logic_risk_timing_weight == 0.0 ||
+      std::fabs(depth_value -
+                static_cast<double>(p4_components.max_term_arrival)) <=
+          1.0e-6;
+  const double objective_tolerance =
+      1.0e-6 * (1.0 + std::fabs(p4_components.objective));
+  if (!depth_lower_bound_valid || !depth_exact_when_weighted ||
+      std::fabs(mip4.objective - p4_components.objective) >
+          objective_tolerance) {
+    stats.status = "verification_failed";
+    stats.reason =
+        "MIP4 depth/objective disagrees with the extracted rule model";
+    stats.verified = false;
+    stats.hardware_optimal = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+
+  const VerificationStatus mip4_verification = verify_candidate_model(
+      p4_model, signature_result.patterns, candidate_position, features,
+      labels, phase4_deadline, &stats, &stats.reason);
+  if (mip4_verification == VerificationStatus::timeout) {
+    return accept_verified_mip3("accepted_phase4_timeout", stats.reason,
+                                true, false);
+  }
+  if (mip4_verification != VerificationStatus::verified) {
+    stats.status = "verification_failed";
+    stats.hardware_optimal = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+
+  result.model = std::move(p4_model);
   stats.accepted = true;
   stats.hardware_optimal = true;
+  stats.logic_risk_optimal = true;
   stats.optimal = stats.pool_complete && stats.rules_optimal &&
-                  stats.literals_optimal && stats.hardware_optimal;
+                  stats.literals_optimal && stats.hardware_optimal &&
+                  stats.logic_risk_optimal;
   stats.status = "accepted";
   stats.reason.clear();
   stats.rules_after = result.model.rules.size();
   stats.literals_after = count_literals(result.model);
-  stats.unique_inverters_after = selected_inverters.size();
+  stats.unique_inverters_after = p4_inverters.size();
+  assign_logic_risk_components(p4_components, false, &stats);
   stats.rounds_used = 1;
   stats.solver_ms = elapsed_ms(solver_start);
   finish_stats(&result, total_start);
@@ -2110,7 +3226,10 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     stats.rules_optimal = false;
     stats.literals_optimal = false;
     stats.hardware_optimal = false;
+    stats.logic_risk_optimal = false;
     stats.phase3_timeout_fallback = false;
+    stats.phase4_timeout_fallback = false;
+    stats.phase4_unavailable_fallback = false;
     stats.rules_after = stats.rules_before;
     stats.literals_after = stats.literals_before;
     stats.unique_inverters_after = stats.unique_inverters_before;
