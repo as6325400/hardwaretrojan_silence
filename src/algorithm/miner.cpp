@@ -480,6 +480,18 @@ bool build_training_data(const circuit& golden,
     neg_trace->sizes.clear();
     neg_trace->seed = 1337;
   }
+#ifdef USE_CUDA
+  // A GPU failure may occur after some random-negative trace entries have
+  // already been appended.  Remember the caller-owned trace boundary so the
+  // CPU fallback can rebuild the same training-data attempt without retaining
+  // a stale GPU prefix.
+  const std::size_t trace_masks_before_gpu =
+      neg_trace ? neg_trace->masks.size() : 0;
+  const std::size_t trace_sizes_before_gpu =
+      neg_trace ? neg_trace->sizes.size() : 0;
+  const std::uint32_t trace_seed_before_gpu =
+      neg_trace ? neg_trace->seed : 1337;
+#endif
 
   circuit golden_train = golden;
   circuit trojan_train = trojan;
@@ -874,6 +886,11 @@ bool build_training_data(const circuit& golden,
     data->labels.reserve(estimated_total);
     data->pos_count = 0;
     data->neg_count = 0;
+    if (neg_trace) {
+      neg_trace->masks.resize(trace_masks_before_gpu);
+      neg_trace->sizes.resize(trace_sizes_before_gpu);
+      neg_trace->seed = trace_seed_before_gpu;
+    }
   }
   // ── fallback to CPU path ──────────────────────────────────────────────────
 #endif  // USE_CUDA
