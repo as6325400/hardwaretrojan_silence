@@ -2,12 +2,20 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <mutex>
+#include <queue>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <z3++.h>
@@ -988,6 +996,961 @@ SatNodeResult sat_check_payload_node(const circuit& golden,
 }
 
 }  // namespace
+
+namespace {
+
+using RuleMiterClock = std::chrono::steady_clock;
+
+constexpr std::size_t kRuleMiterHardCounterexampleLimit = 5;
+
+struct RuleMiterAlignment {
+  // For each Trojan PI position, the corresponding Golden PI position.
+  std::vector<std::size_t> trojan_pi_to_golden_pos;
+  // Golden/Trojan PO node indices paired by output name, in Golden PO order.
+  std::vector<std::pair<int, int>> po_node_pairs;
+};
+
+struct ScalarRuleResult {
+  bool error_pattern = false;
+  bool rule_matches = false;
+};
+
+bool validate_rule_miter_dag(const circuit& net,
+                             const char* circuit_name,
+                             std::string* error) {
+  const std::size_t node_count = net.node_count();
+  std::vector<std::size_t> indegree(node_count, 0);
+  std::vector<std::vector<int>> fanout(node_count);
+  std::size_t gate_count = 0;
+
+  for (std::size_t idx = 0; idx < node_count; ++idx) {
+    const cell& node = net.get_cell(static_cast<int>(idx));
+    if (node.ctype == CType::UNDEF) {
+      if (error) {
+        *error = std::string(circuit_name) + " contains undefined node: " +
+                 net.node_name(static_cast<int>(idx));
+      }
+      return false;
+    }
+    if (node.ctype != CType::GATE) continue;
+    gate_count += 1;
+    if (node.inputs.empty()) {
+      if (error) {
+        *error = std::string(circuit_name) + " gate has no inputs: " +
+                 net.node_name(static_cast<int>(idx));
+      }
+      return false;
+    }
+    for (int input_idx : node.inputs) {
+      if (input_idx < 0 ||
+          static_cast<std::size_t>(input_idx) >= node_count) {
+        if (error) {
+          *error = std::string(circuit_name) +
+                   " gate input index out of range: " +
+                   net.node_name(static_cast<int>(idx));
+        }
+        return false;
+      }
+      const cell& input = net.get_cell(input_idx);
+      if (input.ctype == CType::UNDEF) {
+        if (error) {
+          *error = std::string(circuit_name) +
+                   " gate references undefined input: " +
+                   net.node_name(static_cast<int>(idx));
+        }
+        return false;
+      }
+      if (input.ctype == CType::GATE) {
+        indegree[idx] += 1;
+        fanout[static_cast<std::size_t>(input_idx)].push_back(
+            static_cast<int>(idx));
+      }
+    }
+  }
+
+  std::queue<int> ready;
+  for (std::size_t idx = 0; idx < node_count; ++idx) {
+    if (net.get_cell(static_cast<int>(idx)).ctype == CType::GATE &&
+        indegree[idx] == 0) {
+      ready.push(static_cast<int>(idx));
+    }
+  }
+
+  std::size_t visited_gates = 0;
+  while (!ready.empty()) {
+    const int node_idx = ready.front();
+    ready.pop();
+    visited_gates += 1;
+    for (int next_idx : fanout[static_cast<std::size_t>(node_idx)]) {
+      std::size_t& next_indegree =
+          indegree[static_cast<std::size_t>(next_idx)];
+      if (next_indegree == 0) {
+        if (error) {
+          *error = std::string(circuit_name) +
+                   " DAG validation encountered invalid indegree";
+        }
+        return false;
+      }
+      next_indegree -= 1;
+      if (next_indegree == 0) ready.push(next_idx);
+    }
+  }
+
+  if (visited_gates != gate_count) {
+    if (error) {
+      *error = std::string(circuit_name) +
+               " combinational cycle detected";
+    }
+    return false;
+  }
+  return true;
+}
+
+double rule_miter_elapsed_ms(RuleMiterClock::time_point start) {
+  return std::chrono::duration<double, std::milli>(
+             RuleMiterClock::now() - start)
+      .count();
+}
+
+bool rule_miter_budget_expired(RuleMiterClock::time_point start,
+                               std::uint64_t timeout_ms) {
+  if (timeout_ms == 0) return true;
+  const long double elapsed = static_cast<long double>(
+      rule_miter_elapsed_ms(start));
+  return elapsed >= static_cast<long double>(timeout_ms);
+}
+
+unsigned rule_miter_remaining_timeout_ms(
+    RuleMiterClock::time_point start,
+    std::uint64_t timeout_ms) {
+  const long double elapsed = static_cast<long double>(
+      rule_miter_elapsed_ms(start));
+  const long double remaining =
+      static_cast<long double>(timeout_ms) - elapsed;
+  if (remaining <= 0.0L) return 0;
+  const long double rounded = std::ceil(remaining);
+  const long double max_unsigned = static_cast<long double>(
+      std::numeric_limits<unsigned>::max());
+  return static_cast<unsigned>(std::max<long double>(
+      1.0L, std::min(rounded, max_unsigned)));
+}
+
+bool build_named_node_map(const circuit& net,
+                          const std::vector<int>& indices,
+                          const char* kind,
+                          std::unordered_map<std::string, int>* by_name,
+                          std::string* error) {
+  if (!by_name) {
+    if (error) *error = std::string("null ") + kind + " name map";
+    return false;
+  }
+  by_name->clear();
+  by_name->reserve(indices.size());
+  for (int node_idx : indices) {
+    if (node_idx < 0 ||
+        static_cast<std::size_t>(node_idx) >= net.node_count()) {
+      if (error) *error = std::string(kind) + " node index out of range";
+      return false;
+    }
+    const std::string& name = net.node_name(node_idx);
+    if (name.empty()) {
+      if (error) *error = std::string(kind) + " has an empty name";
+      return false;
+    }
+    if (!by_name->emplace(name, node_idx).second) {
+      if (error) {
+        *error = std::string("duplicate ") + kind + " name: " + name;
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+bool build_rule_miter_alignment(const circuit& golden,
+                                const circuit& trojan,
+                                RuleMiterAlignment* alignment,
+                                std::string* error) {
+  if (!alignment) {
+    if (error) *error = "null rule-miter alignment output";
+    return false;
+  }
+
+  std::unordered_map<std::string, int> golden_pi_by_name;
+  std::unordered_map<std::string, int> trojan_pi_by_name;
+  if (!build_named_node_map(golden, golden.pi_indices(), "Golden PI",
+                            &golden_pi_by_name, error) ||
+      !build_named_node_map(trojan, trojan.pi_indices(), "Trojan PI",
+                            &trojan_pi_by_name, error)) {
+    return false;
+  }
+  if (golden_pi_by_name.size() != trojan_pi_by_name.size()) {
+    if (error) *error = "Golden/Trojan PI count mismatch";
+    return false;
+  }
+
+  std::unordered_map<std::string, std::size_t> golden_pi_pos;
+  golden_pi_pos.reserve(golden.pi_count());
+  for (std::size_t pos = 0; pos < golden.pi_indices().size(); ++pos) {
+    golden_pi_pos.emplace(golden.node_name(golden.pi_indices()[pos]), pos);
+  }
+
+  alignment->trojan_pi_to_golden_pos.clear();
+  alignment->trojan_pi_to_golden_pos.reserve(trojan.pi_count());
+  for (int trojan_pi : trojan.pi_indices()) {
+    const std::string& name = trojan.node_name(trojan_pi);
+    const auto it = golden_pi_pos.find(name);
+    if (it == golden_pi_pos.end()) {
+      if (error) *error = "Trojan PI missing from Golden circuit: " + name;
+      return false;
+    }
+    alignment->trojan_pi_to_golden_pos.push_back(it->second);
+  }
+  for (int golden_pi : golden.pi_indices()) {
+    const std::string& name = golden.node_name(golden_pi);
+    if (trojan_pi_by_name.find(name) == trojan_pi_by_name.end()) {
+      if (error) *error = "Golden PI missing from Trojan circuit: " + name;
+      return false;
+    }
+  }
+
+  std::unordered_map<std::string, int> golden_po_by_name;
+  std::unordered_map<std::string, int> trojan_po_by_name;
+  if (!build_named_node_map(golden, golden.po_indices(), "Golden PO",
+                            &golden_po_by_name, error) ||
+      !build_named_node_map(trojan, trojan.po_indices(), "Trojan PO",
+                            &trojan_po_by_name, error)) {
+    return false;
+  }
+  if (golden_po_by_name.size() != trojan_po_by_name.size()) {
+    if (error) *error = "Golden/Trojan PO count mismatch";
+    return false;
+  }
+
+  alignment->po_node_pairs.clear();
+  alignment->po_node_pairs.reserve(golden.po_count());
+  for (int golden_po : golden.po_indices()) {
+    const std::string& name = golden.node_name(golden_po);
+    const auto it = trojan_po_by_name.find(name);
+    if (it == trojan_po_by_name.end()) {
+      if (error) *error = "Golden PO missing from Trojan circuit: " + name;
+      return false;
+    }
+    alignment->po_node_pairs.emplace_back(golden_po, it->second);
+  }
+  for (int trojan_po : trojan.po_indices()) {
+    const std::string& name = trojan.node_name(trojan_po);
+    if (golden_po_by_name.find(name) == golden_po_by_name.end()) {
+      if (error) *error = "Trojan PO missing from Golden circuit: " + name;
+      return false;
+    }
+  }
+  return true;
+}
+
+bool validate_rule_miter_model(const circuit& trojan,
+                               const std::vector<int>& feature_nodes,
+                               const DecisionTreeModel& model,
+                               std::string* error) {
+  for (int node_idx : feature_nodes) {
+    if (node_idx < 0 ||
+        static_cast<std::size_t>(node_idx) >= trojan.node_count()) {
+      if (error) *error = "feature node index out of range";
+      return false;
+    }
+  }
+  for (const auto& rule : model.rules) {
+    for (const auto& literal : rule.terms) {
+      if (literal.first >= feature_nodes.size()) {
+        if (error) *error = "rule feature index out of range";
+        return false;
+      }
+      if (literal.second != 0 && literal.second != 1) {
+        if (error) *error = "rule literal value must be zero or one";
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool scalar_evaluate_rule_miter(
+    const circuit& golden,
+    const circuit& trojan,
+    const RuleMiterAlignment& alignment,
+    const std::vector<int>& feature_nodes,
+    const DecisionTreeModel& model,
+    const std::vector<int>& golden_pi_values,
+    ScalarRuleResult* result,
+    std::string* error) {
+  if (!result) {
+    if (error) *error = "null scalar rule-miter result";
+    return false;
+  }
+  if (golden_pi_values.size() != golden.pi_count()) {
+    if (error) *error = "scalar Golden PI value count mismatch";
+    return false;
+  }
+  if (alignment.trojan_pi_to_golden_pos.size() != trojan.pi_count()) {
+    if (error) *error = "scalar Trojan PI alignment size mismatch";
+    return false;
+  }
+
+  std::vector<int> trojan_pi_values;
+  trojan_pi_values.reserve(trojan.pi_count());
+  for (std::size_t golden_pos : alignment.trojan_pi_to_golden_pos) {
+    if (golden_pos >= golden_pi_values.size()) {
+      if (error) *error = "scalar Trojan PI alignment position out of range";
+      return false;
+    }
+    trojan_pi_values.push_back(golden_pi_values[golden_pos] ? 1 : 0);
+  }
+
+  try {
+    circuit golden_eval = golden;
+    circuit trojan_eval = trojan;
+    (void)golden_eval.simulate(golden_pi_values);
+    (void)trojan_eval.simulate(trojan_pi_values);
+
+    result->error_pattern = false;
+    for (const auto& po_pair : alignment.po_node_pairs) {
+      const int golden_value = golden_eval.get_cell(po_pair.first).val;
+      const int trojan_value = trojan_eval.get_cell(po_pair.second).val;
+      if ((golden_value != 0) != (trojan_value != 0)) {
+        result->error_pattern = true;
+        break;
+      }
+    }
+
+    result->rule_matches = false;
+    for (const auto& rule : model.rules) {
+      bool clause_matches = true;
+      for (const auto& literal : rule.terms) {
+        if (literal.first >= feature_nodes.size()) {
+          if (error) *error = "scalar rule feature index out of range";
+          return false;
+        }
+        const int node_idx = feature_nodes[literal.first];
+        const bool value = trojan_eval.get_cell(node_idx).val != 0;
+        if (value != (literal.second != 0)) {
+          clause_matches = false;
+          break;
+        }
+      }
+      if (clause_matches) {
+        result->rule_matches = true;
+        break;
+      }
+    }
+  } catch (const std::exception& exception) {
+    if (error) {
+      *error = std::string("scalar rule-miter simulation failed: ") +
+               exception.what();
+    }
+    return false;
+  }
+  return true;
+}
+
+bool parse_rule_miter_bits(const std::string& bits,
+                           std::size_t pi_count,
+                           std::vector<int>* values,
+                           std::string* error) {
+  if (!values) {
+    if (error) *error = "null blocked PI value output";
+    return false;
+  }
+  if (bits.size() != pi_count) {
+    if (error) *error = "blocked PI bit string has the wrong length";
+    return false;
+  }
+  values->clear();
+  values->reserve(bits.size());
+  for (char bit : bits) {
+    if (bit != '0' && bit != '1') {
+      if (error) *error = "blocked PI bit string is not binary";
+      return false;
+    }
+    values->push_back(bit == '1' ? 1 : 0);
+  }
+  return true;
+}
+
+z3::expr make_rule_miter_block(z3::context& ctx,
+                               const std::vector<z3::expr>& golden_pi_vars,
+                               const std::vector<int>& values) {
+  z3::expr block = ctx.bool_val(false);
+  for (std::size_t i = 0; i < golden_pi_vars.size(); ++i) {
+    block = block ||
+            (golden_pi_vars[i] != ctx.bool_val(values[i] != 0));
+  }
+  return block;
+}
+
+bool rule_miter_reason_is_timeout(const std::string& reason) {
+  std::string lower = reason;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::tolower(ch));
+                 });
+  return lower.find("timeout") != std::string::npos ||
+         lower.find("canceled") != std::string::npos;
+}
+
+RuleMiterSideResult* rule_miter_side(RuleMiterResult* result,
+                                     bool false_negative) {
+  return false_negative ? &result->false_negative : &result->false_positive;
+}
+
+void finish_rule_miter_result(RuleMiterResult* result,
+                              RuleMiterStatus fallback_status,
+                              const std::string& reason,
+                              RuleMiterClock::time_point total_start) {
+  if (!result) return;
+  result->status = aggregate_rule_miter_status(*result, fallback_status);
+  if (!reason.empty()) {
+    if (result->status == RuleMiterStatus::counterexamples &&
+        fallback_status != RuleMiterStatus::counterexamples) {
+      result->reason =
+          "validated counterexample exists; remaining search incomplete: " +
+          reason;
+    } else {
+      result->reason = reason;
+    }
+  } else {
+    switch (result->status) {
+      case RuleMiterStatus::proved:
+        result->reason.clear();
+        break;
+      case RuleMiterStatus::counterexamples:
+        result->reason = "rule and circuit error predicate differ";
+        break;
+      case RuleMiterStatus::timeout:
+        result->reason = "one or more rule-miter queries timed out";
+        break;
+      case RuleMiterStatus::unknown:
+        result->reason = "one or more rule-miter queries are unknown";
+        break;
+      case RuleMiterStatus::invalid:
+        result->reason = "invalid rule-miter input or state";
+        break;
+    }
+  }
+  result->total_ms = rule_miter_elapsed_ms(total_start);
+}
+
+}  // namespace
+
+const char* rule_miter_query_status_name(RuleMiterQueryStatus status) {
+  switch (status) {
+    case RuleMiterQueryStatus::not_checked:
+      return "not_checked";
+    case RuleMiterQueryStatus::sat:
+      return "sat";
+    case RuleMiterQueryStatus::unsat:
+      return "unsat";
+    case RuleMiterQueryStatus::timeout:
+      return "timeout";
+    case RuleMiterQueryStatus::unknown:
+      return "unknown";
+  }
+  return "unknown";
+}
+
+RuleMiterSideResult transition_rule_miter_side(
+    const RuleMiterSideResult& current,
+    RuleMiterQueryStatus observed_status,
+    const std::string& reason) {
+  RuleMiterSideResult next = current;
+  if (observed_status == RuleMiterQueryStatus::unsat) {
+    next.exhausted = true;
+  } else if (observed_status == RuleMiterQueryStatus::timeout ||
+             observed_status == RuleMiterQueryStatus::unknown ||
+             observed_status == RuleMiterQueryStatus::not_checked) {
+    next.exhausted = false;
+  }
+
+  const bool has_validated_witness = next.models_found != 0;
+  if (has_validated_witness &&
+      observed_status != RuleMiterQueryStatus::sat) {
+    next.status = RuleMiterQueryStatus::sat;
+    if (!reason.empty()) {
+      if (!next.reason.empty()) next.reason += "; ";
+      next.reason += "remaining search ";
+      next.reason += rule_miter_query_status_name(observed_status);
+      next.reason += ": ";
+      next.reason += reason;
+    }
+    return next;
+  }
+
+  next.status = observed_status;
+  if (!reason.empty()) next.reason = reason;
+  return next;
+}
+
+RuleMiterStatus aggregate_rule_miter_status(
+    const RuleMiterResult& result,
+    RuleMiterStatus fallback_status) {
+  const bool has_validated_witness =
+      result.false_negative.models_found != 0 ||
+      result.false_positive.models_found != 0;
+  if (has_validated_witness) return RuleMiterStatus::counterexamples;
+
+  if (fallback_status == RuleMiterStatus::invalid) {
+    return RuleMiterStatus::invalid;
+  }
+  if (fallback_status == RuleMiterStatus::timeout) {
+    return RuleMiterStatus::timeout;
+  }
+  if (fallback_status == RuleMiterStatus::unknown) {
+    return RuleMiterStatus::unknown;
+  }
+
+  const RuleMiterQueryStatus fn_status = result.false_negative.status;
+  const RuleMiterQueryStatus fp_status = result.false_positive.status;
+  if (fn_status == RuleMiterQueryStatus::timeout ||
+      fp_status == RuleMiterQueryStatus::timeout) {
+    return RuleMiterStatus::timeout;
+  }
+  if (fn_status == RuleMiterQueryStatus::unknown ||
+      fp_status == RuleMiterQueryStatus::unknown ||
+      fn_status == RuleMiterQueryStatus::not_checked ||
+      fp_status == RuleMiterQueryStatus::not_checked) {
+    return RuleMiterStatus::unknown;
+  }
+  if (fn_status == RuleMiterQueryStatus::unsat &&
+      fp_status == RuleMiterQueryStatus::unsat) {
+    return RuleMiterStatus::proved;
+  }
+  return fallback_status == RuleMiterStatus::counterexamples
+             ? RuleMiterStatus::counterexamples
+             : RuleMiterStatus::unknown;
+}
+
+const char* rule_miter_status_name(RuleMiterStatus status) {
+  switch (status) {
+    case RuleMiterStatus::proved:
+      return "proved";
+    case RuleMiterStatus::counterexamples:
+      return "counterexamples";
+    case RuleMiterStatus::timeout:
+      return "timeout";
+    case RuleMiterStatus::unknown:
+      return "unknown";
+    case RuleMiterStatus::invalid:
+      return "invalid";
+  }
+  return "invalid";
+}
+
+RuleMiterResult check_rule_miter(
+    const circuit& golden,
+    const circuit& trojan,
+    const std::vector<int>& feature_nodes,
+    const DecisionTreeModel& model,
+    const RuleMiterOptions& options,
+    const std::unordered_set<std::string>* blocked_pi_bits) {
+  const RuleMiterClock::time_point total_start = RuleMiterClock::now();
+  RuleMiterResult result;
+  result.requested_counterexample_limit = options.max_counterexamples;
+  result.effective_counterexample_limit = std::min(
+      options.max_counterexamples, kRuleMiterHardCounterexampleLimit);
+
+  try {
+    if (options.timeout_ms == 0) {
+      result.false_negative = transition_rule_miter_side(
+          result.false_negative, RuleMiterQueryStatus::timeout,
+          "soft wall-clock budget is zero");
+      result.false_positive = transition_rule_miter_side(
+          result.false_positive, RuleMiterQueryStatus::timeout,
+          "soft wall-clock budget is zero");
+      finish_rule_miter_result(&result, RuleMiterStatus::timeout,
+                               "rule-miter wall-clock budget is zero",
+                               total_start);
+      return result;
+    }
+
+    RuleMiterAlignment alignment;
+    std::string error;
+    if (!build_rule_miter_alignment(golden, trojan, &alignment, &error) ||
+        !validate_rule_miter_model(trojan, feature_nodes, model, &error)) {
+      finish_rule_miter_result(&result, RuleMiterStatus::invalid, error,
+                               total_start);
+      return result;
+    }
+
+    // Validate from the live graph instead of trusting circuit's cached
+    // eval_order: replace_gate_inputs() can change topology without
+    // invalidating that cache.
+    if (!validate_rule_miter_dag(golden, "Golden", &error) ||
+        !validate_rule_miter_dag(trojan, "Trojan", &error)) {
+      finish_rule_miter_result(&result, RuleMiterStatus::invalid, error,
+                               total_start);
+      return result;
+    }
+
+    std::vector<std::string> sorted_blocked_bits;
+    if (blocked_pi_bits) {
+      sorted_blocked_bits.assign(blocked_pi_bits->begin(),
+                                 blocked_pi_bits->end());
+      std::sort(sorted_blocked_bits.begin(), sorted_blocked_bits.end());
+    }
+    std::vector<std::vector<int>> blocked_patterns;
+    blocked_patterns.reserve(sorted_blocked_bits.size());
+    for (const std::string& bits : sorted_blocked_bits) {
+      if (rule_miter_budget_expired(total_start, options.timeout_ms)) {
+        result.false_negative = transition_rule_miter_side(
+            result.false_negative, RuleMiterQueryStatus::timeout,
+            "soft deadline expired while validating blocked patterns");
+        result.false_positive = transition_rule_miter_side(
+            result.false_positive, RuleMiterQueryStatus::timeout,
+            "soft deadline expired while validating blocked patterns");
+        finish_rule_miter_result(
+            &result, RuleMiterStatus::timeout,
+            "rule-miter deadline expired while validating blocked patterns",
+            total_start);
+        return result;
+      }
+      std::vector<int> values;
+      if (!parse_rule_miter_bits(bits, golden.pi_count(), &values, &error)) {
+        finish_rule_miter_result(&result, RuleMiterStatus::invalid, error,
+                                 total_start);
+        return result;
+      }
+      const RuleMiterClock::time_point validation_start = RuleMiterClock::now();
+      ScalarRuleResult scalar;
+      if (!scalar_evaluate_rule_miter(golden, trojan, alignment, feature_nodes,
+                                      model, values, &scalar, &error)) {
+        result.validation_ms += rule_miter_elapsed_ms(validation_start);
+        finish_rule_miter_result(&result, RuleMiterStatus::invalid, error,
+                                 total_start);
+        return result;
+      }
+      result.validation_ms += rule_miter_elapsed_ms(validation_start);
+      if (scalar.error_pattern != scalar.rule_matches) {
+        RuleMiterSideResult* side = rule_miter_side(
+            &result, scalar.error_pattern && !scalar.rule_matches);
+        side->models_found += 1;
+        side->blocked_violations += 1;
+        *side = transition_rule_miter_side(
+            *side, RuleMiterQueryStatus::sat,
+            "blocked assignment remains a validated counterexample");
+      }
+      blocked_patterns.push_back(std::move(values));
+    }
+
+    if (rule_miter_budget_expired(total_start, options.timeout_ms)) {
+      result.false_negative = transition_rule_miter_side(
+          result.false_negative, RuleMiterQueryStatus::timeout,
+          "soft deadline expired before circuit encoding");
+      result.false_positive = transition_rule_miter_side(
+          result.false_positive, RuleMiterQueryStatus::timeout,
+          "soft deadline expired before circuit encoding");
+      finish_rule_miter_result(
+          &result, RuleMiterStatus::timeout,
+          "rule-miter deadline expired before circuit encoding", total_start);
+      return result;
+    }
+
+    const RuleMiterClock::time_point encode_start = RuleMiterClock::now();
+    z3::context ctx;
+    z3::solver solver(ctx);
+
+    std::vector<z3::expr> golden_pi_vars;
+    golden_pi_vars.reserve(golden.pi_count());
+    for (std::size_t i = 0; i < golden.pi_count(); ++i) {
+      golden_pi_vars.push_back(
+          ctx.bool_const(("rule_miter_pi_" + std::to_string(i)).c_str()));
+    }
+
+    std::vector<z3::expr> trojan_pi_vars;
+    trojan_pi_vars.reserve(trojan.pi_count());
+    for (std::size_t golden_pos : alignment.trojan_pi_to_golden_pos) {
+      trojan_pi_vars.push_back(golden_pi_vars[golden_pos]);
+    }
+
+    std::vector<z3::expr> golden_vars =
+        make_node_vars(ctx, "rule_miter_g_", golden.node_count());
+    std::vector<z3::expr> trojan_vars =
+        make_node_vars(ctx, "rule_miter_t_", trojan.node_count());
+    if (!add_circuit_constraints(ctx, golden, golden_vars, golden_pi_vars,
+                                 solver, -1, nullptr, &error) ||
+        !add_circuit_constraints(ctx, trojan, trojan_vars, trojan_pi_vars,
+                                 solver, -1, nullptr, &error)) {
+      result.encode_ms = rule_miter_elapsed_ms(encode_start);
+      finish_rule_miter_result(&result, RuleMiterStatus::invalid, error,
+                               total_start);
+      return result;
+    }
+
+    z3::expr error_expr = ctx.bool_val(false);
+    for (const auto& po_pair : alignment.po_node_pairs) {
+      error_expr =
+          error_expr ||
+          (golden_vars[static_cast<std::size_t>(po_pair.first)] !=
+           trojan_vars[static_cast<std::size_t>(po_pair.second)]);
+    }
+
+    z3::expr rule_expr = ctx.bool_val(false);
+    for (const auto& rule : model.rules) {
+      z3::expr clause_expr = ctx.bool_val(true);
+      for (const auto& literal : rule.terms) {
+        const int node_idx = feature_nodes[literal.first];
+        clause_expr =
+            clause_expr &&
+            (trojan_vars[static_cast<std::size_t>(node_idx)] ==
+             ctx.bool_val(literal.second != 0));
+      }
+      rule_expr = rule_expr || clause_expr;
+    }
+
+    for (const auto& values : blocked_patterns) {
+      solver.add(make_rule_miter_block(ctx, golden_pi_vars, values));
+    }
+    result.encode_ms = rule_miter_elapsed_ms(encode_start);
+
+    if (rule_miter_budget_expired(total_start, options.timeout_ms)) {
+      result.false_negative = transition_rule_miter_side(
+          result.false_negative, RuleMiterQueryStatus::timeout,
+          "soft deadline expired during circuit encoding");
+      result.false_positive = transition_rule_miter_side(
+          result.false_positive, RuleMiterQueryStatus::timeout,
+          "soft deadline expired during circuit encoding");
+      finish_rule_miter_result(
+          &result, RuleMiterStatus::timeout,
+          "rule-miter deadline expired during circuit encoding", total_start);
+      return result;
+    }
+
+    const z3::expr false_negative_expr = error_expr && !rule_expr;
+    const z3::expr false_positive_expr = !error_expr && rule_expr;
+    bool closed[2] = {false, false};
+    bool attempted[2] = {false, false};
+    bool take_false_negative = true;
+
+    while (!(closed[0] && closed[1])) {
+      const bool capacity_available =
+          result.counterexamples.size() <
+          result.effective_counterexample_limit;
+      if (!capacity_available && attempted[0] && attempted[1]) break;
+
+      int side_index = take_false_negative ? 0 : 1;
+      if (closed[side_index] ||
+          (!capacity_available && attempted[side_index])) {
+        side_index = 1 - side_index;
+      }
+      if (closed[side_index] ||
+          (!capacity_available && attempted[side_index])) {
+        break;
+      }
+      take_false_negative = side_index != 0;
+      const bool is_false_negative = side_index == 0;
+      RuleMiterSideResult* side =
+          rule_miter_side(&result, is_false_negative);
+      attempted[side_index] = true;
+
+      const unsigned remaining = rule_miter_remaining_timeout_ms(
+          total_start, options.timeout_ms);
+      if (remaining == 0) {
+        *side = transition_rule_miter_side(
+            *side, RuleMiterQueryStatus::timeout,
+            "shared soft rule-miter deadline expired");
+        closed[side_index] = true;
+        break;
+      }
+      z3::params params(ctx);
+      params.set("timeout", remaining);
+      params.set("random_seed", 0U);
+      solver.set(params);
+
+      solver.push();
+      solver.add(is_false_negative ? false_negative_expr
+                                   : false_positive_expr);
+      const RuleMiterClock::time_point solver_start = RuleMiterClock::now();
+      result.solver_checks += 1;
+      const z3::check_result check = solver.check();
+      result.solver_ms += rule_miter_elapsed_ms(solver_start);
+
+      if (rule_miter_budget_expired(total_start, options.timeout_ms)) {
+        solver.pop();
+        *side = transition_rule_miter_side(
+            *side, RuleMiterQueryStatus::timeout,
+            "shared soft rule-miter deadline expired during SAT check");
+        closed[side_index] = true;
+        break;
+      }
+
+      if (check == z3::unsat) {
+        solver.pop();
+        *side = transition_rule_miter_side(
+            *side, RuleMiterQueryStatus::unsat,
+            "all remaining assignments are exhausted");
+        closed[side_index] = true;
+        continue;
+      }
+      if (check == z3::unknown) {
+        const std::string reason = solver.reason_unknown();
+        solver.pop();
+        const bool timed_out =
+            rule_miter_reason_is_timeout(reason) ||
+            rule_miter_budget_expired(total_start, options.timeout_ms);
+        *side = transition_rule_miter_side(
+            *side,
+            timed_out ? RuleMiterQueryStatus::timeout
+                      : RuleMiterQueryStatus::unknown,
+            reason.empty() ? "Z3 returned unknown" : reason);
+        closed[side_index] = true;
+        continue;
+      }
+
+      const z3::model z3_model = solver.get_model();
+      std::vector<int> golden_pi_values;
+      golden_pi_values.reserve(golden_pi_vars.size());
+      bool model_value_error = false;
+      for (const z3::expr& pi_var : golden_pi_vars) {
+        const z3::expr value = z3_model.eval(pi_var, true);
+        if (value.is_true()) {
+          golden_pi_values.push_back(1);
+        } else if (value.is_false()) {
+          golden_pi_values.push_back(0);
+        } else {
+          model_value_error = true;
+          break;
+        }
+      }
+      solver.pop();
+      if (model_value_error) {
+        finish_rule_miter_result(
+            &result, RuleMiterStatus::invalid,
+            "Z3 returned a non-Boolean PI value for the rule miter",
+            total_start);
+        return result;
+      }
+
+      const RuleMiterClock::time_point validation_start =
+          RuleMiterClock::now();
+      ScalarRuleResult scalar;
+      if (!scalar_evaluate_rule_miter(golden, trojan, alignment,
+                                      feature_nodes, model,
+                                      golden_pi_values, &scalar, &error)) {
+        result.validation_ms += rule_miter_elapsed_ms(validation_start);
+        finish_rule_miter_result(&result, RuleMiterStatus::invalid, error,
+                                 total_start);
+        return result;
+      }
+      result.validation_ms += rule_miter_elapsed_ms(validation_start);
+      const bool scalar_false_negative =
+          scalar.error_pattern && !scalar.rule_matches;
+      const bool scalar_false_positive =
+          !scalar.error_pattern && scalar.rule_matches;
+      if ((is_false_negative && !scalar_false_negative) ||
+          (!is_false_negative && !scalar_false_positive)) {
+        finish_rule_miter_result(
+            &result, RuleMiterStatus::invalid,
+            "Z3 rule-miter model disagrees with scalar circuit validation",
+            total_start);
+        return result;
+      }
+
+      side->models_found += 1;
+      *side = transition_rule_miter_side(
+          *side, RuleMiterQueryStatus::sat,
+          "Z3 witness passed scalar circuit validation");
+      const bool can_return =
+          result.counterexamples.size() <
+          result.effective_counterexample_limit;
+      if (can_return) {
+        RuleMiterCounterexample counterexample;
+        counterexample.pi_values = golden_pi_values;
+        counterexample.kind =
+            is_false_negative
+                ? RuleMiterCounterexampleKind::false_negative
+                : RuleMiterCounterexampleKind::false_positive;
+        result.counterexamples.push_back(std::move(counterexample));
+        side->counterexamples_returned += 1;
+        solver.add(make_rule_miter_block(ctx, golden_pi_vars,
+                                         golden_pi_values));
+      } else {
+        // The query has been checked and is SAT, but the hard batch cap means
+        // there is no room to return or enumerate another assignment.
+        closed[side_index] = true;
+      }
+      if (rule_miter_budget_expired(total_start, options.timeout_ms)) {
+        *side = transition_rule_miter_side(
+            *side, RuleMiterQueryStatus::timeout,
+            "shared soft deadline expired after scalar validation");
+        finish_rule_miter_result(
+            &result, RuleMiterStatus::timeout,
+            "shared soft deadline expired after scalar validation",
+            total_start);
+        return result;
+      }
+    }
+
+    const bool any_timeout =
+        result.false_negative.status == RuleMiterQueryStatus::timeout ||
+        result.false_positive.status == RuleMiterQueryStatus::timeout;
+    const bool any_unknown =
+        result.false_negative.status == RuleMiterQueryStatus::unknown ||
+        result.false_positive.status == RuleMiterQueryStatus::unknown ||
+        result.false_negative.status == RuleMiterQueryStatus::not_checked ||
+        result.false_positive.status == RuleMiterQueryStatus::not_checked;
+    const bool any_counterexample =
+        result.false_negative.models_found != 0 ||
+        result.false_positive.models_found != 0;
+    const bool both_unsat =
+        result.false_negative.status == RuleMiterQueryStatus::unsat &&
+        result.false_positive.status == RuleMiterQueryStatus::unsat;
+
+    if (any_timeout) {
+      finish_rule_miter_result(&result, RuleMiterStatus::timeout,
+                               "one or more rule-miter queries timed out",
+                               total_start);
+    } else if (any_unknown) {
+      finish_rule_miter_result(&result, RuleMiterStatus::unknown,
+                               "one or more rule-miter queries are unknown",
+                               total_start);
+    } else if (any_counterexample) {
+      finish_rule_miter_result(&result, RuleMiterStatus::counterexamples,
+                               "rule and circuit error predicate differ",
+                               total_start);
+    } else if (both_unsat) {
+      finish_rule_miter_result(&result, RuleMiterStatus::proved, "",
+                               total_start);
+    } else {
+      finish_rule_miter_result(&result, RuleMiterStatus::unknown,
+                               "rule-miter search ended without a proof",
+                               total_start);
+    }
+  } catch (const z3::exception& exception) {
+    const bool timed_out =
+        rule_miter_budget_expired(total_start, options.timeout_ms);
+    const RuleMiterQueryStatus query_status =
+        timed_out ? RuleMiterQueryStatus::timeout
+                  : RuleMiterQueryStatus::unknown;
+    const std::string reason =
+        std::string("Z3 rule-miter exception: ") + exception.what();
+    result.false_negative = transition_rule_miter_side(
+        result.false_negative, query_status, reason);
+    result.false_positive = transition_rule_miter_side(
+        result.false_positive, query_status, reason);
+    finish_rule_miter_result(
+        &result,
+        timed_out ? RuleMiterStatus::timeout : RuleMiterStatus::unknown,
+        reason, total_start);
+  } catch (const std::exception& exception) {
+    const std::string reason =
+        std::string("rule-miter exception: ") + exception.what();
+    result.false_negative = transition_rule_miter_side(
+        result.false_negative, RuleMiterQueryStatus::unknown, reason);
+    result.false_positive = transition_rule_miter_side(
+        result.false_positive, RuleMiterQueryStatus::unknown, reason);
+    finish_rule_miter_result(
+        &result, RuleMiterStatus::invalid, reason, total_start);
+  }
+  return result;
+}
 
 bool collect_rule_counterexamples(
     const circuit& golden,
