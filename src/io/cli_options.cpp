@@ -28,6 +28,8 @@ void print_usage(const char* prog) {
                " [--rule-opt-timeout-ms N] [--rule-opt-max-rounds N]"
                " [--rule-opt-cex-batch N] [--rule-opt-max-clauses N]"
                " [--rule-opt-max-literals N] [--rule-cover-max-terms N]"
+               " [--rule-cover-third-objective none|unique-inverters]"
+               " [--rule-cover-phase3-timeout-ms N]"
                " [--force-split] [--no-strict] [--no-virtual]\n";
 }
 
@@ -88,6 +90,14 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
   CLI::Option* cover_terms =
       app.add_option("--rule-cover-max-terms", out->rule_cover_max_terms,
                      "MILP cover term-pool cap");
+  std::string cover_third_objective = "unique-inverters";
+  CLI::Option* cover_third =
+      app.add_option("--rule-cover-third-objective", cover_third_objective,
+                     "MILP tie-break objective: none or unique-inverters");
+  CLI::Option* cover_phase3_timeout =
+      app.add_option("--rule-cover-phase3-timeout-ms",
+                     out->rule_cover_phase3_timeout_ms,
+                     "MILP phase-3 wall-clock sub-budget in milliseconds");
   app.add_option("--output", out->output_path, "Output path (alternative)");
 
   // --no-strict disables strict_retry (inverted flag)
@@ -166,6 +176,32 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
     }
     return ParseStatus::error;
   }
+  if (cover_third_objective != "none" &&
+      cover_third_objective != "unique-inverters") {
+    if (error) {
+      *error = "Invalid --rule-cover-third-objective '" +
+               cover_third_objective +
+               "' (expected none or unique-inverters)";
+    }
+    return ParseStatus::error;
+  }
+  if (out->rule_method != RuleMethod::milp_cover && cover_third->count()) {
+    if (error) {
+      *error =
+          "--rule-cover-third-objective requires --rule-method milp-cover";
+    }
+    return ParseStatus::error;
+  }
+  if (out->rule_method != RuleMethod::milp_cover &&
+      cover_phase3_timeout->count()) {
+    if (error) {
+      *error =
+          "--rule-cover-phase3-timeout-ms requires --rule-method milp-cover";
+    }
+    return ParseStatus::error;
+  }
+  out->rule_cover_minimize_inverters =
+      cover_third_objective == "unique-inverters";
   if (out->rule_method == RuleMethod::milp_cover &&
       (opt_rounds->count() || opt_cex->count())) {
     if (error) {

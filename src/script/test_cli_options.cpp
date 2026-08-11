@@ -76,7 +76,9 @@ bool expect_milp_options(std::vector<std::string> args) {
       options.rule_opt_timeout_ms != 0 ||
       options.rule_opt_max_clauses != 3 ||
       options.rule_opt_max_literals != 4 ||
-      options.rule_cover_max_terms != 123) {
+      options.rule_cover_max_terms != 123 ||
+      options.rule_cover_minimize_inverters ||
+      options.rule_cover_phase3_timeout_ms != 0) {
     std::cerr << "milp option parse failed: status="
               << static_cast<int>(status) << " error=" << error << "\n";
     return false;
@@ -140,7 +142,9 @@ int main() {
                           "--rule-opt-timeout-ms", "0",
                           "--rule-opt-max-clauses", "3",
                           "--rule-opt-max-literals", "4",
-                          "--rule-cover-max-terms", "123"});
+                          "--rule-cover-max-terms", "123",
+                          "--rule-cover-third-objective", "none",
+                          "--rule-cover-phase3-timeout-ms", "0"});
   ok &= expect_milp_options(configured_milp);
 
   auto conflicting_z3_alias = positional;
@@ -174,6 +178,31 @@ int main() {
       {"--rule-method", "z3-pb", "--rule-cover-max-terms", "10"});
   ok &= expect_error(cover_option_with_z3, "requires --rule-method milp-cover",
                      "cover option with z3-pb");
+
+  auto cover_cost_with_z3 = positional;
+  cover_cost_with_z3.insert(
+      cover_cost_with_z3.end(),
+      {"--rule-method", "z3-pb", "--rule-cover-third-objective", "none"});
+  ok &= expect_error(cover_cost_with_z3,
+                     "requires --rule-method milp-cover",
+                     "cover cost with z3-pb");
+
+  auto cover_phase3_with_z3 = positional;
+  cover_phase3_with_z3.insert(
+      cover_phase3_with_z3.end(),
+      {"--rule-method", "z3-pb", "--rule-cover-phase3-timeout-ms", "1"});
+  ok &= expect_error(cover_phase3_with_z3,
+                     "requires --rule-method milp-cover",
+                     "cover phase3 timeout with z3-pb");
+
+  auto invalid_cover_cost = positional;
+  invalid_cover_cost.insert(
+      invalid_cover_cost.end(),
+      {"--rule-method", "milp-cover", "--rule-cover-third-objective",
+       "area-magic"});
+  ok &= expect_error(invalid_cover_cost,
+                     "expected none or unique-inverters",
+                     "invalid cover cost");
 
   auto z3_option_with_milp = positional;
   z3_option_with_milp.insert(

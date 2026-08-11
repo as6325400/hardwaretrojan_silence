@@ -106,8 +106,15 @@ check_method milp-cover milp-cover --rule-method milp-cover
 [[ "$(summary_value cover_pool_complete "$test_tmp/milp-cover.out")" == "1" ]]
 [[ "$(summary_value cover_rules_optimal "$test_tmp/milp-cover.out")" == "1" ]]
 [[ "$(summary_value cover_literals_optimal "$test_tmp/milp-cover.out")" == "1" ]]
+[[ "$(summary_value cover_hardware_optimal "$test_tmp/milp-cover.out")" == "1" ]]
+[[ "$(summary_value cover_third_objective "$test_tmp/milp-cover.out")" == \
+    "unique_inverters" ]]
 [[ "$(summary_value mip1_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
 [[ "$(summary_value mip2_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
+[[ "$(summary_value lp3_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
+[[ "$(summary_value mip3_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
+[[ "$(summary_value cover_inverters_after "$test_tmp/milp-cover.out")" -le \
+    "$(summary_value cover_inverters_before "$test_tmp/milp-cover.out")" ]]
 
 check_method milp-cover-timeout milp-cover --rule-method milp-cover \
     --rule-opt-timeout-ms 0

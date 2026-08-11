@@ -2041,7 +2041,18 @@ int main(int argc, char** argv) {
       cout << " max_rounds " << options.rule_opt_max_rounds
            << " cex_batch " << options.rule_opt_cex_batch;
     } else {
-      cout << " max_pool_terms " << options.rule_cover_max_terms;
+      cout << " max_pool_terms " << options.rule_cover_max_terms
+           << " third_objective "
+           << (options.rule_cover_minimize_inverters
+                   ? "unique_inverters"
+                   : "none")
+           << " phase3_timeout_ms ";
+      if (options.rule_cover_phase3_timeout_ms ==
+          std::numeric_limits<std::uint64_t>::max()) {
+        cout << "shared";
+      } else {
+        cout << options.rule_cover_phase3_timeout_ms;
+      }
     }
     cout << "\n";
   }
@@ -2457,6 +2468,12 @@ int main(int argc, char** argv) {
           options.rule_opt_max_literals;
       mining_options.rule_optimizer_options.max_pool_terms =
           options.rule_cover_max_terms;
+      mining_options.rule_optimizer_options.cover_third_objective =
+          options.rule_cover_minimize_inverters
+              ? RuleCoverThirdObjective::unique_inverters
+              : RuleCoverThirdObjective::none;
+      mining_options.rule_optimizer_options.phase3_timeout_ms =
+          options.rule_cover_phase3_timeout_ms;
 
       if (!run_mining(golden,
                       working_trojan,
@@ -2548,12 +2565,35 @@ int main(int argc, char** argv) {
          << (rule_synth_telemetry.optimizer_stats.rules_optimal ? 1 : 0)
          << " cover_literals_optimal "
          << (rule_synth_telemetry.optimizer_stats.literals_optimal ? 1 : 0)
+         << " cover_hardware_optimal "
+         << (rule_synth_telemetry.optimizer_stats.hardware_optimal ? 1 : 0)
+         << " cover_phase3_timeout_fallback "
+         << (rule_synth_telemetry.optimizer_stats.phase3_timeout_fallback
+                 ? 1
+                 : 0)
+         << " cover_third_objective "
+         << (rule_synth_telemetry.optimizer_stats.third_objective.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.third_objective)
+         << " cover_phase3_timeout_ms "
+         << rule_synth_telemetry.optimizer_stats.phase3_timeout_ms
          << " cover_terms_generated "
          << rule_synth_telemetry.optimizer_stats.pool_terms_generated
          << " cover_terms_unique "
          << rule_synth_telemetry.optimizer_stats.pool_terms_unique
          << " cover_terms_final "
          << rule_synth_telemetry.optimizer_stats.pool_terms_final
+         << " cover_terms_alternatives "
+         << rule_synth_telemetry.optimizer_stats
+                .pool_terms_coverage_alternatives
+         << " cover_inverters_before "
+         << rule_synth_telemetry.optimizer_stats.unique_inverters_before
+         << " cover_inverters_after "
+         << rule_synth_telemetry.optimizer_stats.unique_inverters_after
+         << " cover_inverter_features "
+         << rule_synth_telemetry.optimizer_stats.inverter_features
+         << " cover_inverter_links "
+         << rule_synth_telemetry.optimizer_stats.inverter_link_constraints
          << " cover_variables "
          << rule_synth_telemetry.optimizer_stats.master_variables
          << " cover_constraints "
@@ -2602,9 +2642,30 @@ int main(int argc, char** argv) {
          << rule_synth_telemetry.optimizer_stats.mip2_gap
          << " mip2_nodes "
          << rule_synth_telemetry.optimizer_stats.mip2_nodes
+         << " lp3_status "
+         << (rule_synth_telemetry.optimizer_stats.lp3_status.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.lp3_status)
+         << " lp3_objective "
+         << rule_synth_telemetry.optimizer_stats.lp3_objective
+         << " lp3_iterations "
+         << rule_synth_telemetry.optimizer_stats.lp3_iterations
+         << " mip3_status "
+         << (rule_synth_telemetry.optimizer_stats.mip3_status.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.mip3_status)
+         << " mip3_objective "
+         << rule_synth_telemetry.optimizer_stats.mip3_objective
+         << " mip3_bound "
+         << rule_synth_telemetry.optimizer_stats.mip3_dual_bound
+         << " mip3_gap "
+         << rule_synth_telemetry.optimizer_stats.mip3_gap
+         << " mip3_nodes "
+         << rule_synth_telemetry.optimizer_stats.mip3_nodes
          << " mip_nodes "
          << (rule_synth_telemetry.optimizer_stats.mip1_nodes +
-             rule_synth_telemetry.optimizer_stats.mip2_nodes)
+             rule_synth_telemetry.optimizer_stats.mip2_nodes +
+             rule_synth_telemetry.optimizer_stats.mip3_nodes)
          << " synthesized_rules " << result.model.rules.size()
          << " synthesized_literals " << count_model_literals(result.model)
          << " synthesized_depth " << max_model_rule_literals(result.model)

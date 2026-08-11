@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <string>
 
 enum class ParseStatus {
@@ -41,6 +43,11 @@ struct AppOptions {
   std::size_t rule_opt_max_clauses = 0;
   std::size_t rule_opt_max_literals = 10;
   std::size_t rule_cover_max_terms = 200000;
+  // The MILP backend preserves the optimal rule/literal counts, then chooses
+  // among ties to minimize shared expected-zero literal inverters.
+  bool rule_cover_minimize_inverters = true;
+  std::uint64_t rule_cover_phase3_timeout_ms =
+      std::numeric_limits<std::uint64_t>::max();
 };
 
 ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::string* error); // Parse CLI args into AppOptions.
