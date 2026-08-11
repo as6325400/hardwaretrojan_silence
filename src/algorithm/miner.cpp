@@ -270,6 +270,11 @@ void write_gpu_chunk(const FeatureWord* h_feat,
     for (std::size_t w = 0; w < chunk_wb; ++w) {
       dst[w] = src[w];
     }
+    const std::size_t tail = chunk_samples % PackedFeatureMatrix::kWordBits;
+    if (tail != 0 && chunk_wb != 0) {
+      dst[chunk_wb - 1] &= static_cast<FeatureWord>(
+          packed_circuit::mask_for_count(tail));
+    }
   }
   matrix->row_count += chunk_samples;
   labels->insert(labels->end(), chunk_samples, label);
@@ -365,17 +370,35 @@ std::size_t append_word_block_selective(const PackedWord* feature_bits,
   return count;
 }
 
-// Pad row_count up to 64-aligned boundary (zero-feature neg samples).
-void pad_to_word_aligned(PackedFeatureMatrix* matrix,
-                         std::vector<int>* labels,
-                         std::size_t* neg_count) {
-  const std::size_t r = matrix->row_count % PackedFeatureMatrix::kWordBits;
-  if (r == 0) return;
-  const std::size_t pad = PackedFeatureMatrix::kWordBits - r;
-  labels->insert(labels->end(), pad, 0);
-  matrix->row_count += pad;
-  if (neg_count) *neg_count += pad;
+// Append a GPU-layout feature chunk at an arbitrary destination bit offset.
+// Unlike write_gpu_chunk(), this does not require (or manufacture) word
+// alignment, so explicit CEC/SAT negatives remain real samples only.
+#ifdef USE_CUDA
+std::size_t append_gpu_chunk_unaligned(const FeatureWord* feature_bits,
+                                       std::size_t num_features,
+                                       std::size_t chunk_wb,
+                                       std::size_t chunk_samples,
+                                       PackedFeatureMatrix* matrix,
+                                       std::vector<int>* labels,
+                                       int label) {
+  std::vector<PackedWord> word_features(num_features, PackedWord{0});
+  std::size_t appended = 0;
+  for (std::size_t word = 0; word < chunk_wb; ++word) {
+    const std::size_t consumed = word * PackedFeatureMatrix::kWordBits;
+    if (consumed >= chunk_samples) break;
+    const std::size_t block_size = std::min(
+        PackedFeatureMatrix::kWordBits, chunk_samples - consumed);
+    for (std::size_t feature = 0; feature < num_features; ++feature) {
+      word_features[feature] = static_cast<PackedWord>(
+          feature_bits[feature * chunk_wb + word]);
+    }
+    appended += append_word_block_selective(
+        word_features.data(), num_features,
+        packed_circuit::mask_for_count(block_size), matrix, labels, label);
+  }
+  return appended;
 }
+#endif
 
 // ── Dynamic memory cap ────────────────────────────────────────────────────────
 // Computes the maximum number of negative training samples that can safely fit
@@ -649,7 +672,6 @@ bool build_training_data(const circuit& golden,
 
     // ── Phase 1b: extra neg patterns (explicit, not random) ─────────────────
     if (extra_neg_patterns && !extra_neg_patterns->empty()) {
-      pad_to_word_aligned(&data->features, &data->labels, &data->neg_count);
       const std::size_t extra_total = extra_neg_patterns->size();
       std::size_t extra_offset = 0;
       while (extra_offset < extra_total) {
@@ -691,9 +713,9 @@ bool build_training_data(const circuit& golden,
         cudaMemcpy(h_feat_bits.data(), d_feat_bits,
                    num_feat * chunk_wb * sizeof(GpuCircuit::word_t),
                    cudaMemcpyDeviceToHost);
-        write_gpu_chunk(h_feat_bits.data(), num_feat, chunk_wb, chunk,
-                        &data->features, &data->labels, 0);
-        data->neg_count += chunk;
+        data->neg_count += append_gpu_chunk_unaligned(
+            h_feat_bits.data(), num_feat, chunk_wb, chunk,
+            &data->features, &data->labels, 0);
         extra_offset += chunk;
       }
     }
@@ -844,6 +866,14 @@ bool build_training_data(const circuit& golden,
   } catch (const std::exception& e) {
     std::cerr << "[GPU training pipeline failed, falling back to CPU] "
               << e.what() << "\n";
+    // A late GPU failure may happen after positive/explicit-negative rows
+    // were already appended.  CPU fallback must rebuild from an empty matrix
+    // rather than mixing partial GPU data with a second copy of the samples.
+    data->features.allocate(total_features, estimated_total);
+    data->labels.clear();
+    data->labels.reserve(estimated_total);
+    data->pos_count = 0;
+    data->neg_count = 0;
   }
   // ── fallback to CPU path ──────────────────────────────────────────────────
 #endif  // USE_CUDA
@@ -944,9 +974,10 @@ bool build_training_data(const circuit& golden,
               trojan_packed, *virtual_defs, trojan_packed.pattern_mask());
           feature_bits.insert(feature_bits.end(), vn_bits.begin(), vn_bits.end());
         }
-        write_word_block(feature_bits.data(), total_features, block_size,
-                         &data->features, &data->labels, 0);
-        data->neg_count += block_size;
+        data->neg_count += append_word_block_selective(
+            feature_bits.data(), total_features,
+            packed_circuit::mask_for_count(block_size),
+            &data->features, &data->labels, 0);
       }
       extra_offset += block_size;
     }
