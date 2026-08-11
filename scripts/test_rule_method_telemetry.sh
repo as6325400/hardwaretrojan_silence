@@ -4,8 +4,10 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
-make -C src ../bin/main ../bin/script/test_cli_options -j4 >/dev/null
+make -C src ../bin/main ../bin/script/test_cli_options \
+    ../bin/script/test_rule_miter -j4 >/dev/null
 bin/script/test_cli_options
+bin/script/test_rule_miter
 
 test_tmp=$(mktemp -d /tmp/rule-method-selftest.XXXXXX)
 trap 'rm -rf "$test_tmp"' EXIT
@@ -19,6 +21,19 @@ summary_value() {
     local file="$2"
     awk -v key="$key" '
         /^rule_synth_summary / {
+            for (i = 2; i < NF; i += 2) {
+                if ($i == key) value = $(i + 1)
+            }
+        }
+        END { if (value != "") print value }
+    ' "$file"
+}
+
+miter_value() {
+    local key="$1"
+    local file="$2"
+    awk -v key="$key" '
+        /^rule_miter_summary / {
             for (i = 2; i < NF; i += 2) {
                 if ($i == key) value = $(i + 1)
             }
@@ -71,6 +86,26 @@ check_method() {
         END { print total + 0 }
     ' "$stdout_file")
     [[ "$logged_builds" -eq "$summary_builds" ]]
+    awk '
+        /^rule_synth_summary / || /^rule_apply_summary / {
+            type = ($1 == "rule_synth_summary") ? "synth" : "apply"
+            id = ""
+            for (i = 2; i < NF; i += 2) {
+                if ($i == "rule_build_attempt") id = $(i + 1)
+            }
+            if (id == "") exit 1
+            if (type == "synth") synth[id] += 1
+            else apply[id] += 1
+        }
+        END {
+            for (id in synth) {
+                if (synth[id] != 1 || apply[id] != 1) exit 1
+            }
+            for (id in apply) {
+                if (synth[id] != 1 || apply[id] != 1) exit 1
+            }
+        }
+    ' "$stdout_file"
 
     if [[ "$expected_method" == "dt" ]]; then
         [[ "$(summary_value vn_generated "$stdout_file")" == "0" ]]
@@ -93,5 +128,17 @@ check_method z3-pb-timeout z3-pb --rule-method z3-pb --rule-opt-timeout-ms 0
 [[ "$(summary_value strategy "$test_tmp/z3-pb-timeout.out")" == "z3-pb" ]]
 [[ "$(summary_value optimizer_status "$test_tmp/z3-pb-timeout.out")" == "timeout" ]]
 [[ "$(summary_value optimizer_accepted "$test_tmp/z3-pb-timeout.out")" == "0" ]]
+
+check_method z3-pb-formal z3-pb --rule-method z3-pb \
+    --rule-formal-refine --rule-formal-timeout-ms 10000
+[[ "$(grep -c '^rule_miter_summary ' "$test_tmp/z3-pb-formal.out")" -ge 1 ]]
+[[ "$(miter_value status "$test_tmp/z3-pb-formal.out")" == "proved" ]]
+[[ "$(miter_value proved "$test_tmp/z3-pb-formal.out")" == "1" ]]
+
+check_method z3-pb-formal-timeout z3-pb --rule-method z3-pb \
+    --rule-formal-refine --rule-formal-timeout-ms 0
+[[ "$(miter_value status "$test_tmp/z3-pb-formal-timeout.out")" == "timeout" ]]
+[[ "$(miter_value proved "$test_tmp/z3-pb-formal-timeout.out")" == "0" ]]
+[[ "$(miter_value retry "$test_tmp/z3-pb-formal-timeout.out")" == "0" ]]
 
 echo "rule_method_telemetry_tests PASS"

@@ -26,6 +26,8 @@ void print_usage(const char* prog) {
                " [--rule-opt-timeout-ms N] [--rule-opt-max-rounds N]"
                " [--rule-opt-cex-batch N] [--rule-opt-max-clauses N]"
                " [--rule-opt-max-literals N]"
+               " [--rule-formal-refine] [--rule-formal-timeout-ms N]"
+               " [--rule-formal-max-rounds N] [--rule-formal-cex-batch N]"
                " [--force-split] [--no-strict] [--no-virtual]\n";
 }
 
@@ -81,6 +83,21 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
   CLI::Option* opt_literals =
       app.add_option("--rule-opt-max-literals", out->rule_opt_max_literals,
                      "Z3-PB literals per clause cap (0 uses baseline maximum)");
+  CLI::Option* formal_refine =
+      app.add_flag("--rule-formal-refine", out->rule_formal_refine,
+                   "Refine learned rules with SAT FN/FP counterexamples");
+  CLI::Option* formal_timeout =
+      app.add_option("--rule-formal-timeout-ms",
+                     out->rule_formal_timeout_ms,
+                     "SAT rule-miter soft wall-clock budget");
+  CLI::Option* formal_rounds =
+      app.add_option("--rule-formal-max-rounds",
+                     out->rule_formal_max_rounds,
+                     "Maximum SAT rule-refinement rebuilds");
+  CLI::Option* formal_batch =
+      app.add_option("--rule-formal-cex-batch",
+                     out->rule_formal_cex_batch,
+                     "SAT rule counterexamples returned per check (1-5)");
   app.add_option("--output", out->output_path, "Output path (alternative)");
 
   // --no-strict disables strict_retry (inverted flag)
@@ -145,6 +162,34 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
     if (error) {
       *error = "--rule-opt-* options require --rule-method z3-pb";
     }
+    return ParseStatus::error;
+  }
+
+  const bool formal_option_used =
+      formal_refine->count() || formal_timeout->count() ||
+      formal_rounds->count() || formal_batch->count();
+  if (formal_option_used && out->rule_method != RuleMethod::z3_pb) {
+    if (error) {
+      *error = "rule formal refinement requires --rule-method z3-pb";
+    }
+    return ParseStatus::error;
+  }
+  if (!out->rule_formal_refine &&
+      (formal_timeout->count() || formal_rounds->count() ||
+       formal_batch->count())) {
+    if (error) {
+      *error =
+          "rule formal refinement options require --rule-formal-refine";
+    }
+    return ParseStatus::error;
+  }
+  if (out->rule_formal_max_rounds == 0) {
+    if (error) *error = "--rule-formal-max-rounds must be positive";
+    return ParseStatus::error;
+  }
+  if (out->rule_formal_cex_batch == 0 ||
+      out->rule_formal_cex_batch > 5) {
+    if (error) *error = "--rule-formal-cex-batch must be between 1 and 5";
     return ParseStatus::error;
   }
 

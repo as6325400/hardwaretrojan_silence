@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 enum class ParseStatus {
@@ -39,6 +40,10 @@ struct AppOptions {
   // value is honored even when it is larger than the baseline rule count.
   std::size_t rule_opt_max_clauses = 0;
   std::size_t rule_opt_max_literals = 10;
+  bool rule_formal_refine = false;
+  std::uint64_t rule_formal_timeout_ms = 10000;
+  std::size_t rule_formal_max_rounds = 5;
+  std::size_t rule_formal_cex_batch = 5;
 };
 
 ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::string* error); // Parse CLI args into AppOptions.

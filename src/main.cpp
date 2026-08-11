@@ -21,6 +21,7 @@
 #include "algorithm/pattern_sampler.hpp"
 #include "algorithm/payload_analysis.hpp"
 #include "algorithm/rule_patch.hpp"
+#include "algorithm/sat_refine.hpp"
 #include "algorithm/trigger_fixer.hpp"
 #include "algorithm/virtual_node.hpp"
 #include "core/circuit_compare.hpp"
@@ -75,6 +76,62 @@ packed_circuit::word_t take_first_bits(packed_circuit::word_t mask,
     count -= 1;
   }
   return out;
+}
+
+bool reorder_golden_pattern_to_trojan_pis(
+    const circuit& golden,
+    const circuit& trojan,
+    const std::vector<int>& golden_values,
+    std::vector<int>* trojan_values,
+    std::string* error) {
+  if (!trojan_values) {
+    if (error) *error = "null Trojan PI pattern output";
+    return false;
+  }
+  if (golden_values.size() != golden.pi_count()) {
+    if (error) *error = "formal counterexample Golden PI count mismatch";
+    return false;
+  }
+
+  std::unordered_map<std::string, std::size_t> golden_positions;
+  golden_positions.reserve(golden.pi_count());
+  for (std::size_t pos = 0; pos < golden.pi_indices().size(); ++pos) {
+    const std::string& name = golden.node_name(golden.pi_indices()[pos]);
+    if (!golden_positions.emplace(name, pos).second) {
+      if (error) *error = "duplicate Golden PI name: " + name;
+      return false;
+    }
+  }
+
+  trojan_values->clear();
+  trojan_values->reserve(trojan.pi_count());
+  std::unordered_set<std::string> seen_trojan_names;
+  seen_trojan_names.reserve(trojan.pi_count());
+  for (int trojan_pi : trojan.pi_indices()) {
+    const std::string& name = trojan.node_name(trojan_pi);
+    if (!seen_trojan_names.insert(name).second) {
+      if (error) *error = "duplicate Trojan PI name: " + name;
+      return false;
+    }
+    const auto it = golden_positions.find(name);
+    if (it == golden_positions.end()) {
+      if (error) *error = "Trojan PI missing from Golden circuit: " + name;
+      return false;
+    }
+    trojan_values->push_back(golden_values[it->second] ? 1 : 0);
+  }
+  if (trojan_values->size() != golden_positions.size()) {
+    if (error) *error = "Golden/Trojan PI name-set mismatch";
+    return false;
+  }
+  return true;
+}
+
+std::string binary_pattern_key(const std::vector<int>& values) {
+  std::string key;
+  key.reserve(values.size());
+  for (int value : values) key.push_back(value ? '1' : '0');
+  return key;
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +789,79 @@ bool build_stats_from_groundtruth(const circuit& golden,
   return true;
 }
 
+bool extend_stats_with_labeled_patterns(
+    const circuit& trojan,
+    const std::vector<std::vector<int>>& trigger_patterns,
+    const std::vector<std::vector<int>>& nontrigger_patterns,
+    PatternStats* stats,
+    std::string* error) {
+  if (!stats) {
+    if (error) *error = "null pattern stats";
+    return false;
+  }
+  const std::size_t gate_count = stats->gate_indices.size();
+  if (stats->ones_total.size() != gate_count ||
+      stats->ones_trigger.size() != gate_count ||
+      stats->ones_notrigger.size() != gate_count) {
+    if (error) *error = "pattern stats gate vectors have inconsistent sizes";
+    return false;
+  }
+  if (trigger_patterns.empty() && nontrigger_patterns.empty()) return true;
+
+  circuit evaluator = trojan;
+  std::unordered_set<std::string> known_trigger_patterns;
+  known_trigger_patterns.reserve(stats->trigger_patterns.size() +
+                                 trigger_patterns.size());
+  for (const std::vector<int>& pattern : stats->trigger_patterns) {
+    known_trigger_patterns.insert(binary_pattern_key(pattern));
+  }
+  auto append_class = [&](const std::vector<std::vector<int>>& patterns,
+                          bool trigger) -> bool {
+    for (const std::vector<int>& pattern : patterns) {
+      if (pattern.size() != trojan.pi_count()) {
+        if (error) *error = "extra pattern PI count mismatch";
+        return false;
+      }
+      if (trigger &&
+          !known_trigger_patterns.insert(binary_pattern_key(pattern)).second) {
+        continue;
+      }
+      try {
+        (void)evaluator.simulate(pattern);
+      } catch (const std::exception& exception) {
+        if (error) {
+          *error = std::string("extra pattern simulation failed: ") +
+                   exception.what();
+        }
+        return false;
+      }
+      for (std::size_t gate = 0; gate < gate_count; ++gate) {
+        const bool value =
+            evaluator.get_cell(stats->gate_indices[gate]).val != 0;
+        if (!value) continue;
+        stats->ones_total[gate] += 1;
+        if (trigger) {
+          stats->ones_trigger[gate] += 1;
+        } else {
+          stats->ones_notrigger[gate] += 1;
+        }
+      }
+      stats->total_patterns += 1;
+      if (trigger) {
+        stats->trigger_patterns.push_back(pattern);
+        stats->trigger_patterns_total += 1;
+        stats->mismatch_patterns += 1;
+      } else {
+        stats->notrigger_patterns_total += 1;
+      }
+    }
+    return true;
+  };
+
+  return append_class(trigger_patterns, true) &&
+         append_class(nontrigger_patterns, false);
+}
+
 vector<vector<int>> select_spread_patterns(const vector<vector<int>>& patterns,
                                            size_t max_count) {
   vector<vector<int>> selected;
@@ -1088,6 +1218,8 @@ std::vector<LiteralPatchCutCandidate> collect_literal_patch_cut_candidates(
 bool try_verified_literal_patch_cut(const circuit& golden,
                                     const circuit& base,
                                     const PatternStats& stats,
+                                    const std::vector<std::vector<int>>&
+                                        protected_nontrigger_patterns,
                                     const MiningResult& result,
                                     circuit* patched_out,
                                     int* selected_node,
@@ -1171,8 +1303,35 @@ bool try_verified_literal_patch_cut(const circuit& golden,
       cerr << "\n";
       continue;
     }
+
+    // A direct literal cut is unconditional: unlike the learned DNF, it is
+    // not guarded by the trigger predicate.  Preserve every false-positive
+    // counterexample learned from formal refinement or patch CEC before
+    // accepting the cut.
+    if (!protected_nontrigger_patterns.empty()) {
+      mismatch_index = 0;
+      verify_error.clear();
+      const bool negatives_verified = verify_patch_groundtruth(
+          golden, trial, protected_nontrigger_patterns, &mismatch_index,
+          &verify_error);
+      if (!negatives_verified) {
+        const double protected_verify_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - verify_start).count();
+        cerr << "[TIMING]   literal_patch_cut_verify: "
+             << protected_verify_ms << " ms (FAIL)\n";
+        cerr << "literal_patch_cut_try "
+             << base.node_name(cand.node_idx)
+             << " forced " << cand.forced_value
+             << " failed: protected non-trigger " << verify_error
+             << " pattern " << mismatch_index << "\n";
+        continue;
+      }
+    }
     cerr << "[TIMING]   final_verify: "
-         << verify_ms << " ms (PASS)\n";
+         << std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - verify_start).count()
+         << " ms (PASS)\n";
 
     std::size_t trial_area = 0;
     std::size_t trial_level = 0;
@@ -2031,14 +2190,49 @@ int main(int argc, char** argv) {
          << " max_clauses " << options.rule_opt_max_clauses
          << " max_literals " << options.rule_opt_max_literals << "\n";
   }
+  if (options.rule_formal_refine) {
+    cout << "rule_formal_config"
+         << " timeout_ms " << options.rule_formal_timeout_ms
+         << " max_rounds " << options.rule_formal_max_rounds
+         << " cex_batch " << options.rule_formal_cex_batch << "\n";
+  }
 
   const int kMaxCecRounds = 5;
   std::vector<std::vector<int>> extra_trigger_patterns;
   std::vector<std::vector<int>> extra_nontrigger_patterns;
+  std::unordered_set<std::string> extra_trigger_pattern_keys;
+  std::unordered_set<std::string> extra_nontrigger_pattern_keys;
+  auto append_extra_pattern = [&](std::vector<int> pattern,
+                                  bool trigger,
+                                  bool* inserted,
+                                  std::string* append_error) -> bool {
+    if (inserted) *inserted = false;
+    const std::string key = binary_pattern_key(pattern);
+    auto& target_keys = trigger ? extra_trigger_pattern_keys
+                                : extra_nontrigger_pattern_keys;
+    const auto& opposite_keys = trigger ? extra_nontrigger_pattern_keys
+                                        : extra_trigger_pattern_keys;
+    if (opposite_keys.find(key) != opposite_keys.end()) {
+      if (append_error) {
+        *append_error =
+            "counterexample has conflicting trigger/non-trigger labels";
+      }
+      return false;
+    }
+    if (!target_keys.insert(key).second) return true;
+    auto& target_patterns = trigger ? extra_trigger_patterns
+                                    : extra_nontrigger_patterns;
+    target_patterns.push_back(std::move(pattern));
+    if (inserted) *inserted = true;
+    return true;
+  };
   int cec_round = 0;
+  std::size_t rule_refine_rounds = 0;
+  std::size_t rule_build_attempt = 0;
+  std::unordered_set<std::string> rule_miter_blocked_bits;
   string fix_output_path;
 
-  for (cec_round = 0; cec_round < kMaxCecRounds; ++cec_round) {
+  while (cec_round < kMaxCecRounds) {
 
   circuit working_trojan = trojan;
   PatternStats stats;
@@ -2048,6 +2242,7 @@ int main(int argc, char** argv) {
   int merged_match_idx = -1;
   bool fix_succeeded = false;
   bool trigger_sig_single_kill = false;
+  bool retry_after_rule_miter = false;
   std::size_t synth_pass = 0;
 
   if (cec_round > 0) {
@@ -2056,6 +2251,7 @@ int main(int argc, char** argv) {
 
   while (true) {
     synth_pass += 1;
+    rule_build_attempt += 1;
     RuleSynthTelemetry rule_synth_telemetry;
     auto add_mining_telemetry = [&](const MiningResult& mining_result) {
       rule_synth_telemetry.dt_builds += mining_result.dt_builds;
@@ -2089,13 +2285,15 @@ int main(int argc, char** argv) {
     }
     cerr << "[TIMING] build_stats (GPU sim): " << ms_since(t_phase) << " ms\n";
 
-    // Append CEC counter-example patterns from previous rounds.
+    // Extend both the stored samples and the per-gate activation statistics
+    // with counterexamples accumulated by formal refinement or patch CEC.
+    if (!extend_stats_with_labeled_patterns(
+            working_trojan, extra_trigger_patterns,
+            extra_nontrigger_patterns, &stats, &error)) {
+      cerr << "Counterexample statistics error: " << error << "\n";
+      return 1;
+    }
     if (!extra_trigger_patterns.empty()) {
-      for (const auto& ep : extra_trigger_patterns) {
-        stats.trigger_patterns.push_back(ep);
-      }
-      stats.trigger_patterns_total = stats.trigger_patterns.size();
-      stats.mismatch_patterns = stats.trigger_patterns_total;
       cout << "cec_extra_patterns " << extra_trigger_patterns.size()
            << " total_trigger " << stats.trigger_patterns_total << "\n";
     }
@@ -2475,6 +2673,7 @@ int main(int argc, char** argv) {
          << " strategy " << rule_method_name(options.rule_method)
          << " cec_attempt " << (cec_round + 1)
          << " synth_pass " << synth_pass
+         << " rule_build_attempt " << rule_build_attempt
          << " candidate_count " << rule_synth_telemetry.candidate_count
          << " dt_builds " << rule_synth_telemetry.dt_builds
          << " strict_dt_builds " << rule_synth_telemetry.strict_dt_builds
@@ -2551,6 +2750,7 @@ int main(int argc, char** argv) {
       if (try_verified_literal_patch_cut(golden,
                                          working_trojan,
                                          stats,
+                                         extra_nontrigger_patterns,
                                          result,
                                          &literal_cut,
                                          &literal_cut_node,
@@ -2657,6 +2857,7 @@ int main(int argc, char** argv) {
          << " strategy " << rule_method_name(options.rule_method)
          << " cec_attempt " << (cec_round + 1)
          << " synth_pass " << synth_pass
+         << " rule_build_attempt " << rule_build_attempt
          << " source " << rule_apply_source
          << " rule_model_used " << (rule_model_used ? 1 : 0)
          << " literal_node " << effective_literal_node
@@ -2670,12 +2871,142 @@ int main(int argc, char** argv) {
          << " effective_literals " << effective_literals
          << " effective_depth " << effective_depth << "\n";
 
+    if (options.rule_formal_refine && rule_model_used) {
+      RuleMiterOptions miter_options;
+      miter_options.timeout_ms = options.rule_formal_timeout_ms;
+      miter_options.max_counterexamples = options.rule_formal_cex_batch;
+      const RuleMiterResult miter = check_rule_miter(
+          golden, working_trojan, result.feature_nodes, result.model,
+          miter_options, &rule_miter_blocked_bits);
+
+      std::size_t returned_fn = 0;
+      std::size_t returned_fp = 0;
+      std::size_t added_counterexamples = 0;
+      std::size_t known_training_violations = 0;
+      std::unordered_set<std::string> current_trigger_keys;
+      current_trigger_keys.reserve(stats.trigger_patterns.size());
+      for (const std::vector<int>& pattern : stats.trigger_patterns) {
+        current_trigger_keys.insert(binary_pattern_key(pattern));
+      }
+      for (const RuleMiterCounterexample& counterexample :
+           miter.counterexamples) {
+        const std::string key = binary_pattern_key(counterexample.pi_values);
+        if (!rule_miter_blocked_bits.insert(key).second) continue;
+
+        std::vector<int> trojan_pattern;
+        std::string reorder_error;
+        if (!reorder_golden_pattern_to_trojan_pis(
+                golden, working_trojan, counterexample.pi_values,
+                &trojan_pattern, &reorder_error)) {
+          cerr << "rule_miter counterexample reorder failed: "
+               << reorder_error << "\n";
+          return 1;
+        }
+        const bool is_false_negative =
+            counterexample.kind ==
+            RuleMiterCounterexampleKind::false_negative;
+        if (is_false_negative &&
+            current_trigger_keys.find(binary_pattern_key(trojan_pattern)) !=
+                current_trigger_keys.end()) {
+          returned_fn += 1;
+          known_training_violations += 1;
+          continue;
+        }
+        bool inserted = false;
+        std::string append_error;
+        if (!append_extra_pattern(std::move(trojan_pattern),
+                                  is_false_negative, &inserted,
+                                  &append_error)) {
+          cerr << "rule_miter counterexample append failed: "
+               << append_error << "\n";
+          return 1;
+        }
+        if (is_false_negative) {
+          returned_fn += 1;
+        } else {
+          returned_fp += 1;
+        }
+        if (inserted) added_counterexamples += 1;
+      }
+
+      const bool refinement_budget_available =
+          rule_refine_rounds < options.rule_formal_max_rounds;
+      if (added_counterexamples != 0 && refinement_budget_available) {
+        rule_refine_rounds += 1;
+        retry_after_rule_miter = true;
+      }
+      const bool refinement_stalled =
+          miter.status == RuleMiterStatus::counterexamples &&
+          added_counterexamples == 0;
+
+      cout << "rule_miter_summary"
+           << " strategy " << rule_method_name(options.rule_method)
+           << " cec_attempt " << (cec_round + 1)
+           << " synth_pass " << synth_pass
+           << " rule_build_attempt " << rule_build_attempt
+           << " refine_rounds " << rule_refine_rounds
+           << " status " << rule_miter_status_name(miter.status)
+           << " fn_status "
+           << rule_miter_query_status_name(miter.false_negative.status)
+           << " fp_status "
+           << rule_miter_query_status_name(miter.false_positive.status)
+           << " proved " << (miter.proved() ? 1 : 0)
+           << " returned " << miter.counterexamples.size()
+           << " returned_fn " << returned_fn
+           << " returned_fp " << returned_fp
+           << " added " << added_counterexamples
+           << " known_training_violations " << known_training_violations
+           << " blocked_fn " << miter.false_negative.blocked_violations
+           << " blocked_fp " << miter.false_positive.blocked_violations
+           << " checks " << miter.solver_checks
+           << " retry " << (retry_after_rule_miter ? 1 : 0)
+           << " stalled " << (refinement_stalled ? 1 : 0)
+           << " refine_budget_available "
+           << (refinement_budget_available ? 1 : 0)
+           << " encode_ms " << miter.encode_ms
+           << " solver_ms " << miter.solver_ms
+           << " validation_ms " << miter.validation_ms
+           << " total_ms " << miter.total_ms << "\n";
+      if (!miter.reason.empty()) {
+        std::string safe_reason = miter.reason;
+        for (char& ch : safe_reason) {
+          if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+        }
+        if (safe_reason.size() > 512) safe_reason.resize(512);
+        cout << "rule_miter_reason " << std::quoted(safe_reason) << "\n";
+      }
+    } else if (options.rule_formal_refine) {
+      cout << "rule_miter_summary"
+           << " strategy " << rule_method_name(options.rule_method)
+           << " cec_attempt " << (cec_round + 1)
+           << " synth_pass " << synth_pass
+           << " rule_build_attempt " << rule_build_attempt
+           << " refine_rounds " << rule_refine_rounds
+           << " status skipped"
+           << " fn_status not_checked"
+           << " fp_status not_checked"
+           << " proved 0 returned 0 returned_fn 0 returned_fp 0"
+           << " added 0 known_training_violations 0"
+           << " blocked_fn 0 blocked_fp 0 checks 0 retry 0 stalled 0"
+           << " refine_budget_available "
+           << (rule_refine_rounds < options.rule_formal_max_rounds ? 1 : 0)
+           << " encode_ms 0 solver_ms 0 validation_ms 0 total_ms 0\n";
+      cout << "rule_miter_reason "
+           << std::quoted(
+                  "literal patch cut bypasses the conditional rule model")
+           << "\n";
+    }
+
     cout << "training_set pos=" << result.data_pos
          << " neg=" << result.data_neg << '\n';
     cout << "hard_mined " << result.hard_added
          << " rounds " << result.rounds_used << '\n';
 
     cout << "mis match " << stats.mismatch_patterns << '\n';
+
+    if (retry_after_rule_miter) {
+      break;
+    }
 
     if (fix_succeeded) {
       break;
@@ -2709,6 +3040,15 @@ int main(int argc, char** argv) {
       }
     }
     break;
+  }
+
+  if (retry_after_rule_miter) {
+    cout << "rule_miter_refine_retry"
+         << " round " << rule_refine_rounds
+         << " trigger_patterns " << extra_trigger_patterns.size()
+         << " negative_patterns " << extra_nontrigger_patterns.size()
+         << "\n";
+    continue;
   }
 
   t_phase = std::chrono::steady_clock::now();
@@ -2955,17 +3295,43 @@ int main(int argc, char** argv) {
     cerr << "; treating as trigger\n";
     is_real_trigger = true;
   }
+  std::vector<int> trojan_cec_counter;
+  std::string reorder_error;
+  if (!reorder_golden_pattern_to_trojan_pis(
+          golden, trojan, cec_counter, &trojan_cec_counter,
+          &reorder_error)) {
+    cerr << "cec: failed to reorder counter-example: "
+         << reorder_error << "\n";
+    return 1;
+  }
   if (is_real_trigger) {
-    extra_trigger_patterns.push_back(std::move(cec_counter));
+    bool inserted = false;
+    std::string append_error;
+    if (!append_extra_pattern(std::move(trojan_cec_counter), true,
+                              &inserted, &append_error)) {
+      cerr << "cec: failed to append counter-example: "
+           << append_error << "\n";
+      return 1;
+    }
     cout << "cec_new_pattern total_extra "
          << extra_trigger_patterns.size()
-         << " type trigger\n";
+         << " type trigger duplicate " << (inserted ? 0 : 1) << "\n";
   } else {
-    extra_nontrigger_patterns.push_back(std::move(cec_counter));
+    bool inserted = false;
+    std::string append_error;
+    if (!append_extra_pattern(std::move(trojan_cec_counter), false,
+                              &inserted, &append_error)) {
+      cerr << "cec: failed to append counter-example: "
+           << append_error << "\n";
+      return 1;
+    }
     cout << "cec_new_negative total_extra_neg "
          << extra_nontrigger_patterns.size()
-         << " type false_positive\n";
+         << " type false_positive duplicate " << (inserted ? 0 : 1)
+         << "\n";
   }
+
+  cec_round += 1;
 
   }  // end CEC retry loop
 
