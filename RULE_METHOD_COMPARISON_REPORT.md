@@ -1,5 +1,7 @@
 # Rule synthesis 方法比較報告
 
+> 本文保留 `vn-retrain` 對 `z3-pb` 的 v2 baseline。後續已實作真正 HiGHS weighted set-cover MILP、SAT FN/FP feedback、shared-inverter 與 logic-risk cost，並在修正 direct-cut counterexample 處理後取得 28 / 28 external CEC PASS；最新結果見 [`MILP_RULE_COVER_REPORT.md`](MILP_RULE_COVER_REPORT.md)。
+
 ## 結論摘要
 
 本報告只使用修正後的正式 artifacts：`validation/rule_method_ab_rebuild11_v2` 與 `validation/rule_method_ab_controls_v2`。比較 `vn-retrain` 與 `z3-pb` 時，以 runner 另外啟動的 **external ABC CEC**（patched circuit 對 golden circuit）作 primary correctness result；`GT verify`、finite-training 0 FP/0 FN、`optimizer_verified=1` 都不能取代全輸入 CEC。

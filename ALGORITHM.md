@@ -11,7 +11,7 @@
 產生一個修補後的電路，使其與 Golden 功能完全等價，且面積（area）和延遲（level）的增加盡可能小。
 
 **核心思路：**
-將 error patterns 模擬成 gate features，先由 decision tree 產生可解釋的 trigger DNF baseline。接著依 `--rule-method` 選擇 VN 重訓、純 DT，或以 Z3 Optimize 對 raw DT path 的候選 gate union 做 bounded-DNF 0–1 pseudo-Boolean 重合成。rule 只負責引導修補；最後是否正確，以 patched circuit 對 golden circuit 的 ABC CEC 為準。
+將 error patterns 模擬成 gate features，先由 decision tree 產生可解釋的 trigger DNF baseline。接著依 `--rule-method` 選擇 VN 重訓、純 DT、Z3 0–1 PB，或 HiGHS weighted set-cover MILP 對 raw DT path 的候選 gate union 做全域重合成。可選的 SAT rule miter 會把 false-negative / false-positive counterexample 回灌；rule 只負責引導修補，最後是否正確仍以 patched circuit 對 golden circuit 的 ABC CEC 為準。
 
 ---
 
@@ -44,8 +44,10 @@
   │     ├─ vn-retrain: DT → signature VN       │   │
   │     │               → 重訓 → final DT      │   │
   │     ├─ dt: 一次 final DT                   │   │
-  │     └─ z3-pb: 一次 DT → candidate union    │   │
-  │                → bounded-DNF 0–1 PB        │   │
+  │     ├─ z3-pb: 一次 DT → candidate union    │   │
+  │     │          → bounded-DNF 0–1 PB        │   │
+  │     └─ milp-cover: 同一 candidate union       │   │
+  │                → clause pool + HiGHS MILP    │   │
   └─────────────────┬─────────────────────────┘   │
                     │                              │
   ┌─────────────────▼─────────────────────────┐   │
@@ -98,7 +100,7 @@
 
 ### 3. Rule synthesis methods
 
-以 `--rule-method vn-retrain|dt|z3-pb` 選擇流程。預設是 `vn-retrain`；舊參數 `--no-virtual` 等同 `--rule-method dt`。
+以 `--rule-method vn-retrain|dt|z3-pb|milp-cover` 選擇流程。預設是 `vn-retrain`；舊參數 `--no-virtual` 等同 `--rule-method dt`。
 
 #### 3.A `vn-retrain`：目前實際 VN 流程
 
@@ -142,9 +144,48 @@ Z3 Optimize 以 lexicographic objectives 先最小化 active clauses，再最小
 
 這是 Z3 Optimize 的 **0–1 pseudo-Boolean / MaxSMT formulation**，在此 Boolean model 上可稱 0–1 ILP-equivalent；它不是 generic MILP solver，也不建立或公開 LP relaxation，因此沒有可報告的 MILP optimality gap。`optimizer_optimal=1` 與 `optimizer_verified=1` 只適用於目前 candidate union、clause/literal bounds 與有限 training matrix，不代表全部 PI input exact。全輸入功能正確性仍須由 ABC CEC 證明。
 
+#### 3.D `milp-cover`：prime-clause pool + weighted set cover
+
+`milp-cover` 沿用 `z3-pb` 的 DT candidate union 和 finite signature table，但不使用對稱的 clause slots。對每個 positive signature `p` 與 negative signature `n`，建立：
+
+```
+D(p,n) = { feature j | p[j] != n[j] }
+```
+
+一條要 cover `p` 又 reject 所有 negatives 的 conjunction，必須從 features 中選一個 set，且至少 hit 每個 `D(p,n)`。程式以 deterministic DFS 枚舉 literal cap 以內的 inclusion-minimal hitting sets，跨 positives 去重，再計算每條 term 可 cover 的 positive signatures。枚舉有以下 hard guards：
+
+- term pool 預設最多 200,000；
+- DFS states 最多 2,000,000；
+- recursion depth 最多 256；
+- 所有階段共用一個 optimizer deadline。
+
+只要 pool incomplete、timeout、infeasible、solver failure，或最後逐 row verification 失敗，就保留 DT baseline，不宣稱 optimal。
+
+對每條安全 term `t` 建立 binary `y_t`，HiGHS master 的核心 coverage row 是：
+
+```
+for every positive p: sum(y_t for t covering p) >= 1
+sum_t y_t <= clause_cap
+```
+
+不用單一 big-M weighted sum，而是依序解多個 LP/MIP stages：
+
+1. LP1/MIP1：最少 selected terms（rules）。
+2. 固定 `R*` 後，LP2/MIP2：最少 selected literals。
+3. 固定 `R*/L*` 後，LP3/MIP3：最少 expected-zero features 所需的 shared NOT gates。
+4. 固定 `R*/L*/I*` 後，LP4/MIP4：可選的 graph-level logic-risk tie-break。
+
+在目前內建 DNF builder 中，當 rules/literals 已固定，AND+OR gate 數是 `L-1`，會隨解改變的實體 logic gate 成本主要是可共用的 inverter；因此第三階段是目前最直接的 area tie-break。第四階段另外線性化：
+
+- unique tapped features；
+- 以 base fanout 權重的新增 load stress；
+- 依 circuit DAG arrival level 和 balanced AND/OR 估計的 unit-delay depth。
+
+這些是結構/routing/timing proxy，不是 technology-mapped area、wire delay 或 STA。一般 shared subcube factoring 也尚未放進 MILP；目前實體共用只針對 inverter cache。最後仍以實際 patched bench 重算 area/level，並以 ABC CEC 決定 correctness。
+
 ### 4. Final Mining 與 rule 後處理
 
-三種 rule methods 都會建立 final training matrix 與至少一棵 DT；`z3-pb` 再以同一 matrix 重合成 bounded DNF。以下資料結構三種方法共用。
+四種 rule methods 都會建立 final training matrix 與至少一棵 DT；`z3-pb` 與 `milp-cover` 再以同一 matrix 重合成 bounded DNF。以下資料結構四種方法共用。
 
 #### 訓練資料建構
 
@@ -190,7 +231,7 @@ mine_rounds = 1
 mine_max = 0
 ```
 
-所以正式 `bin/main` 路徑不會額外抽一百萬 patterns，也不會在同一 synthesis pass 依 `--mine-rounds` 反覆 rebuild。`--mine-rounds` 與 `--mine-max` 目前仍會被 CLI 解析、顯示並寫進 A/B command record，但不控制這條路徑。現行 refinement 主要來自初始 negative sampling、`z3-pb` 對有限 signature table 的內部 CEGIS，以及 ABC CEC 失敗後加入的新 trigger/false-positive pattern。
+所以正式 `bin/main` 路徑不會額外抽一百萬 patterns，也不會在同一 synthesis pass 依 `--mine-rounds` 反覆 rebuild。`--mine-rounds` 與 `--mine-max` 目前仍會被 CLI 解析、顯示並寫進 A/B command record，但不控制這條路徑。現行 refinement 主要來自初始 negative sampling、`z3-pb` 對有限 signature table 的內部 CEGIS、可選的 SAT rule-miter feedback，以及 ABC CEC 失敗後加入的新 trigger/false-positive pattern。
 
 #### Strict Retry
 
@@ -215,7 +256,7 @@ simplify_rules：
   - 移除 rule 中矛盾的 term（同一 feature 同時要求 0 和 1）
 minimize_rules_with_data：
   - 在 finite training matrix 上逐 literal 嘗試刪除
-z3-pb（若啟用）：
+z3-pb / milp-cover（若啟用）：
   - 對 raw DT candidate union 做跨 clauses 的全域重合成
 ```
 
@@ -227,6 +268,23 @@ z3-pb（若啟用）：
 - `rule_model_used=1` 時，`applied_*` 是後處理完、由 downstream repair 消費的 rule model 大小；single-literal model 可直接觸發 trigger-kill，multi-literal/rule model 才會成為 conditional patch 條件。
 - verified direct literal cut 完全 bypass rule model，因此 `rule_model_used=0` 且 `applied_*=0/0/0`；為了跨分支比較，`effective_*=1/1/1` 表示一個有效 predicate/action。
 - `effective_rules/effective_literals/effective_depth` 應搭配 external CEC 結果解讀；CEC_FAIL 的小條件不是正確 patch。
+
+#### SAT rule-miter refinement（可選）
+
+`--rule-formal-refine` 對 optimizer 產生的 conditional DNF `R(x)` 建立直接 miter。以 golden/trojan 同名 PI 共用輸入，同名 PO 的 mismatch predicate 為：
+
+```
+E(x) = OR_po (Golden_po(x) XOR Trojan_po(x))
+```
+
+每次交替查詢：
+
+- false negative：`E(x) AND NOT R(x)`；
+- false positive：`NOT E(x) AND R(x)`。
+
+SAT witness 會再用 scalar simulator 驗證方向，每次最多回傳 5 筆，依 label 加入 `extra_trigger_patterns` 或 `extra_nontrigger_patterns`，然後重建 training matrix / DT / optimizer。目前是外層 CEGIS，尚未將第一次 DT candidate union 持久化成不重建 tree 的 incremental master。
+
+只有 FN/FP 兩個 query 都 UNSAT 才記 `proved=1`；timeout/unknown 不是 proof。後續若選擇 direct literal cut，conditional `R` 會被 bypass，所以該分支的 miter 記為 skipped。它會另外保護累積的 non-trigger counterexamples：任一 unconditional cut 只要讓既知 safe pattern 不再等於 golden，就必須拒絕並改試其他 candidate。
 
 ### 5. 修補策略
 
@@ -243,7 +301,7 @@ z3-pb（若啟用）：
       → 強制它永遠不滿足 trigger 條件
 
 驗證：每個 trial 都模擬目前所有 trigger patterns，
-      確認輸出與 golden 一致
+      並確認 formal/CEC 累積的 safe counterexamples 仍與 golden 一致
 
 優點：幾乎零面積開銷（只是斷開一條線）
 缺點：有限 GT verify 通過仍不代表全輸入等價，後面仍需 ABC CEC
@@ -918,7 +976,7 @@ CEC Retry Loop（最多 5 輪）：
 - Mining 只在這些 pattern 上訓練，可能遺漏某些 trigger 條件
 - CEC 用形式化方法檢驗所有可能 input
 - Counter-example 回饋讓 mining 逐步完善 trigger 條件
-- 正式 `rebuild11_v2` profile 中，兩法仍各有多個案例需要 1–5 輪；不能由有限 training accuracy 推定 CEC PASS
+- 歷史 `rebuild11_v2` profile 中，VN/Z3 各有多個案例需要 1–5 輪；最終 Z3/MILP + formal 的 hard-11 也各有 4 個 CEC retries。不能由有限 training accuracy 或 MILP optimum 推定 CEC PASS
 
 ---
 
@@ -932,24 +990,42 @@ CEC Retry Loop（最多 5 輪）：
 | `--mine-max N` | 5000 | 目前由 CLI 解析/記錄；`main` 的正式 rule-synthesis calls 固定使用 0 |
 | `--force-split` | off | 強制 tree 繼續分裂。增加 rule 數但降低 false positive |
 | `--no-strict` | off | 停用 strict retry。加快速度但可能有 false positive |
-| `--rule-method M` | `vn-retrain` | 選擇 `vn-retrain`、`dt` 或 `z3-pb` |
+| `--rule-method M` | `vn-retrain` | 選擇 `vn-retrain`、`dt`、`z3-pb` 或 `milp-cover` |
 | `--no-virtual` | off | Legacy alias for `--rule-method dt`；不可與明確的非 `dt` method 並用 |
 | `--include-pi` | on | 相容性 flag；目前 CLI 已預設加入 PI features |
-| `--rule-opt-timeout-ms N` | 10000 | 每次 Z3-PB optimizer call 共用的 wall-clock budget |
+| `--rule-opt-timeout-ms N` | 10000 | 每次 Z3-PB 或 MILP optimizer call 共用的 wall-clock budget |
 | `--rule-opt-max-rounds N` | 100 | PB CEGIS 最多 Optimize checks |
 | `--rule-opt-cex-batch N` | 5 | 每次加入的有限-training counterexample signatures 上限 |
 | `--rule-opt-max-clauses N` | 0 | DNF clause cap；0 由 baseline rule count 推導，明確非零值不再被 baseline count 截斷 |
 | `--rule-opt-max-literals N` | 10 | 每條 clause literal cap；0 使用 baseline 最大 clause 長度 |
+| `--rule-cover-max-terms N` | 200000 | MILP clause-pool cap；不完整時 fallback，不誤報 optimal |
+| `--rule-cover-third-objective M` | `unique-inverters` | 固定 R/L 後最小化 shared NOT gates；可設 `none` |
+| `--rule-cover-phase3-timeout-ms N` | shared | 第三階段可選的獨立 sub-budget |
+| `--rule-cover-fourth-objective M` | `logic-risk` | 固定 R/L/inverters 後做 structural proxy tie-break；可設 `none` |
+| `--rule-cover-logic-risk-unique-weight X` | 0.25 | unique feature taps 權重 |
+| `--rule-cover-logic-risk-fanout-weight X` | 0.25 | fanout-load stress 權重 |
+| `--rule-cover-logic-risk-timing-weight X` | 0.50 | unit-level depth 權重 |
+| `--rule-cover-phase4-timeout-ms N` | shared | 第四階段可選的獨立 sub-budget |
+| `--rule-formal-refine` | off | 啟用 FN/FP SAT rule miter 與 counterexample feedback |
+| `--rule-formal-timeout-ms N` | 10000 | 每次 miter 的 shared soft wall budget |
+| `--rule-formal-max-rounds N` | 5 | formal feedback rebuild 上限 |
+| `--rule-formal-cex-batch N` | 5 | 每次最多回傳 1–5 筆 CEX |
 
 ---
 
 ## Rule-method 測試與正式 artifact 重現
 
 ```bash
-make -C src ../bin/script/test_rule_optimizer -j4
+make -C src HIGHS_ROOT=/path/to/highs-prefix \
+  ../bin/script/test_rule_optimizer \
+  ../bin/script/test_set_cover_optimizer \
+  ../bin/script/test_rule_miter -j4
 bin/script/test_rule_optimizer
+bin/script/test_set_cover_optimizer
+bin/script/test_rule_miter
 python3 scripts/test_compare_rule_methods.py
 bash scripts/test_rule_method_telemetry.sh
+bash scripts/test_literal_patch_cut_cex.sh
 
 python3 scripts/compare_rule_methods.py \
   --profile rebuild11 \
@@ -960,10 +1036,23 @@ python3 scripts/compare_rule_methods.py \
   --profile controls \
   --output-root validation/rule_method_ab_controls_v2 \
   --jobs 1 --force
+
+python3 scripts/compare_rule_methods.py \
+  --profile all \
+  --method z3-pb --method milp-cover \
+  --highs-library /path/to/libhighs.so \
+  --rule-formal-refine --rule-formal-timeout-ms 10000 \
+  --rule-formal-max-rounds 5 --rule-formal-cex-batch 5 \
+  --rule-cover-fourth-objective logic-risk \
+  --rule-cover-logic-risk-unique-weight 0.25 \
+  --rule-cover-logic-risk-fanout-weight 0.25 \
+  --rule-cover-logic-risk-timing-weight 0.50 \
+  --output-root validation/rule_method_milp_p4_formal \
+  --jobs 1 --force
 ```
 
 runner 強制 `--jobs 1`，避免同 case 的兩種方法競爭共用 rule-merge 中間檔；非 1 的值會在寫 artifact 前被拒絕。它把 internal CEC 的 `ABC_BIN` 固定到已 fingerprint 的 ABC，external CEC 同時要求 equivalence marker 與 return code 0。每次 run 完成後會重查所有 tool/input identities；`wall_ms` 記錄 execution，而額外的 `provenance_verification_ms` 記錄 post-run identity check。
 
-runner 會保存 stdout、stderr、patched bench、external CEC logs、JSON record，以及帶 pre-run fingerprints 與 post-run mutation check 的 aggregate CSV/JSON。可追蹤的 28-row 投影在 [`experiments/rule_method_ab_2026-08-11/paired_results.csv`](experiments/rule_method_ab_2026-08-11/paired_results.csv)；完整結果、commit 鏈、artifact SHA 與限制見 [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md)。
+runner 會保存 stdout、stderr、patched bench、external CEC logs、JSON record，以及帶 pre-run fingerprints 與 post-run mutation check 的 aggregate CSV/JSON。VN/Z3 比較見 [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md)；HiGHS set-cover、SAT feedback、cost objectives 與最終 28-run 結果見 [`MILP_RULE_COVER_REPORT.md`](MILP_RULE_COVER_REPORT.md)。兩份報告都只把外部 ABC CEC 當作 correctness result。
 
 面積比較應採 runner 對最終 patched bench 重新量測的 `actual_area_delta_trojan` / `actual_area_delta_golden`。main 的 `reported_area_delta` 是流程內摘要；正式 v2 hard artifacts 的 8 個 multi-rule runs 中，它都低估了包含 rule-match logic 的最終面積增量。

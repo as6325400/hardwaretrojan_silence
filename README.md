@@ -27,9 +27,13 @@ Golden + Trojan .bench
   │  └─ final DT
   ├─ dt
   │  └─ one final DT, without VN or PB optimization
-  └─ z3-pb
-     ├─ one DT; union gates on raw positive paths
-     └─ bounded-DNF 0-1 PB optimization over the finite training matrix
+  ├─ z3-pb
+  │  ├─ one DT; union gates on raw positive paths
+  │  └─ bounded-DNF 0-1 PB optimization over the finite training matrix
+  └─ milp-cover
+     ├─ the same DT candidate union; enumerate safe minimal clauses
+     ├─ HiGHS weighted set-cover MILP: rules → literals → shared inverters
+     └─ optional graph-level feature/fanout/depth tie-break
         │
         ▼
   Rule simplification and patch selection
@@ -61,6 +65,7 @@ src/
 │   ├── gpu_tree.cu/cuh         # GPU-accelerated tree training
 │   ├── miner.hpp/cpp           # Mining loop + hard-negative mining + strict retry
 │   ├── rule_optimizer.hpp/cpp  # Z3 Optimize bounded-DNF 0-1 PB optimizer
+│   ├── set_cover_optimizer.hpp/cpp # HiGHS weighted set-cover MILP
 │   ├── virtual_node.hpp/cpp    # Signature-ranked pair/triple AND virtual features
 │   ├── candidate_selector.hpp/cpp # Build the all-gate candidate set
 │   ├── pattern_sampler.hpp/cpp # Random pattern generation
@@ -83,15 +88,21 @@ src/
 scripts/
 ├── compare_rule_methods.py     # Reproducible per-case A/B runner + external CEC
 ├── test_compare_rule_methods.py
-└── test_rule_method_telemetry.sh
+├── test_rule_method_telemetry.sh
+└── test_literal_patch_cut_cex.sh
 ```
 
 ## Build
 
-Requires: C++17, OpenMP, z3. Optional: CUDA (auto-detected).
+Requires: C++17, OpenMP, z3. CUDA and HiGHS are auto-detected. HiGHS is
+optional for the other methods but required to run `milp-cover`; set
+`HIGHS_ROOT` when it is installed outside the default search paths.
 
 ```bash
 make -C src -j$(nproc)
+
+# Explicit, reproducible HiGHS selection
+make -C src HIGHS_ROOT=/path/to/highs-prefix -j$(nproc)
 ```
 
 Outputs go to `bin/` (executables) and `build/` (object files).
@@ -117,15 +128,41 @@ bin/main <golden.bench> <trojan.bench> <groundtruth.json> [output.bench] [option
 | `--include-pi` | on | Compatibility flag; primary-input features are already enabled by default |
 | `--force-split` | off | Force tree splits even with low gain |
 | `--no-strict` | off | Disable strict retry for zero FP on the finite training matrix |
-| `--rule-method M` | `vn-retrain` | `vn-retrain`, `dt`, or `z3-pb` |
+| `--rule-method M` | `vn-retrain` | `vn-retrain`, `dt`, `z3-pb`, or `milp-cover` |
 | `--no-virtual` | off | Legacy alias for `--rule-method dt`; conflicts with an explicit non-`dt` method |
-| `--rule-opt-timeout-ms N` | 10000 | Shared Z3-PB wall-clock budget per optimizer call |
+| `--rule-opt-timeout-ms N` | 10000 | Shared wall-clock budget per Z3-PB or MILP optimizer call |
 | `--rule-opt-max-rounds N` | 100 | Maximum PB CEGIS checks |
 | `--rule-opt-cex-batch N` | 5 | Misclassified finite-training signatures added per CEGIS check |
 | `--rule-opt-max-clauses N` | 0 | DNF clause cap; `0` derives it from the DT baseline rule count, while an explicit nonzero cap is honored |
 | `--rule-opt-max-literals N` | 10 | Literals per DNF clause; `0` uses the largest baseline clause |
+| `--rule-cover-max-terms N` | 200000 | Maximum safe clauses enumerated by `milp-cover`; an incomplete pool falls back safely |
+| `--rule-cover-third-objective M` | `unique-inverters` | After optimal rule/literal counts, minimize shared expected-zero literal inverters; `none` disables it |
+| `--rule-cover-phase3-timeout-ms N` | shared | Optional sub-budget for the shared-inverter stage |
+| `--rule-cover-fourth-objective M` | `logic-risk` | Final MILP tie-break: `logic-risk` or `none` |
+| `--rule-cover-logic-risk-unique-weight X` | 0.25 | Weight of distinct tapped features in the graph-level proxy |
+| `--rule-cover-logic-risk-fanout-weight X` | 0.25 | Weight of base-fanout load stress in the proxy |
+| `--rule-cover-logic-risk-timing-weight X` | 0.50 | Weight of unit-level balanced-DNF depth in the proxy |
+| `--rule-cover-phase4-timeout-ms N` | shared | Optional sub-budget for the logic-risk stage |
+| `--rule-formal-refine` | off | Query SAT for rule false negatives/positives and feed counterexamples back |
+| `--rule-formal-timeout-ms N` | 10000 | Shared soft wall-clock budget per rule-miter check |
+| `--rule-formal-max-rounds N` | 5 | Maximum SAT feedback rebuilds |
+| `--rule-formal-cex-batch N` | 5 | Counterexamples returned per check, from 1 to 5 |
 
 `z3-pb` changes rule synthesis only; downstream payload-node optimization and patch application are shared with the other methods. It uses Z3 Optimize as a pseudo-Boolean/MaxSMT backend. Its Boolean formulation is 0-1 ILP-equivalent, but it is not a generic MILP solver and does not construct or expose an LP relaxation, so there is no reported MILP gap. “Optimal” and “verified” telemetry apply only to the bounded candidate set and finite training matrix. Whole-input correctness is established by ABC CEC.
+
+`milp-cover` starts from the same raw-DT candidate union. For each positive
+signature it enumerates bounded inclusion-minimal clauses that reject every
+known negative, then solves a true binary set-cover model with HiGHS. Separate
+LP/MIP stages minimize rule count, literal count, shared inverter count, and
+optionally a graph-level logic-risk proxy. The last stage is not physical STA:
+fanout and delay are structural surrogates, so final area/level must still be
+measured from the emitted netlist.
+
+With `--rule-formal-refine`, both optimizer methods additionally query
+`E & !R` and `!E & R`, where `E` is the golden/trojan PO-mismatch predicate
+and `R` is the learned DNF. SAT witnesses become hard positive/negative
+samples. Direct literal cuts also preserve accumulated safe counterexamples;
+final correctness remains the independent patched-netlist ABC CEC result.
 
 `rule_synth_summary synthesized_*` records the model immediately after rule synthesis. `rule_apply_summary` separately records the post-signature/applied mechanism and its effective rule/literal/depth counts; a verified direct literal cut is identified with `rule_model_used=0` and an effective `1/1/1` condition.
 
@@ -179,10 +216,16 @@ Success is determined by ABC CEC (equivalence check) of the patched circuit agai
 Run the rule-optimizer and comparison regression tests with:
 
 ```bash
-make -C src ../bin/script/test_rule_optimizer -j4
+make -C src HIGHS_ROOT=/path/to/highs-prefix \
+  ../bin/script/test_rule_optimizer \
+  ../bin/script/test_set_cover_optimizer \
+  ../bin/script/test_rule_miter -j4
 bin/script/test_rule_optimizer
+bin/script/test_set_cover_optimizer
+bin/script/test_rule_miter
 python3 scripts/test_compare_rule_methods.py
 bash scripts/test_rule_method_telemetry.sh
+bash scripts/test_literal_patch_cut_cex.sh
 ```
 
 Reproduce the fixed 11 hard cases and 3 controls (large V0 inputs must already be present under the paths in `configs/rule_method_ab_cases.json`):
@@ -197,11 +240,20 @@ python3 scripts/compare_rule_methods.py \
   --profile controls \
   --output-root validation/rule_method_ab_controls_v2 \
   --jobs 1 --force
+
+python3 scripts/compare_rule_methods.py \
+  --profile all \
+  --method z3-pb --method milp-cover \
+  --highs-library /path/to/libhighs.so \
+  --rule-formal-refine \
+  --rule-cover-fourth-objective logic-risk \
+  --output-root validation/rule_method_milp_p4_formal \
+  --jobs 1 --force
 ```
 
 The runner enforces `--jobs 1` because methods for one case can otherwise race on a shared intermediate rule-merge netlist. It pins `ABC_BIN` to the fingerprinted ABC executable, requires the independent external CEC marker and a zero exit status, and rechecks all tool/input identities after each run. `wall_ms` covers execution; the separate `provenance_verification_ms` field records the post-run identity check.
 
-Artifacts include per-method logs, patched netlists, JSON records, aggregate CSV/JSON, pre-run fingerprints with post-run mutation checks, and the external ABC CEC result. The tracked 28-row projection is [`experiments/rule_method_ab_2026-08-11/paired_results.csv`](experiments/rule_method_ab_2026-08-11/paired_results.csv). See [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md) for the v2 comparison and limitations.
+Artifacts include per-method logs, patched netlists, JSON records, aggregate CSV/JSON, pre-run fingerprints with post-run mutation checks, and the external ABC CEC result. See [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md) for the VN/Z3 baseline and [`MILP_RULE_COVER_REPORT.md`](MILP_RULE_COVER_REPORT.md) for the HiGHS set-cover, SAT feedback, cost-objective implementation, final comparison, and limitations.
 
 ## ABC Setup
 
@@ -216,6 +268,7 @@ export ABC_BIN=/path/to/abc
 - **C++17** compiler (g++ or clang++)
 - **OpenMP** for CPU parallelism
 - **z3** SMT solver library
+- **HiGHS** (optional globally, required by `milp-cover`; tested with 1.11.0)
 - **CLI11** (bundled in `extern/`)
 - **nlohmann/json** (bundled in `extern/`)
 - **CUDA** (optional, for GPU acceleration)
