@@ -105,7 +105,7 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]], fields: Sequence[s
         prefix=f".{path.name}.", delete=False,
     ) as stream:
         temporary = Path(stream.name)
-        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field, "") for field in fields})

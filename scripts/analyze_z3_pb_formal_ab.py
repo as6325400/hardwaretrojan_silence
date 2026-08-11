@@ -62,13 +62,25 @@ def mcnemar(gains: int, regressions: int) -> Optional[float]:
     return min(1.0, 2 * tail)
 
 
+def wilson(successes: int, total: int, z: float = 1.959963984540054) -> Tuple[float, float]:
+    if total == 0:
+        return math.nan, math.nan
+    proportion = successes / total
+    denominator = 1 + z * z / total
+    center = (proportion + z * z / (2 * total)) / denominator
+    radius = z * math.sqrt(
+        proportion * (1 - proportion) / total + z * z / (4 * total * total)
+    ) / denominator
+    return center - radius, center + radius
+
+
 def atomic_csv(path: Path, rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w", newline="", dir=path.parent, prefix=f".{path.name}.", delete=False
     ) as stream:
         temporary = Path(stream.name)
-        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows({field: row.get(field, "") for field in fields} for row in rows)
         stream.flush()
@@ -136,6 +148,14 @@ def paired(label: str, old: Mapping[Key, Mapping[str, str]], new: Mapping[Key, M
         "new_dt_builds": sum(integer(new[key], "summary_numeric_sum_dt_builds") for key in keys),
         "old_cec_rounds": sum(integer(old[key], "cec_rounds") for key in keys),
         "new_cec_rounds": sum(integer(new[key], "cec_rounds") for key in keys),
+        "both_pass_old_dt_builds": sum(
+            integer(old[key], "summary_numeric_sum_dt_builds") for key in both
+        ),
+        "both_pass_new_dt_builds": sum(
+            integer(new[key], "summary_numeric_sum_dt_builds") for key in both
+        ),
+        "both_pass_old_cec_rounds": sum(integer(old[key], "cec_rounds") for key in both),
+        "both_pass_new_cec_rounds": sum(integer(new[key], "cec_rounds") for key in both),
     }
 
 
@@ -157,6 +177,9 @@ def main() -> int:
         raise RuntimeError(f"expected {args.require_cases} common cases, found {len(common)}")
     if not common:
         raise RuntimeError("no common cases")
+    if any(set(rows) != set(common) for rows in arms.values()):
+        sizes = {label: len(rows) for label, rows in arms.items()}
+        raise RuntimeError(f"A/B/C case sets differ: common={len(common)} sizes={sizes}")
     for label, rows in arms.items():
         for key in common:
             if rows[key].get("method") != "z3-pb":
@@ -227,34 +250,86 @@ def main() -> int:
     atomic_csv(output / "z3_pb_formal_ab_cases.csv", case_rows, case_fields)
     atomic_csv(output / "z3_pb_formal_ab_summary.csv", summary, summary_fields)
 
+    by_circuit_rows: List[Dict[str, Any]] = []
+    for circuit in sorted({key[0] for key in common}):
+        circuit_keys = [key for key in common if key[0] == circuit]
+        row = paired(
+            "B_backport_off_to_C_formal_on",
+            arms["B_backport_off"], arms["C_formal_on"], circuit_keys,
+        )
+        row["circuit"] = circuit
+        by_circuit_rows.append(row)
+    atomic_csv(
+        output / "z3_pb_formal_ab_by_circuit.csv",
+        by_circuit_rows,
+        ["circuit", *summary_fields],
+    )
+
     c_rows = arms["C_formal_on"]
     final_miter = Counter(c_rows[key].get("miter_last_status", "unparsed") for key in common)
     total_cex = sum(integer(c_rows[key], "miter_numeric_sum_added") for key in common)
     total_fn = sum(integer(c_rows[key], "miter_numeric_sum_returned_fn") for key in common)
     total_fp = sum(integer(c_rows[key], "miter_numeric_sum_returned_fp") for key in common)
+    cases_with_cex = sum(integer(c_rows[key], "miter_numeric_sum_added") > 0 for key in common)
+    total_retries = sum(integer(c_rows[key], "miter_numeric_sum_retry") for key in common)
+    arm_stats = []
+    for label, rows in arms.items():
+        passed = sum(rows[key]["status"] == "PASS" for key in common)
+        low, high = wilson(passed, len(common))
+        arm_stats.append((label, passed, low, high, Counter(rows[key]["status"] for key in common)))
+    bc_gains = [
+        key for key in common
+        if arms["B_backport_off"][key]["status"] != "PASS"
+        and arms["C_formal_on"][key]["status"] == "PASS"
+    ]
+    bc_regressions = [
+        key for key in common
+        if arms["B_backport_off"][key]["status"] == "PASS"
+        and arms["C_formal_on"][key]["status"] != "PASS"
+    ]
     lines = [
         "# Z3-PB formal-refinement A/B/C\n",
         f"- Common cases: {len(common)}",
         f"- B/C binary SHA-256: `{next(iter(b_hashes))}`",
         f"- ABC SHA-256: `{next(iter(abc_hashes))}`",
-        f"- Formal CEX added: {total_cex} (FN {total_fn}, FP {total_fp})",
+        f"- Formal CEX added: {total_cex} (FN {total_fn}, FP {total_fp}) across "
+        f"{cases_with_cex} cases and {total_retries} refinement retries",
         f"- Final miter status: `{dict(sorted(final_miter.items()))}`",
-        "\n| Comparison | old PASS | new PASS | gains | regressions | runtime geo old/new | DT | CEC |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "\n## Arm outcomes\n",
+        "| Arm | PASS | rate | Wilson 95% | status counts |",
+        "|---|---:|---:|---:|---|",
     ]
-    for row in summary:
-        ratio = row["old_over_new_runtime_geomean"]
+    for label, passed, low, high, statuses in arm_stats:
         lines.append(
-            f"| {row['comparison']} | {row['old_pass']} | {row['new_pass']} | "
-            f"{row['gains']} | {row['regressions']} | "
-            f"{ratio:.3f}" if ratio is not None else ""
+            f"| {label} | {passed}/{len(common)} | {100*passed/len(common):.2f}% | "
+            f"{100*low:.2f}–{100*high:.2f}% | `{dict(sorted(statuses.items()))}` |"
         )
-        if ratio is not None:
-            lines[-1] += f" | {row['old_dt_builds']}→{row['new_dt_builds']} | {row['old_cec_rounds']}→{row['new_cec_rounds']} |"
     lines.extend(
         [
+            "\n## Paired comparisons\n",
+            "| Comparison | old PASS | new PASS | gains | regressions | runtime geo old/new "
+            "(both PASS) | DT all | CEC all |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in summary:
+        ratio = row["old_over_new_runtime_geomean"]
+        ratio_text = f"{ratio:.3f}" if ratio is not None else ""
+        lines.append(
+            f"| {row['comparison']} | {row['old_pass']} | {row['new_pass']} | "
+            f"{row['gains']} | {row['regressions']} | {ratio_text} | "
+            f"{row['old_dt_builds']}→{row['new_dt_builds']} | "
+            f"{row['old_cec_rounds']}→{row['new_cec_rounds']} |"
+        )
+    lines.extend(
+        [
+            "\n## Clean B→C status changes\n",
+            "Gains: " + (", ".join(f"`{c}/{t}`" for c, t in bc_gains) or "none") + ".",
+            "Regressions: " + (", ".join(f"`{c}/{t}`" for c, t in bc_regressions) or "none") + ".",
             "\nB versus C isolates the formal flag on the same binary. External ABC CEC is the "
-            "success authority; a skipped rule miter is not an E↔R proof.",
+            "success authority; a skipped rule miter is not an E↔R proof. Runtime ratios and "
+            "runtime sums use only cases that PASS in both arms; the DT/CEC columns explicitly "
+            "sum the full 482-case cohort.",
             "\n## Input identities\n",
             f"- A results: `{sha256(args.baseline_results)}`",
             f"- B results: `{sha256(args.backport_results)}`",
