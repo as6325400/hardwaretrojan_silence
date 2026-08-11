@@ -37,7 +37,7 @@ SUMMARY_SCHEMA_VERSION = "rule-method-ab-summary/2"
 DEFAULT_MANIFEST = Path("configs/rule_method_ab_cases.json")
 DEFAULT_OUTPUT_ROOT = Path("validation/rule_method_ab")
 DEFAULT_METHODS = ("vn-retrain", "z3-pb")
-SUPPORTED_METHODS = ("vn-retrain", "dt", "z3-pb")
+SUPPORTED_METHODS = ("vn-retrain", "dt", "z3-pb", "milp-cover")
 
 
 class RunnerError(RuntimeError):
@@ -945,6 +945,7 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         "rule_apply_summary_count": parsed.get("rule_apply_summary_count"),
         "binary_sha256": tools.get("binary", {}).get("sha256"),
         "abc_sha256": tools.get("abc", {}).get("sha256"),
+        "highs_library_sha256": tools.get("highs_library", {}).get("sha256"),
         "cache_key": record.get("cache_key"),
         "stdout_log": artifacts.get("stdout"),
         "stderr_log": artifacts.get("stderr"),
@@ -988,7 +989,8 @@ BASE_CSV_COLUMNS = [
     "actual_level_delta_trojan", "actual_area_delta_golden",
     "actual_level_delta_golden", "rule_synth_summary_count",
     "rule_apply_summary_count",
-    "binary_sha256", "abc_sha256", "cache_key", "stdout_log", "stderr_log",
+    "binary_sha256", "abc_sha256", "highs_library_sha256", "cache_key",
+    "stdout_log", "stderr_log",
     "cec_stdout_log", "cec_stderr_log", "patched_bench", "command_json",
     "rule_synth_summaries_json", "rule_apply_summaries_json",
 ]
@@ -1097,6 +1099,90 @@ def _validate_executable(path: Path, label: str) -> None:
         raise RunnerError(f"{label} is not executable: {path}")
 
 
+def _validate_regular_file(path: Path, label: str) -> None:
+    if not path.is_file():
+        raise RunnerError(f"{label} not found: {path}")
+
+
+def _is_highs_soname(value: str) -> bool:
+    return bool(re.fullmatch(r"libhighs\.so(?:\..+)?", Path(value).name.lower()))
+
+
+def _resolved_highs_libraries(binary: Path) -> List[Path]:
+    """Return the libhighs objects resolved by the platform dynamic loader."""
+    try:
+        result = subprocess.run(
+            ["ldd", str(binary)], text=True, capture_output=True,
+            timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RunnerError(
+            f"cannot inspect solver binary linkage with ldd: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().replace("\n", "; ")
+        if len(detail) > 512:
+            detail = detail[:512]
+        raise RunnerError(
+            f"cannot inspect solver binary linkage with ldd (exit "
+            f"{result.returncode}): {detail or 'no diagnostic'}"
+        )
+
+    resolved: List[Path] = []
+    missing: List[str] = []
+    for raw_line in (result.stdout + "\n" + result.stderr).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "=>" in line:
+            soname, raw_target = line.split("=>", 1)
+            soname = soname.strip().split()[0]
+            if not _is_highs_soname(soname):
+                continue
+            target = raw_target.strip()
+            if target.startswith("not found"):
+                missing.append(soname)
+                continue
+            target = target.rsplit(" (", 1)[0].strip()
+        else:
+            target = line.rsplit(" (", 1)[0].strip()
+            if not _is_highs_soname(target):
+                continue
+        candidate = Path(target)
+        if candidate.is_file():
+            resolved.append(candidate.resolve())
+        else:
+            missing.append(target)
+
+    if missing:
+        raise RunnerError(
+            "solver binary has an unresolved HiGHS dependency: "
+            + ", ".join(missing)
+        )
+    if not resolved:
+        raise RunnerError(
+            f"solver binary is not dynamically linked to libhighs: {binary}"
+        )
+    return resolved
+
+
+def _validate_highs_library_linkage(binary: Path, highs_library: Path) -> None:
+    """Require --highs-library to be the libhighs actually loaded by binary."""
+    _validate_regular_file(highs_library, "HiGHS library")
+    linked = _resolved_highs_libraries(binary)
+    for candidate in linked:
+        try:
+            if highs_library.samefile(candidate):
+                return
+        except OSError:
+            continue
+    raise RunnerError(
+        "--highs-library does not match the libhighs resolved by the solver "
+        f"binary; provided={highs_library}, resolved="
+        + ", ".join(str(path) for path in linked)
+    )
+
+
 def _validate_binary_methods(binary: Path, methods: Sequence[str]) -> None:
     try:
         result = subprocess.run(
@@ -1128,6 +1214,10 @@ def _create_parser(repo_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--bin", type=Path, default=Path("bin/main"))
     parser.add_argument("--abc", type=Path, default=Path("abc"))
     parser.add_argument(
+        "--highs-library", type=Path,
+        help="libhighs shared library used by --method milp-cover",
+    )
+    parser.add_argument(
         "--show", type=Path,
         help="optional area/level helper (default: bin/show or bin/script/show)",
     )
@@ -1156,6 +1246,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         manifest_path = _resolve_cli_path(repo_root, args.manifest)
         binary = _resolve_cli_path(repo_root, args.bin)
         abc = _resolve_cli_path(repo_root, args.abc)
+        highs_library: Optional[Path] = (
+            _resolve_cli_path(repo_root, args.highs_library)
+            if args.highs_library is not None
+            else None
+        )
         if args.show is not None:
             show_binary: Optional[Path] = _resolve_cli_path(repo_root, args.show)
         else:
@@ -1169,6 +1264,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         methods = list(args.method or DEFAULT_METHODS)
         if len(methods) != len(set(methods)):
             raise RunnerError("--method values must be unique")
+        if "milp-cover" in methods and highs_library is None:
+            raise RunnerError(
+                "--highs-library PATH is required with --method milp-cover"
+            )
+        if "milp-cover" not in methods and highs_library is not None:
+            raise RunnerError(
+                "--highs-library requires --method milp-cover"
+            )
         if args.jobs != 1:
             raise RunnerError(
                 "--jobs must be 1: methods for the same case can write the "
@@ -1258,7 +1361,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             show_binary = None
         _validate_binary_methods(binary, methods)
-        print("Fingerprinting binary, ABC, and selected input files ...")
+        if highs_library is not None:
+            _validate_highs_library_linkage(binary, highs_library)
+        print(
+            "Fingerprinting binary, ABC, solver libraries, and selected "
+            "input files ..."
+        )
         identity_cache: Dict[Path, Dict[str, Any]] = {}
 
         def identity(path: Path) -> Dict[str, Any]:
@@ -1274,6 +1382,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
         if show_binary is not None:
             tools_identity["show"] = identity(show_binary)
+        if highs_library is not None:
+            tools_identity["highs_library"] = identity(highs_library)
         context_payload = {
             "runner_schema": RUNNER_SCHEMA_VERSION,
             "runner_sha256": tools_identity["runner"]["sha256"],
@@ -1285,6 +1395,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "show_sha256": (
                 tools_identity.get("show", {}).get("sha256")
                 if show_binary is not None
+                else None
+            ),
+            "highs_library_sha256": (
+                tools_identity.get("highs_library", {}).get("sha256")
+                if highs_library is not None
                 else None
             ),
             "common_args": common_args,
@@ -1352,6 +1467,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "binary": str(binary),
             "abc": str(abc),
             "show": str(show_binary) if show_binary is not None else None,
+            "highs_library": (
+                str(highs_library) if highs_library is not None else None
+            ),
             "context_key": context_payload["context_key"],
             "environment": environment_meta,
         }

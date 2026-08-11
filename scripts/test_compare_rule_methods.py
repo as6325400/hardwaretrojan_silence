@@ -27,7 +27,8 @@ import sys
 import time
 
 if "--help" in sys.argv:
-    print("Usage: fake <g> <t> <gt> <out> [--rule-method vn-retrain|dt|z3-pb]")
+    print("Usage: fake <g> <t> <gt> <out> "
+          "[--rule-method vn-retrain|dt|z3-pb|milp-cover]")
     raise SystemExit(0)
 
 expected_abc = os.environ.get("FAKE_EXPECT_ABC_BIN")
@@ -44,6 +45,9 @@ if os.environ.get("FAKE_MAIN_SLEEP"):
     time.sleep(float(os.environ["FAKE_MAIN_SLEEP"]))
 if os.environ.get("FAKE_MUTATE_INPUT"):
     with Path(os.environ["FAKE_MUTATE_INPUT"]).open("a", encoding="utf-8") as sink:
+        sink.write("# mutated during run\n")
+if os.environ.get("FAKE_MUTATE_HIGHS"):
+    with Path(os.environ["FAKE_MUTATE_HIGHS"]).open("a", encoding="utf-8") as sink:
         sink.write("# mutated during run\n")
 
 Path(sys.argv[4]).write_text(
@@ -63,6 +67,14 @@ if method == "z3-pb":
     print("rule_apply_summary strategy z3-pb cec_attempt 2 synth_pass 1 "
           "source literal_patch_cut rule_model_used 0 effective_rules 1 "
           "effective_literals 1 effective_depth 1")
+elif method == "milp-cover":
+    print("rule_synth_summary strategy milp-cover cec_attempt 1 synth_pass 1 "
+          "dt_builds 1 candidate_count 17 optimizer_status accepted "
+          "cover_variables 7 mip_nodes 3 synthesized_rules 1 "
+          "synthesized_literals 2 synthesized_depth 2 synth_ms 3.5")
+    print("rule_apply_summary strategy milp-cover cec_attempt 1 synth_pass 1 "
+          "source signature_minimize rule_model_used 1 effective_rules 1 "
+          "effective_literals 2 effective_depth 2")
 else:
     print("rule_synth_summary strategy vn-retrain cec_attempt 1 synth_pass 1 "
           "dt_builds 3 vn_generated 4 vn_used 1 final_rules 2 "
@@ -109,6 +121,18 @@ else:
 '''
 
 
+FAKE_LDD = r'''#!/usr/bin/env python3
+import os
+import sys
+
+library = os.environ.get("FAKE_LDD_HIGHS")
+if not library:
+    print("not a dynamic executable", file=sys.stderr)
+    raise SystemExit(1)
+print("libhighs.so.1 => " + library + " (0x0000000000000000)")
+'''
+
+
 class RunnerFixture(unittest.TestCase):
     def setUp(self) -> None:
         # A space in the root exercises ABC command-language path quoting.
@@ -130,6 +154,11 @@ class RunnerFixture(unittest.TestCase):
         self.main_path = self._executable("bin/main", FAKE_MAIN)
         self.abc_path = self._executable("abc", FAKE_ABC)
         self.show_path = self._executable("bin/show", FAKE_SHOW)
+        self.fake_tools = self.root / "fake-tools"
+        self.ldd_path = self._executable("fake-tools/ldd", FAKE_LDD)
+        self.highs_path = self.root / "lib" / "libhighs.so.1"
+        self.highs_path.parent.mkdir()
+        self.highs_path.write_text("fake highs library\n", encoding="utf-8")
         self.counter = self.root / "invocations.txt"
         self.manifest = self.root / "cases.json"
         self.manifest.write_text(
@@ -180,6 +209,14 @@ class RunnerFixture(unittest.TestCase):
             "--output-root", str(self.output),
             *extra,
         ]
+
+    def highs_environment(self, **extra: str) -> dict[str, str]:
+        environment = {
+            "PATH": str(self.fake_tools) + os.pathsep + os.environ.get("PATH", ""),
+            "FAKE_LDD_HIGHS": str(self.highs_path),
+        }
+        environment.update(extra)
+        return environment
 
 
 class SummaryParserTest(unittest.TestCase):
@@ -339,6 +376,109 @@ class EndToEndTest(RunnerFixture):
             runner._record_is_resumable(
                 record_path, record["cache_key"], self.output
             )
+        )
+
+    def test_milp_cover_fingerprints_highs_library(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            self.highs_environment(FAKE_INVOCATION_COUNTER=str(self.counter)),
+            clear=False,
+        ):
+            self.assertEqual(
+                runner.main(
+                    self.args(
+                        "--method", "milp-cover",
+                        "--highs-library", str(self.highs_path),
+                    )
+                ),
+                0,
+            )
+
+        self.assertEqual(
+            self.counter.read_text(encoding="utf-8").splitlines(),
+            ["milp-cover"],
+        )
+        record = json.loads(
+            (self.output / "records" / "case1--milp-cover.json").read_text()
+        )
+        highs_identity = record["identities"]["tools"]["highs_library"]
+        self.assertEqual(highs_identity["path"], str(self.highs_path.resolve()))
+        self.assertEqual(record["post_run_identity_changes"], {})
+        self.assertEqual(record["status"], "PASS")
+        context = json.loads((self.output / "run_context.json").read_text())
+        self.assertEqual(
+            context["highs_library_sha256"], highs_identity["sha256"]
+        )
+        summary = json.loads((self.output / "summary.json").read_text())
+        self.assertEqual(
+            summary["invocation"]["highs_library"], str(self.highs_path)
+        )
+        with (self.output / "results.csv").open(
+            newline="", encoding="utf-8"
+        ) as source:
+            row = next(csv.DictReader(source))
+        self.assertEqual(row["method"], "milp-cover")
+        self.assertEqual(row["highs_library_sha256"], highs_identity["sha256"])
+        self.assertEqual(row["summary_last_cover_variables"], "7")
+
+    def test_milp_cover_requires_highs_library_option(self) -> None:
+        self.assertEqual(
+            runner.main(self.args("--method", "milp-cover")), 2
+        )
+        self.assertFalse(self.output.exists())
+
+    def test_milp_cover_rejects_missing_highs_library_file(self) -> None:
+        missing = self.root / "lib" / "missing-libhighs.so"
+        self.assertEqual(
+            runner.main(
+                self.args(
+                    "--method", "milp-cover",
+                    "--highs-library", str(missing),
+                )
+            ),
+            2,
+        )
+        self.assertFalse(self.output.exists())
+
+    def test_milp_cover_rejects_library_not_resolved_by_binary(self) -> None:
+        other = self.root / "lib" / "libhighs-other.so.1"
+        other.write_text("different fake highs library\n", encoding="utf-8")
+        with mock.patch.dict(
+            os.environ, self.highs_environment(), clear=False
+        ):
+            self.assertEqual(
+                runner.main(
+                    self.args(
+                        "--method", "milp-cover",
+                        "--highs-library", str(other),
+                    )
+                ),
+                2,
+            )
+        self.assertFalse(self.output.exists())
+
+    def test_highs_library_mutation_is_a_harness_error(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            self.highs_environment(FAKE_MUTATE_HIGHS=str(self.highs_path)),
+            clear=False,
+        ):
+            self.assertEqual(
+                runner.main(
+                    self.args(
+                        "--method", "milp-cover",
+                        "--highs-library", str(self.highs_path),
+                    )
+                ),
+                0,
+            )
+        record = json.loads(
+            (self.output / "records" / "case1--milp-cover.json").read_text()
+        )
+        self.assertEqual(record["status"], "HARNESS_ERROR")
+        self.assertFalse(record["success"])
+        self.assertIn(
+            "tools.highs_library", record["post_run_identity_changes"]
         )
 
 
