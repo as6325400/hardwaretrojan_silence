@@ -269,6 +269,11 @@ void write_gpu_chunk(const FeatureWord* h_feat,
     for (std::size_t w = 0; w < chunk_wb; ++w) {
       dst[w] = src[w];
     }
+    const std::size_t tail = chunk_samples % PackedFeatureMatrix::kWordBits;
+    if (tail != 0 && chunk_wb != 0) {
+      dst[chunk_wb - 1] &= static_cast<FeatureWord>(
+          packed_circuit::mask_for_count(tail));
+    }
   }
   matrix->row_count += chunk_samples;
   labels->insert(labels->end(), chunk_samples, label);
@@ -364,17 +369,35 @@ std::size_t append_word_block_selective(const PackedWord* feature_bits,
   return count;
 }
 
-// Pad row_count up to 64-aligned boundary (zero-feature neg samples).
-void pad_to_word_aligned(PackedFeatureMatrix* matrix,
-                         std::vector<int>* labels,
-                         std::size_t* neg_count) {
-  const std::size_t r = matrix->row_count % PackedFeatureMatrix::kWordBits;
-  if (r == 0) return;
-  const std::size_t pad = PackedFeatureMatrix::kWordBits - r;
-  labels->insert(labels->end(), pad, 0);
-  matrix->row_count += pad;
-  if (neg_count) *neg_count += pad;
+// Append a GPU-layout feature chunk at an arbitrary destination bit offset.
+// Unlike write_gpu_chunk(), this does not require (or manufacture) word
+// alignment, so explicit CEC/SAT negatives remain real samples only.
+#ifdef USE_CUDA
+std::size_t append_gpu_chunk_unaligned(const FeatureWord* feature_bits,
+                                       std::size_t num_features,
+                                       std::size_t chunk_wb,
+                                       std::size_t chunk_samples,
+                                       PackedFeatureMatrix* matrix,
+                                       std::vector<int>* labels,
+                                       int label) {
+  std::vector<PackedWord> word_features(num_features, PackedWord{0});
+  std::size_t appended = 0;
+  for (std::size_t word = 0; word < chunk_wb; ++word) {
+    const std::size_t consumed = word * PackedFeatureMatrix::kWordBits;
+    if (consumed >= chunk_samples) break;
+    const std::size_t block_size = std::min(
+        PackedFeatureMatrix::kWordBits, chunk_samples - consumed);
+    for (std::size_t feature = 0; feature < num_features; ++feature) {
+      word_features[feature] = static_cast<PackedWord>(
+          feature_bits[feature * chunk_wb + word]);
+    }
+    appended += append_word_block_selective(
+        word_features.data(), num_features,
+        packed_circuit::mask_for_count(block_size), matrix, labels, label);
+  }
+  return appended;
 }
+#endif
 
 // ── Dynamic memory cap ────────────────────────────────────────────────────────
 // Computes the maximum number of negative training samples that can safely fit
@@ -456,6 +479,18 @@ bool build_training_data(const circuit& golden,
     neg_trace->sizes.clear();
     neg_trace->seed = 1337;
   }
+#ifdef USE_CUDA
+  // A GPU failure may occur after some random-negative trace entries have
+  // already been appended.  Remember the caller-owned trace boundary so the
+  // CPU fallback can rebuild the same training-data attempt without retaining
+  // a stale GPU prefix.
+  const std::size_t trace_masks_before_gpu =
+      neg_trace ? neg_trace->masks.size() : 0;
+  const std::size_t trace_sizes_before_gpu =
+      neg_trace ? neg_trace->sizes.size() : 0;
+  const std::uint32_t trace_seed_before_gpu =
+      neg_trace ? neg_trace->seed : 1337;
+#endif
 
   circuit golden_train = golden;
   circuit trojan_train = trojan;
@@ -648,7 +683,6 @@ bool build_training_data(const circuit& golden,
 
     // ── Phase 1b: extra neg patterns (explicit, not random) ─────────────────
     if (extra_neg_patterns && !extra_neg_patterns->empty()) {
-      pad_to_word_aligned(&data->features, &data->labels, &data->neg_count);
       const std::size_t extra_total = extra_neg_patterns->size();
       std::size_t extra_offset = 0;
       while (extra_offset < extra_total) {
@@ -690,9 +724,9 @@ bool build_training_data(const circuit& golden,
         cudaMemcpy(h_feat_bits.data(), d_feat_bits,
                    num_feat * chunk_wb * sizeof(GpuCircuit::word_t),
                    cudaMemcpyDeviceToHost);
-        write_gpu_chunk(h_feat_bits.data(), num_feat, chunk_wb, chunk,
-                        &data->features, &data->labels, 0);
-        data->neg_count += chunk;
+        data->neg_count += append_gpu_chunk_unaligned(
+            h_feat_bits.data(), num_feat, chunk_wb, chunk,
+            &data->features, &data->labels, 0);
         extra_offset += chunk;
       }
     }
@@ -766,6 +800,15 @@ bool build_training_data(const circuit& golden,
 
     std::vector<GpuCircuit::word_t> h_diff_mask(max_wb);
     unsigned long long gpu_seed = 42ULL;
+    // Strict retry replays the random-negative trace on either backend.  When
+    // a trace is requested, generate PI words on the host in block-major RNG
+    // order and upload them, matching the replay loops below exactly.  The
+    // no-trace path keeps the faster device-side Philox generator.
+    std::mt19937_64 trace_rng(neg_trace ? neg_trace->seed : 1337);
+    std::vector<GpuCircuit::word_t> h_trace_pi;
+    if (neg_trace) {
+      h_trace_pi.resize(num_pis * max_wb);
+    }
     std::size_t attempts = 0;
 
     while (data->neg_count < target_negatives && attempts < max_attempts) {
@@ -779,8 +822,19 @@ bool build_training_data(const circuit& golden,
           std::min(remaining_wb, need_wb));
       if (num_wb == 0) break;
 
-      gpu_generate_random_pi(d_pi_bits, num_pis, num_wb, gpu_seed);
-      gpu_seed += num_pis * num_wb + 1;
+      if (neg_trace) {
+        for (std::size_t wb = 0; wb < num_wb; ++wb) {
+          for (std::size_t pi = 0; pi < num_pis; ++pi) {
+            h_trace_pi[pi * num_wb + wb] = trace_rng();
+          }
+        }
+        cudaMemcpy(d_pi_bits, h_trace_pi.data(),
+                   num_pis * num_wb * sizeof(GpuCircuit::word_t),
+                   cudaMemcpyHostToDevice);
+      } else {
+        gpu_generate_random_pi(d_pi_bits, num_pis, num_wb, gpu_seed);
+        gpu_seed += num_pis * num_wb + 1;
+      }
       gpu_golden.simulate(d_pi_bits, num_wb);
       gpu_trojan.simulate(d_pi_bits, num_wb);
       gpu_compare_po(gpu_golden, gpu_trojan, d_diff_mask, num_wb,
@@ -843,6 +897,19 @@ bool build_training_data(const circuit& golden,
   } catch (const std::exception& e) {
     std::cerr << "[GPU training pipeline failed, falling back to CPU] "
               << e.what() << "\n";
+    // A late GPU failure may happen after positive/explicit-negative rows
+    // were already appended.  CPU fallback must rebuild from an empty matrix
+    // rather than mixing partial GPU data with a second copy of the samples.
+    data->features.allocate(total_features, estimated_total);
+    data->labels.clear();
+    data->labels.reserve(estimated_total);
+    data->pos_count = 0;
+    data->neg_count = 0;
+    if (neg_trace) {
+      neg_trace->masks.resize(trace_masks_before_gpu);
+      neg_trace->sizes.resize(trace_sizes_before_gpu);
+      neg_trace->seed = trace_seed_before_gpu;
+    }
   }
   // ── fallback to CPU path ──────────────────────────────────────────────────
 #endif  // USE_CUDA
@@ -943,9 +1010,10 @@ bool build_training_data(const circuit& golden,
               trojan_packed, *virtual_defs, trojan_packed.pattern_mask());
           feature_bits.insert(feature_bits.end(), vn_bits.begin(), vn_bits.end());
         }
-        write_word_block(feature_bits.data(), total_features, block_size,
-                         &data->features, &data->labels, 0);
-        data->neg_count += block_size;
+        data->neg_count += append_word_block_selective(
+            feature_bits.data(), total_features,
+            packed_circuit::mask_for_count(block_size),
+            &data->features, &data->labels, 0);
       }
       extra_offset += block_size;
     }
