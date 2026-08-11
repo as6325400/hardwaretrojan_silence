@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#define SET_COVER_OPTIMIZER_ENABLE_TEST_HOOKS
 #include "../algorithm/set_cover_optimizer.hpp"
 
 namespace {
@@ -104,6 +105,140 @@ void expect_exact_success(const RuleOptimizationResult& result,
          label + " LP1 is a valid rule-count lower bound");
   expect(result.stats.lp2_objective <= result.stats.mip2_objective + 1.0e-7,
          label + " LP2 is a valid literal lower bound");
+}
+
+void expect_hardware_success(const RuleOptimizationResult& result,
+                             const std::string& label) {
+  expect(result.stats.accepted && result.stats.verified,
+         label + " is accepted and finite-table verified");
+  expect(result.stats.optimal && result.stats.rules_optimal &&
+             result.stats.literals_optimal &&
+             result.stats.hardware_optimal,
+         label + " proves all three lexicographic objectives");
+  expect(result.stats.pool_complete,
+         label + " has a complete term pool");
+  expect(result.stats.third_objective == "unique_inverters",
+         label + " reports the inverter objective");
+  expect(result.stats.solver_checks == 6,
+         label + " runs LP/MIP pairs for all three objectives");
+  expect(result.stats.lp1_status == "Optimal" &&
+             result.stats.mip1_status == "Optimal" &&
+             result.stats.lp2_status == "Optimal" &&
+             result.stats.mip2_status == "Optimal" &&
+             result.stats.lp3_status == "Optimal" &&
+             result.stats.mip3_status == "Optimal",
+         label + " records six optimal HiGHS phases");
+  expect(result.stats.lp3_objective <=
+             result.stats.mip3_objective + 1.0e-7,
+         label + " LP3 is a valid inverter-count lower bound");
+  expect(result.stats.mip3_gap <= 1.0e-9,
+         label + " closes the MIP3 gap");
+  expect(std::fabs(result.stats.mip3_objective -
+                   static_cast<double>(
+                       result.stats.unique_inverters_after)) <= 1.0e-7,
+         label + " verifies the inverter proxy against extracted rules");
+  expect(!result.stats.phase3_timeout_fallback,
+         label + " does not use the phase-3 timeout fallback");
+}
+
+void test_unique_inverter_tie_and_default_compatibility() {
+  // Both one-literal rules classify the finite table exactly.  The default
+  // path keeps the lexical !f0 representative, while phase 3 recognizes that
+  // f1=1 implements the same R*=1, L*=1 solution without an inverter.
+  const std::vector<std::vector<int>> rows = {{0, 1}, {1, 0}};
+  const std::vector<int> labels = {1, 0};
+  const DecisionTreeModel baseline = make_model({{{0, 0}}});
+  RuleOptimizerOptions none = test_options();
+  none.max_clauses = 1;
+  none.max_literals_per_clause = 1;
+  const RuleOptimizationResult original =
+      optimize(rows, labels, {0, 1}, baseline, none);
+  expect_exact_success(original, "default inverter tie");
+  expect(original.stats.third_objective == "none" &&
+             !original.stats.hardware_optimal &&
+             original.stats.lp3_status.empty() &&
+             original.stats.mip3_status.empty(),
+         "default objective preserves the four-phase behavior");
+  expect(original.model.rules.size() == 1 &&
+             original.model.rules[0].terms ==
+                 std::vector<std::pair<std::size_t, int>>{{0, 0}},
+         "default objective preserves the lexical negative-literal rule");
+  expect(original.stats.unique_inverters_before == 1 &&
+             original.stats.unique_inverters_after == 1,
+         "default path reports unchanged baseline/output inverter counts");
+
+  RuleOptimizerOptions hardware = none;
+  hardware.cover_third_objective =
+      RuleCoverThirdObjective::unique_inverters;
+  const RuleOptimizationResult optimized =
+      optimize(rows, labels, {0, 1}, baseline, hardware);
+  expect_hardware_success(optimized, "unique-inverter tie");
+  expect(optimized.model.rules.size() == 1 &&
+             optimized.model.rules[0].terms ==
+                 std::vector<std::pair<std::size_t, int>>{{1, 1}},
+         "unique-inverter tie selects the all-positive rule");
+  expect(optimized.stats.rules_after == original.stats.rules_after &&
+             optimized.stats.literals_after ==
+                 original.stats.literals_after,
+         "third objective does not change the R* or L* optima");
+  expect(optimized.stats.unique_inverters_after == 0 &&
+             optimized.stats.unique_inverters_before == 1 &&
+             optimized.stats.mip3_objective == 0.0,
+         "all-positive tie has zero unique inverter cost");
+}
+
+void test_incomparable_coverage_alternatives() {
+  // The two shortest prime implicants !a&b and b&!c cover exactly the same
+  // positive signature.  Their negative-feature sets {a} and {c} are
+  // incomparable, so phase-3 exactness requires retaining both columns.
+  const std::vector<std::vector<int>> rows = {
+      {0, 1, 0}, {1, 1, 1}, {0, 0, 1}, {1, 0, 0}};
+  const DecisionTreeModel baseline = make_model({{{0, 0}, {1, 1}}});
+  RuleOptimizerOptions options = test_options();
+  options.max_clauses = 1;
+  options.max_literals_per_clause = 2;
+  options.cover_third_objective =
+      RuleCoverThirdObjective::unique_inverters;
+  const RuleOptimizationResult result =
+      optimize(rows, {1, 0, 0, 0}, {0, 1, 2}, baseline, options);
+  expect_hardware_success(result, "incomparable alternatives");
+  expect(result.stats.pool_terms_coverage_alternatives >= 1,
+         "incomparable negative-feature alternatives survive coverage dedup");
+  expect(result.stats.pool_terms_final >= 2,
+         "phase-3 master receives both incomparable alternatives");
+  expect(result.stats.inverter_features == 2 &&
+             result.stats.inverter_link_constraints == 4,
+         "inverter OR telemetry counts feature and link rows");
+  expect(result.stats.unique_inverters_after == 1,
+         "incomparable-alternative optimum uses one inverter");
+}
+
+void test_phase3_deadline_safe_fallback() {
+  const std::vector<std::vector<int>> rows = {{0, 1}, {1, 0}};
+  const DecisionTreeModel baseline = make_model({{{0, 0}}});
+  RuleOptimizerOptions options = test_options();
+  options.max_clauses = 1;
+  options.max_literals_per_clause = 1;
+  options.cover_third_objective =
+      RuleCoverThirdObjective::unique_inverters;
+  set_cover_optimizer_testing::
+      force_phase3_timeout_after_verified_mip2_once();
+  const RuleOptimizationResult fallback =
+      optimize(rows, {1, 0}, {0, 1}, baseline, options);
+  expect(fallback.stats.status == "accepted_phase3_timeout",
+         "test hook exercises the verified MIP2 phase-3 fallback");
+  expect(fallback.stats.accepted && fallback.stats.verified &&
+             fallback.stats.phase3_timeout_fallback,
+         "phase-3 timeout safely accepts the previously verified MIP2 model");
+  expect(fallback.stats.rules_optimal && fallback.stats.literals_optimal &&
+             !fallback.stats.hardware_optimal && !fallback.stats.optimal,
+         "phase-3 timeout preserves R*/L* but makes no hardware optimum claim");
+  expect(fallback.stats.rules_after == 1 &&
+             fallback.stats.literals_after == 1 &&
+             fallback.stats.solver_checks == 4,
+         "phase-3 fallback retains the fixed MIP2 objective values");
+  expect(!fallback.stats.reason.empty(),
+         "phase-3 timeout records a diagnostic reason");
 }
 
 void test_single_cube() {
@@ -290,11 +425,16 @@ void test_pool_limit_timeout_and_invalid() {
 
   RuleOptimizerOptions timeout = test_options();
   timeout.timeout_ms = 0;
+  timeout.cover_third_objective =
+      RuleCoverThirdObjective::unique_inverters;
   const RuleOptimizationResult timed_out = optimize(
       {{0, 0}, {0, 1}, {1, 0}, {1, 1}},
       {0, 0, 0, 1}, {0, 1}, and_baseline, timeout);
   expect(!timed_out.stats.accepted && timed_out.stats.status == "timeout",
          "zero deadline is a deterministic timeout");
+  expect(!timed_out.stats.phase3_timeout_fallback &&
+             timed_out.stats.third_objective == "unique_inverters",
+         "timeout before a verified MIP2 model uses the baseline fallback");
   expect(models_equal(timed_out.model, and_baseline),
          "timeout preserves baseline model");
 
@@ -500,6 +640,9 @@ int main() {
   if (!highs_set_cover_backend_available()) {
     test_no_backend_fallback();
   } else {
+    test_unique_inverter_tie_and_default_compatibility();
+    test_incomparable_coverage_alternatives();
+    test_phase3_deadline_safe_fallback();
     test_single_cube();
     test_xor_two_cubes();
     test_multi_trigger_dnf();

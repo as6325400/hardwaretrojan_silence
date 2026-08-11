@@ -6,6 +6,13 @@
 
 #include "decision_tree.hpp"
 
+// Optional objective applied only after the exact rule and literal counts are
+// fixed by the weighted set-cover backend.
+enum class RuleCoverThirdObjective {
+  none,
+  unique_inverters
+};
+
 // Shared bounds for exact finite-table bounded-DNF rule optimization.  The
 // Z3 path uses pseudo-Boolean / MaxSMT variables; the set-cover path builds an
 // explicit prime-implicant pool and solves LP/MIP masters with HiGHS.
@@ -40,6 +47,11 @@ struct RuleOptimizerOptions {
   // exponential search may visit many internal states before producing a
   // single term.  Zero disables this guard.
   std::size_t max_pool_states = 2000000;
+
+  // Optional third lexicographic objective for the set-cover backend.  The
+  // default preserves the original two-objective, four-phase behavior.
+  RuleCoverThirdObjective cover_third_objective =
+      RuleCoverThirdObjective::none;
 };
 
 struct RuleOptimizerStats {
@@ -97,12 +109,20 @@ struct RuleOptimizerStats {
   bool pool_complete = false;
   bool rules_optimal = false;
   bool literals_optimal = false;
+  // hardware_optimal is meaningful only when a requested third objective
+  // reached MIP optimality and its extracted model passed full verification.
+  bool hardware_optimal = false;
+  // A true value means the accepted model is the independently verified MIP2
+  // incumbent; rules/literals remain optimal, but stats.optimal is false.
+  bool phase3_timeout_fallback = false;
+  std::string third_objective;
 
   std::size_t pool_hyperedges = 0;
   std::size_t pool_redundant_hyperedges = 0;
   std::size_t pool_terms_generated = 0;
   std::size_t pool_terms_unique = 0;
   std::size_t pool_terms_coverage_deduplicated = 0;
+  std::size_t pool_terms_coverage_alternatives = 0;
   std::size_t pool_terms_final = 0;
   std::size_t pool_terms_unsafe = 0;
   std::size_t pool_states_explored = 0;
@@ -111,11 +131,17 @@ struct RuleOptimizerStats {
   std::size_t master_variables = 0;
   std::size_t master_constraints = 0;
   std::size_t master_nonzeros = 0;
+  std::size_t inverter_features = 0;
+  std::size_t inverter_link_constraints = 0;
+  std::size_t unique_inverters_before = 0;
+  std::size_t unique_inverters_after = 0;
 
   std::string lp1_status;
   std::string mip1_status;
   std::string lp2_status;
   std::string mip2_status;
+  std::string lp3_status;
+  std::string mip3_status;
   double lp1_objective = 0.0;
   double mip1_objective = 0.0;
   double mip1_dual_bound = 0.0;
@@ -124,23 +150,35 @@ struct RuleOptimizerStats {
   double mip2_objective = 0.0;
   double mip2_dual_bound = 0.0;
   double mip2_gap = 0.0;
+  double lp3_objective = 0.0;
+  double mip3_objective = 0.0;
+  double mip3_dual_bound = 0.0;
+  double mip3_gap = 0.0;
   std::size_t lp1_iterations = 0;
   std::size_t mip1_nodes = 0;
   std::size_t lp2_iterations = 0;
   std::size_t mip2_nodes = 0;
+  std::size_t lp3_iterations = 0;
+  std::size_t mip3_nodes = 0;
   std::size_t lp1_dual_nonzero = 0;
   std::size_t lp2_dual_nonzero = 0;
+  std::size_t lp3_dual_nonzero = 0;
   double lp1_dual_min = 0.0;
   double lp1_dual_max = 0.0;
   double lp1_dual_sum_abs = 0.0;
   double lp2_dual_min = 0.0;
   double lp2_dual_max = 0.0;
   double lp2_dual_sum_abs = 0.0;
+  double lp3_dual_min = 0.0;
+  double lp3_dual_max = 0.0;
+  double lp3_dual_sum_abs = 0.0;
   double term_generation_ms = 0.0;
   double lp1_ms = 0.0;
   double mip1_ms = 0.0;
   double lp2_ms = 0.0;
   double mip2_ms = 0.0;
+  double lp3_ms = 0.0;
+  double mip3_ms = 0.0;
 };
 
 struct RuleOptimizationResult {

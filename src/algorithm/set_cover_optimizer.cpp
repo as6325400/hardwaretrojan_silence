@@ -5,6 +5,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -24,6 +25,8 @@ using Clock = std::chrono::steady_clock;
 using Word = PackedFeatureMatrix::word_t;
 using TermKey = std::vector<std::pair<std::size_t, int>>;
 
+std::atomic<bool> force_phase3_timeout_after_verified_mip2{false};
+
 double elapsed_ms(Clock::time_point start) {
   return std::chrono::duration<double, std::milli>(Clock::now() - start)
       .count();
@@ -33,6 +36,16 @@ std::size_t count_literals(const DecisionTreeModel& model) {
   std::size_t result = 0;
   for (const auto& rule : model.rules) result += rule.terms.size();
   return result;
+}
+
+std::size_t count_unique_inverters(const DecisionTreeModel& model) {
+  std::set<std::size_t> features;
+  for (const auto& rule : model.rules) {
+    for (const auto& literal : rule.terms) {
+      if (literal.second == 0) features.insert(literal.first);
+    }
+  }
+  return features.size();
 }
 
 void finish_stats(RuleOptimizationResult* result,
@@ -295,6 +308,70 @@ bool model_matches_row(const DecisionTreeModel& model,
   return false;
 }
 
+enum class VerificationStatus {
+  verified,
+  timeout,
+  failed
+};
+
+VerificationStatus verify_candidate_model(
+    const DecisionTreeModel& model,
+    const std::vector<PatternSignature>& patterns,
+    const std::map<std::size_t, std::size_t>& candidate_position,
+    const PackedFeatureMatrix& features,
+    const std::vector<int>& labels,
+    Clock::time_point deadline,
+    RuleOptimizerStats* stats,
+    std::string* reason) {
+  std::size_t signature_fp = 0;
+  std::size_t signature_fn = 0;
+  for (const auto& pattern : patterns) {
+    if (Clock::now() >= deadline) {
+      *reason = "optimizer deadline expired during signature verification";
+      stats->verified = false;
+      return VerificationStatus::timeout;
+    }
+    const bool prediction =
+        model_matches_signature(model, pattern, candidate_position);
+    if (prediction && pattern.label == 0) signature_fp += 1;
+    if (!prediction && pattern.label == 1) signature_fn += 1;
+  }
+  if (signature_fp != 0 || signature_fn != 0) {
+    stats->verification_false_positive = signature_fp;
+    stats->verification_false_negative = signature_fn;
+    stats->verified = false;
+    *reason = "optimized model failed projected-signature verification";
+    return VerificationStatus::failed;
+  }
+
+  std::size_t full_fp = 0;
+  std::size_t full_fn = 0;
+  for (std::size_t row = 0; row < features.row_count; ++row) {
+    if ((row & 1023U) == 0U && Clock::now() >= deadline) {
+      *reason = "optimizer deadline expired during full-row verification";
+      stats->verified = false;
+      return VerificationStatus::timeout;
+    }
+    const bool prediction = model_matches_row(model, features, row);
+    if (prediction && labels[row] == 0) full_fp += 1;
+    if (!prediction && labels[row] == 1) full_fn += 1;
+  }
+  stats->verification_false_positive = full_fp;
+  stats->verification_false_negative = full_fn;
+  stats->verified = full_fp == 0 && full_fn == 0;
+  if (!stats->verified) {
+    *reason = "optimized model failed full packed-matrix verification";
+    return VerificationStatus::failed;
+  }
+  if (Clock::now() >= deadline) {
+    *reason = "optimizer deadline expired after full-row verification";
+    stats->verified = false;
+    return VerificationStatus::timeout;
+  }
+  reason->clear();
+  return VerificationStatus::verified;
+}
+
 bool vector_subset(const std::vector<std::size_t>& subset,
                    const std::vector<std::size_t>& superset) {
   return std::includes(superset.begin(), superset.end(),
@@ -496,6 +573,65 @@ struct CoverTerm {
   DecisionTreeRule rule;
   std::vector<Word> positive_cover;
 };
+
+bool extract_term_model(const std::vector<CoverTerm>& terms,
+                        const std::vector<double>& values,
+                        std::size_t expected_rules,
+                        std::size_t expected_literals,
+                        DecisionTreeModel* model,
+                        std::string* reason,
+                        std::set<std::size_t>* selected_inverters = nullptr) {
+  if (!model || values.size() < terms.size()) {
+    *reason = "solver solution is missing term variables";
+    return false;
+  }
+  *model = DecisionTreeModel{};
+  if (selected_inverters) selected_inverters->clear();
+  for (std::size_t term = 0; term < terms.size(); ++term) {
+    const double value = values[term];
+    if (!std::isfinite(value) ||
+        std::fabs(value - std::round(value)) > 1.0e-6 ||
+        value < -1.0e-6 || value > 1.0 + 1.0e-6) {
+      *reason = "solver returned a non-integral term variable";
+      return false;
+    }
+    if (value <= 0.5) continue;
+    model->rules.push_back(terms[term].rule);
+    if (selected_inverters) {
+      for (const auto& literal : terms[term].rule.terms) {
+        if (literal.second == 0) {
+          selected_inverters->insert(literal.first);
+        }
+      }
+    }
+    model->max_depth_used = std::max(
+        model->max_depth_used, terms[term].rule.terms.size());
+  }
+  std::sort(model->rules.begin(), model->rules.end(),
+            [](const DecisionTreeRule& lhs, const DecisionTreeRule& rhs) {
+              return lhs.terms < rhs.terms;
+            });
+  model->leaf_count = model->rules.size();
+  if (model->rules.size() != expected_rules ||
+      count_literals(*model) != expected_literals) {
+    *reason = "extracted model disagrees with fixed MILP objectives";
+    return false;
+  }
+  return true;
+}
+
+std::vector<std::size_t> negative_feature_set(
+    const DecisionTreeRule& rule) {
+  std::vector<std::size_t> features;
+  for (const auto& literal : rule.terms) {
+    if (literal.second == 0) features.push_back(literal.first);
+  }
+  // Rule terms are canonical, but keep this helper independently robust.
+  std::sort(features.begin(), features.end());
+  features.erase(std::unique(features.begin(), features.end()),
+                 features.end());
+  return features;
+}
 
 std::size_t cover_popcount(const std::vector<Word>& cover) {
   std::size_t result = 0;
@@ -762,6 +898,396 @@ MasterPhaseResult solve_master_phase(
   return result;
 }
 
+struct InverterMasterData {
+  std::vector<std::size_t> features;
+  std::vector<std::vector<HighsInt>> terms_by_feature;
+  std::size_t incidences = 0;
+};
+
+bool build_inverter_master_data(
+    const std::vector<CoverTerm>& terms,
+    Clock::time_point deadline,
+    InverterMasterData* result) {
+  if (!result) return false;
+  std::map<std::size_t, std::vector<HighsInt>> by_feature;
+  for (std::size_t term = 0; term < terms.size(); ++term) {
+    if ((term & 1023U) == 0U && Clock::now() >= deadline) return false;
+    for (const auto& literal : terms[term].rule.terms) {
+      if (literal.second == 0) {
+        by_feature[literal.first].push_back(static_cast<HighsInt>(term));
+      }
+    }
+  }
+  result->features.clear();
+  result->terms_by_feature.clear();
+  result->incidences = 0;
+  result->features.reserve(by_feature.size());
+  result->terms_by_feature.reserve(by_feature.size());
+  for (auto& entry : by_feature) {
+    if (Clock::now() >= deadline) return false;
+    if (entry.second.size() >
+        std::numeric_limits<std::size_t>::max() - result->incidences) {
+      return false;
+    }
+    result->features.push_back(entry.first);
+    result->incidences += entry.second.size();
+    result->terms_by_feature.push_back(std::move(entry.second));
+  }
+  return Clock::now() < deadline;
+}
+
+MasterPhaseResult solve_inverter_phase(
+    const std::vector<CoverTerm>& terms,
+    const std::vector<std::vector<HighsInt>>& coverage_rows,
+    const InverterMasterData& inverter_data,
+    std::size_t clause_limit,
+    std::size_t fixed_rule_count,
+    std::size_t fixed_literal_count,
+    bool integer,
+    Clock::time_point deadline,
+    std::size_t* master_variables,
+    std::size_t* master_constraints,
+    std::size_t* master_nonzeros,
+    std::size_t* inverter_link_constraints) {
+  const Clock::time_point phase_start = Clock::now();
+  MasterPhaseResult result;
+  if (phase_start >= deadline) {
+    result.status = "Time limit";
+    result.error = "shared optimizer deadline expired before inverter phase";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  if (terms.size() >
+          static_cast<std::size_t>(std::numeric_limits<HighsInt>::max()) ||
+      coverage_rows.size() >
+          static_cast<std::size_t>(std::numeric_limits<HighsInt>::max()) ||
+      inverter_data.features.size() >
+          static_cast<std::size_t>(std::numeric_limits<HighsInt>::max()) ||
+      inverter_data.features.size() !=
+          inverter_data.terms_by_feature.size() ||
+      terms.size() > std::numeric_limits<std::size_t>::max() -
+                         inverter_data.features.size()) {
+    result.status = "Model error";
+    result.error = "inverter master exceeds HiGHS index range";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  const std::size_t variable_size =
+      terms.size() + inverter_data.features.size();
+  if (variable_size >
+      static_cast<std::size_t>(std::numeric_limits<HighsInt>::max())) {
+    result.status = "Model error";
+    result.error = "inverter master variable count exceeds HiGHS index range";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+
+  auto checked_add = [](std::size_t addend, std::size_t* value) {
+    if (addend > std::numeric_limits<std::size_t>::max() - *value) {
+      return false;
+    }
+    *value += addend;
+    return true;
+  };
+  auto checked_multiply = [](std::size_t lhs, std::size_t rhs,
+                             std::size_t* product) {
+    if (lhs != 0 &&
+        rhs > std::numeric_limits<std::size_t>::max() / lhs) {
+      return false;
+    }
+    *product = lhs * rhs;
+    return true;
+  };
+  std::size_t coverage_nonzeros = 0;
+  for (std::size_t row = 0; row < coverage_rows.size(); ++row) {
+    if ((row & 1023U) == 0U && Clock::now() >= deadline) {
+      result.status = "Time limit";
+      result.error = "shared deadline expired sizing inverter master";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+    if (coverage_rows[row].size() >
+            static_cast<std::size_t>(
+                std::numeric_limits<HighsInt>::max()) ||
+        !checked_add(coverage_rows[row].size(), &coverage_nonzeros)) {
+      result.status = "Model error";
+      result.error = "inverter-master coverage incidence exceeds index range";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+  }
+  std::size_t required_rows = coverage_rows.size();
+  std::size_t required_nonzeros = coverage_nonzeros;
+  std::size_t term_nonzeros = 0;
+  std::size_t link_nonzeros = 0;
+  if (!checked_add(3, &required_rows) ||
+      !checked_add(inverter_data.incidences, &required_rows) ||
+      !checked_add(inverter_data.features.size(), &required_rows) ||
+      !checked_multiply(terms.size(), 3, &term_nonzeros) ||
+      !checked_add(term_nonzeros, &required_nonzeros) ||
+      !checked_multiply(inverter_data.incidences, 3,
+                        &link_nonzeros) ||
+      !checked_add(link_nonzeros, &required_nonzeros) ||
+      !checked_add(inverter_data.features.size(), &required_nonzeros) ||
+      required_rows >
+          static_cast<std::size_t>(
+              std::numeric_limits<HighsInt>::max()) ||
+      required_nonzeros >
+          static_cast<std::size_t>(
+              std::numeric_limits<HighsInt>::max())) {
+    result.status = "Model error";
+    result.error = "inverter master exceeds HiGHS row/nonzero index range";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+
+  Highs highs;
+  std::string option_error;
+  if (!checked_highs_option(&highs, "output_flag", false, &option_error) ||
+      !checked_highs_option(&highs, "threads", 1, &option_error) ||
+      !checked_highs_option(&highs, "parallel", std::string("off"),
+                            &option_error) ||
+      !checked_highs_option(&highs, "random_seed", 0, &option_error) ||
+      !checked_highs_option(&highs, "mip_rel_gap", 0.0, &option_error) ||
+      !checked_highs_option(&highs, "mip_abs_gap", 0.0, &option_error)) {
+    result.status = "Option error";
+    result.error = option_error;
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+
+  const HighsInt variable_count = static_cast<HighsInt>(variable_size);
+  std::vector<double> costs(variable_size, 0.0);
+  for (std::size_t inverter = 0;
+       inverter < inverter_data.features.size(); ++inverter) {
+    costs[terms.size() + inverter] = 1.0;
+  }
+  std::vector<double> lower(variable_size, 0.0);
+  std::vector<double> upper(variable_size, 1.0);
+  if (!highs_status_ok(highs.addCols(variable_count, costs.data(),
+                                     lower.data(), upper.data(), 0,
+                                     nullptr, nullptr, nullptr))) {
+    result.status = "Model error";
+    result.error = "HiGHS failed to add inverter-master variables";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  if (integer) {
+    std::vector<HighsVarType> integrality(
+        variable_size, HighsVarType::kInteger);
+    if (!highs_status_ok(highs.changeColsIntegrality(
+            0, variable_count - 1, integrality.data()))) {
+      result.status = "Model error";
+      result.error = "HiGHS failed to mark inverter-master variables binary";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+  }
+
+  std::size_t row_count = 0;
+  std::size_t nonzeros = 0;
+  std::vector<HighsInt> indices;
+  std::vector<double> values;
+  for (std::size_t positive = 0; positive < coverage_rows.size(); ++positive) {
+    if ((positive & 127U) == 0U && Clock::now() >= deadline) {
+      result.status = "Time limit";
+      result.error = "shared deadline expired building inverter cover rows";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+    indices = coverage_rows[positive];
+    if (indices.empty()) {
+      result.status = "Infeasible";
+      result.error = "a positive signature has no inverter-master term";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+    values.assign(indices.size(), 1.0);
+    if (!highs_status_ok(highs.addRow(
+            1.0, kHighsInf, static_cast<HighsInt>(indices.size()),
+            indices.data(), values.data()))) {
+      result.status = "Model error";
+      result.error = "HiGHS failed to add inverter-master coverage row";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+    row_count += 1;
+    nonzeros += indices.size();
+  }
+
+  indices.resize(terms.size());
+  values.assign(terms.size(), 1.0);
+  for (std::size_t term = 0; term < terms.size(); ++term) {
+    indices[term] = static_cast<HighsInt>(term);
+  }
+  const HighsInt term_count = static_cast<HighsInt>(terms.size());
+  if (!highs_status_ok(highs.addRow(
+          -kHighsInf, static_cast<double>(clause_limit), term_count,
+          indices.data(), values.data())) ||
+      !highs_status_ok(highs.addRow(
+          static_cast<double>(fixed_rule_count),
+          static_cast<double>(fixed_rule_count), term_count,
+          indices.data(), values.data()))) {
+    result.status = "Model error";
+    result.error = "HiGHS failed to add inverter-master rule rows";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  row_count += 2;
+  nonzeros += terms.size() * 2;
+
+  for (std::size_t term = 0; term < terms.size(); ++term) {
+    values[term] = static_cast<double>(terms[term].rule.terms.size());
+  }
+  if (!highs_status_ok(highs.addRow(
+          static_cast<double>(fixed_literal_count),
+          static_cast<double>(fixed_literal_count), term_count,
+          indices.data(), values.data()))) {
+    result.status = "Model error";
+    result.error = "HiGHS failed to fix the optimal literal count";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  row_count += 1;
+  nonzeros += terms.size();
+
+  std::size_t link_rows = 0;
+  std::size_t processed_incidences = 0;
+  for (std::size_t inverter = 0;
+       inverter < inverter_data.features.size(); ++inverter) {
+    if ((inverter & 127U) == 0U && Clock::now() >= deadline) {
+      result.status = "Time limit";
+      result.error = "shared deadline expired building inverter OR rows";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+    const HighsInt inverter_col =
+        static_cast<HighsInt>(terms.size() + inverter);
+    const std::vector<HighsInt>& using_terms =
+        inverter_data.terms_by_feature[inverter];
+    for (HighsInt term_col : using_terms) {
+      if ((processed_incidences++ & 1023U) == 0U &&
+          Clock::now() >= deadline) {
+        result.status = "Time limit";
+        result.error = "shared deadline expired building inverter links";
+        result.elapsed = elapsed_ms(phase_start);
+        return result;
+      }
+      const HighsInt link_indices[2] = {term_col, inverter_col};
+      const double link_values[2] = {-1.0, 1.0};
+      // z_f >= y_t for every term t using the negative literal f=0.
+      if (!highs_status_ok(highs.addRow(
+              0.0, kHighsInf, 2, link_indices, link_values))) {
+        result.status = "Model error";
+        result.error = "HiGHS failed to add inverter lower-link row";
+        result.elapsed = elapsed_ms(phase_start);
+        return result;
+      }
+      row_count += 1;
+      link_rows += 1;
+      nonzeros += 2;
+    }
+
+    // z_f <= sum_{t uses f=0} y_t closes the OR linearization; without this
+    // row an unused inverter could be spuriously set in an LP/MIP solution.
+    indices = using_terms;
+    values.assign(indices.size(), -1.0);
+    indices.push_back(inverter_col);
+    values.push_back(1.0);
+    if (!highs_status_ok(highs.addRow(
+            -kHighsInf, 0.0, static_cast<HighsInt>(indices.size()),
+            indices.data(), values.data()))) {
+      result.status = "Model error";
+      result.error = "HiGHS failed to add inverter upper-link row";
+      result.elapsed = elapsed_ms(phase_start);
+      return result;
+    }
+    row_count += 1;
+    link_rows += 1;
+    nonzeros += indices.size();
+  }
+
+  if (master_variables) *master_variables = variable_size;
+  if (master_constraints) *master_constraints = row_count;
+  if (master_nonzeros) *master_nonzeros = nonzeros;
+  if (inverter_link_constraints) *inverter_link_constraints = link_rows;
+  if (Clock::now() >= deadline) {
+    result.status = "Time limit";
+    result.error = "shared optimizer deadline expired before inverter run";
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+  const double seconds = std::max(
+      0.001,
+      std::chrono::duration<double>(deadline - Clock::now()).count());
+  if (!checked_highs_option(&highs, "time_limit", seconds, &option_error)) {
+    result.status = "Option error";
+    result.error = option_error;
+    result.elapsed = elapsed_ms(phase_start);
+    return result;
+  }
+
+  result.invoked = true;
+  const HighsStatus run_status = highs.run();
+  result.status = highs.modelStatusToString(highs.getModelStatus());
+  if (!highs_status_ok(run_status)) {
+    result.error = "HiGHS inverter run returned an error";
+  }
+  result.optimal = highs.getModelStatus() == HighsModelStatus::kOptimal;
+  const HighsInfo& info = highs.getInfo();
+  if (info.valid) {
+    result.objective = info.objective_function_value;
+    result.dual_bound = info.mip_dual_bound;
+    result.gap = info.mip_gap;
+    if (info.simplex_iteration_count > 0) {
+      result.simplex_iterations =
+          static_cast<std::size_t>(info.simplex_iteration_count);
+    }
+    if (info.mip_node_count > 0) {
+      result.mip_nodes = static_cast<std::size_t>(info.mip_node_count);
+    }
+  }
+  const HighsSolution& solution = highs.getSolution();
+  if (solution.value_valid) result.column_values = solution.col_value;
+  if (!integer && solution.dual_valid &&
+      solution.row_dual.size() >= coverage_rows.size() &&
+      !coverage_rows.empty()) {
+    result.dual_min = solution.row_dual[0];
+    result.dual_max = solution.row_dual[0];
+    for (std::size_t row = 0; row < coverage_rows.size(); ++row) {
+      const double dual = solution.row_dual[row];
+      result.dual_min = std::min(result.dual_min, dual);
+      result.dual_max = std::max(result.dual_max, dual);
+      result.dual_sum_abs += std::fabs(dual);
+      if (std::fabs(dual) > 1.0e-9) result.dual_nonzero += 1;
+    }
+  }
+  result.elapsed = elapsed_ms(phase_start);
+  return result;
+}
+
+void assign_lp3_phase(const MasterPhaseResult& phase,
+                      RuleOptimizerStats* stats) {
+  stats->lp3_status = phase.status;
+  stats->lp3_objective = phase.objective;
+  stats->lp3_iterations = phase.simplex_iterations;
+  stats->lp3_dual_nonzero = phase.dual_nonzero;
+  stats->lp3_dual_min = phase.dual_min;
+  stats->lp3_dual_max = phase.dual_max;
+  stats->lp3_dual_sum_abs = phase.dual_sum_abs;
+  stats->lp3_ms = phase.elapsed;
+}
+
+void assign_mip3_phase(const MasterPhaseResult& phase,
+                       RuleOptimizerStats* stats) {
+  stats->mip3_status = phase.status;
+  stats->mip3_objective = phase.objective;
+  stats->mip3_dual_bound = phase.dual_bound;
+  stats->mip3_gap = phase.gap;
+  stats->mip3_nodes = phase.mip_nodes;
+  stats->mip3_ms = phase.elapsed;
+}
+
 void assign_lp_phase(const MasterPhaseResult& phase,
                      bool first,
                      RuleOptimizerStats* stats) {
@@ -822,6 +1348,15 @@ std::string phase_failure_status(const std::string& solver_status) {
 
 }  // namespace
 
+namespace set_cover_optimizer_testing {
+
+void force_phase3_timeout_after_verified_mip2_once() {
+  force_phase3_timeout_after_verified_mip2.store(
+      true, std::memory_order_relaxed);
+}
+
+}  // namespace set_cover_optimizer_testing
+
 bool highs_set_cover_backend_available() {
 #ifdef USE_HIGHS
   return true;
@@ -848,10 +1383,24 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
   stats.literals_before = count_literals(baseline_model);
   stats.rules_after = stats.rules_before;
   stats.literals_after = stats.literals_before;
+  try {
+    stats.unique_inverters_before = count_unique_inverters(baseline_model);
+  } catch (const std::exception& exception) {
+    stats.status = "unknown";
+    stats.reason = std::string("failed to count baseline inverters: ") +
+                   exception.what();
+    finish_stats(&result, total_start);
+    return result;
+  }
+  stats.unique_inverters_after = stats.unique_inverters_before;
+  stats.third_objective =
+      options.cover_third_objective ==
+              RuleCoverThirdObjective::unique_inverters
+          ? "unique_inverters"
+          : "none";
 
 #ifndef USE_HIGHS
   (void)labels;
-  (void)options;
   stats.status = "backend_unavailable";
   stats.reason = "HiGHS support was not compiled (USE_HIGHS is disabled)";
   finish_stats(&result, total_start);
@@ -1023,10 +1572,18 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     return result;
   }
 
-  // Terms with identical positive coverage are interchangeable in the first
-  // objective.  Keeping the shortest, then lexicographically smallest, is
-  // exact for the second objective and removes redundant master columns.
+  // With only the first two objectives, terms with identical positive
+  // coverage are interchangeable: keep the shortest, then lexical first.
+  // For the optional inverter objective, equally short alternatives must be
+  // retained when their expected-zero feature sets are incomparable.  A term
+  // whose zero-feature set is a superset is exact-dominated for every possible
+  // union with other selected terms and can still be removed.
   std::map<std::vector<Word>, CoverTerm> by_coverage;
+  std::map<std::vector<Word>, std::vector<CoverTerm>>
+      alternatives_by_coverage;
+  const bool optimize_unique_inverters =
+      options.cover_third_objective ==
+      RuleCoverThirdObjective::unique_inverters;
   std::size_t materialized_terms = 0;
   for (const auto& entry : unique_term_keys) {
     if ((materialized_terms++ & 255U) == 0U && Clock::now() >= deadline) {
@@ -1044,16 +1601,66 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
       stats.pool_terms_unsafe += 1;
       continue;
     }
-    auto inserted = by_coverage.emplace(term.positive_cover, term);
-    if (!inserted.second) {
+    if (!optimize_unique_inverters) {
+      auto inserted = by_coverage.emplace(term.positive_cover, term);
+      if (!inserted.second) {
+        stats.pool_terms_coverage_deduplicated += 1;
+        CoverTerm& kept = inserted.first->second;
+        if (term.rule.terms.size() < kept.rule.terms.size() ||
+            (term.rule.terms.size() == kept.rule.terms.size() &&
+             term.rule.terms < kept.rule.terms)) {
+          kept = std::move(term);
+        }
+      }
+      continue;
+    }
+
+    std::vector<CoverTerm>& alternatives =
+        alternatives_by_coverage[term.positive_cover];
+    if (alternatives.empty()) {
+      alternatives.push_back(std::move(term));
+      continue;
+    }
+    const std::size_t shortest = alternatives.front().rule.terms.size();
+    if (term.rule.terms.size() < shortest) {
+      stats.pool_terms_coverage_deduplicated += alternatives.size();
+      alternatives.clear();
+      alternatives.push_back(std::move(term));
+      continue;
+    }
+    if (term.rule.terms.size() > shortest) {
       stats.pool_terms_coverage_deduplicated += 1;
-      CoverTerm& kept = inserted.first->second;
-      if (term.rule.terms.size() < kept.rule.terms.size() ||
-          (term.rule.terms.size() == kept.rule.terms.size() &&
-           term.rule.terms < kept.rule.terms)) {
-        kept = std::move(term);
+      continue;
+    }
+
+    const std::vector<std::size_t> term_inverters =
+        negative_feature_set(term.rule);
+    bool dominated = false;
+    for (CoverTerm& existing : alternatives) {
+      const std::vector<std::size_t> existing_inverters =
+          negative_feature_set(existing.rule);
+      if (!vector_subset(existing_inverters, term_inverters)) continue;
+      dominated = true;
+      stats.pool_terms_coverage_deduplicated += 1;
+      if (existing_inverters == term_inverters &&
+          term.rule.terms < existing.rule.terms) {
+        existing = std::move(term);
+      }
+      break;
+    }
+    if (dominated) continue;
+
+    for (auto it = alternatives.begin(); it != alternatives.end();) {
+      const std::vector<std::size_t> existing_inverters =
+          negative_feature_set(it->rule);
+      if (vector_subset(term_inverters, existing_inverters)) {
+        it = alternatives.erase(it);
+        stats.pool_terms_coverage_deduplicated += 1;
+      } else {
+        ++it;
       }
     }
+    alternatives.push_back(std::move(term));
   }
   if (stats.pool_terms_unsafe != 0) {
     stats.status = "verification_failed";
@@ -1065,18 +1672,39 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
   }
 
   std::vector<CoverTerm> terms;
-  terms.reserve(by_coverage.size());
   std::size_t retained_terms = 0;
-  for (auto& entry : by_coverage) {
-    if ((retained_terms++ & 1023U) == 0U && Clock::now() >= deadline) {
-      stats.status = "timeout";
-      stats.reason = "optimizer deadline expired finalizing the term pool";
-      stats.pool_complete = false;
-      stats.preprocessing_ms = elapsed_ms(preprocessing_start);
-      finish_stats(&result, total_start);
-      return result;
+  if (!optimize_unique_inverters) {
+    terms.reserve(by_coverage.size());
+    for (auto& entry : by_coverage) {
+      if ((retained_terms++ & 1023U) == 0U && Clock::now() >= deadline) {
+        stats.status = "timeout";
+        stats.reason = "optimizer deadline expired finalizing the term pool";
+        stats.pool_complete = false;
+        stats.preprocessing_ms = elapsed_ms(preprocessing_start);
+        finish_stats(&result, total_start);
+        return result;
+      }
+      terms.push_back(std::move(entry.second));
     }
-    terms.push_back(std::move(entry.second));
+  } else {
+    for (auto& entry : alternatives_by_coverage) {
+      if (entry.second.size() > 1) {
+        stats.pool_terms_coverage_alternatives += entry.second.size() - 1;
+      }
+      for (CoverTerm& alternative : entry.second) {
+        if ((retained_terms++ & 1023U) == 0U &&
+            Clock::now() >= deadline) {
+          stats.status = "timeout";
+          stats.reason =
+              "optimizer deadline expired finalizing alternative terms";
+          stats.pool_complete = false;
+          stats.preprocessing_ms = elapsed_ms(preprocessing_start);
+          finish_stats(&result, total_start);
+          return result;
+        }
+        terms.push_back(std::move(alternative));
+      }
+    }
   }
   std::sort(terms.begin(), terms.end(), rule_key_less);
   stats.pool_terms_final = terms.size();
@@ -1157,7 +1785,8 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
   if (!std::isfinite(mip1.objective) ||
       std::fabs(mip1.objective - rounded_rules) > 1.0e-6 ||
       rounded_rules < 1.0 ||
-      rounded_rules > static_cast<double>(stats.clause_limit)) {
+      rounded_rules > static_cast<double>(stats.clause_limit) ||
+      rounded_rules > static_cast<double>(terms.size())) {
     stats.status = "verification_failed";
     stats.reason = "HiGHS MIP1 returned an invalid integral objective";
     stats.solver_ms = elapsed_ms(solver_start);
@@ -1194,112 +1823,275 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
       true, true, optimal_rule_count, deadline, nullptr, nullptr);
   stats.solver_checks += mip2.invoked ? 1 : 0;
   assign_mip_phase(mip2, false, &stats);
-  stats.solver_ms = elapsed_ms(solver_start);
   if (!mip2.optimal || mip2.column_values.size() != terms.size()) {
     stats.status = phase_failure_status(mip2.status);
     stats.reason = mip2.error.empty()
                        ? "HiGHS MIP2 did not reach optimality: " + mip2.status
                        : mip2.error;
+    stats.solver_ms = elapsed_ms(solver_start);
     finish_stats(&result, total_start);
     return result;
   }
+  const double rounded_literals = std::round(mip2.objective);
+  const double maximum_literals =
+      static_cast<double>(optimal_rule_count) *
+      static_cast<double>(stats.literal_limit);
+  if (!std::isfinite(mip2.objective) ||
+      std::fabs(mip2.objective - rounded_literals) > 1.0e-6 ||
+      rounded_literals < static_cast<double>(optimal_rule_count) ||
+      rounded_literals > maximum_literals ||
+      static_cast<long double>(rounded_literals) >
+          static_cast<long double>(
+              std::numeric_limits<std::size_t>::max())) {
+    stats.status = "verification_failed";
+    stats.reason = "HiGHS MIP2 returned an invalid integral objective";
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+  const std::size_t optimal_literal_count =
+      static_cast<std::size_t>(rounded_literals);
   stats.literals_optimal = true;
 
-  DecisionTreeModel candidate_model;
-  for (std::size_t term = 0; term < terms.size(); ++term) {
-    const double value = mip2.column_values[term];
-    if (!std::isfinite(value) ||
-        std::fabs(value - std::round(value)) > 1.0e-6) {
-      stats.status = "verification_failed";
-      stats.reason = "HiGHS MIP2 returned a non-integral variable";
-      finish_stats(&result, total_start);
-      return result;
-    }
-    if (value <= 0.5) continue;
-    candidate_model.rules.push_back(terms[term].rule);
-    candidate_model.max_depth_used = std::max(
-        candidate_model.max_depth_used, terms[term].rule.terms.size());
-  }
-  std::sort(candidate_model.rules.begin(), candidate_model.rules.end(),
-            [](const DecisionTreeRule& lhs, const DecisionTreeRule& rhs) {
-              return lhs.terms < rhs.terms;
-            });
-  candidate_model.leaf_count = candidate_model.rules.size();
-  if (candidate_model.rules.size() != optimal_rule_count ||
-      std::fabs(static_cast<double>(count_literals(candidate_model)) -
-                mip2.objective) > 1.0e-6) {
+  DecisionTreeModel mip2_model;
+  std::set<std::size_t> mip2_selected_inverters;
+  if (!extract_term_model(terms, mip2.column_values, optimal_rule_count,
+                          optimal_literal_count, &mip2_model,
+                          &stats.reason, &mip2_selected_inverters)) {
     stats.status = "verification_failed";
-    stats.reason = "extracted set-cover model disagrees with MILP objectives";
+    stats.solver_ms = elapsed_ms(solver_start);
     finish_stats(&result, total_start);
     return result;
   }
 
-  std::size_t signature_fp = 0;
-  std::size_t signature_fn = 0;
-  for (const auto& pattern : signature_result.patterns) {
+  const VerificationStatus mip2_verification = verify_candidate_model(
+      mip2_model, signature_result.patterns, candidate_position, features,
+      labels, deadline, &stats, &stats.reason);
+  if (mip2_verification != VerificationStatus::verified) {
+    stats.status = mip2_verification == VerificationStatus::timeout
+                       ? "timeout"
+                       : "verification_failed";
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+
+  if (!optimize_unique_inverters) {
+    result.model = std::move(mip2_model);
+    stats.accepted = true;
+    stats.optimal = stats.pool_complete && stats.rules_optimal &&
+                    stats.literals_optimal;
+    stats.status = "accepted";
+    stats.reason.clear();
+    stats.rules_after = result.model.rules.size();
+    stats.literals_after = count_literals(result.model);
+    stats.unique_inverters_after = mip2_selected_inverters.size();
+    stats.rounds_used = 1;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+
+  // MIP2 has now been independently checked against both the projected
+  // signatures and every packed row.  If the optional hardware phase runs
+  // out of the shared budget, this is therefore a safe accepted fallback,
+  // but no phase-3 or overall-optimality claim is made.
+  auto accept_verified_mip2_after_phase3_timeout =
+      [&](const std::string& reason) -> RuleOptimizationResult {
+    result.model = mip2_model;
+    stats.accepted = true;
+    stats.verified = true;
+    stats.optimal = false;
+    stats.hardware_optimal = false;
+    stats.phase3_timeout_fallback = true;
+    stats.status = "accepted_phase3_timeout";
+    stats.reason = reason;
+    stats.verification_false_positive = 0;
+    stats.verification_false_negative = 0;
+    stats.rules_after = result.model.rules.size();
+    stats.literals_after = count_literals(result.model);
+    stats.unique_inverters_after = mip2_selected_inverters.size();
+    stats.rounds_used = 1;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  };
+
+  if (force_phase3_timeout_after_verified_mip2.exchange(
+          false, std::memory_order_relaxed)) {
+    return accept_verified_mip2_after_phase3_timeout(
+        "test-injected timeout after verified HiGHS MIP2");
+  }
+
+  InverterMasterData inverter_data;
+  if (!build_inverter_master_data(terms, deadline, &inverter_data)) {
     if (Clock::now() >= deadline) {
-      stats.status = "timeout";
-      stats.reason = "optimizer deadline expired during signature verification";
-      finish_stats(&result, total_start);
-      return result;
+      return accept_verified_mip2_after_phase3_timeout(
+          "shared optimizer deadline expired building phase-3 data");
     }
-    const bool prediction = model_matches_signature(
-        candidate_model, pattern, candidate_position);
-    if (prediction && pattern.label == 0) signature_fp += 1;
-    if (!prediction && pattern.label == 1) signature_fn += 1;
-  }
-  if (signature_fp != 0 || signature_fn != 0) {
-    stats.status = "verification_failed";
-    stats.reason = "MILP model failed projected-signature verification";
-    stats.verification_false_positive = signature_fp;
-    stats.verification_false_negative = signature_fn;
-    finish_stats(&result, total_start);
-    return result;
-  }
-
-  std::size_t full_fp = 0;
-  std::size_t full_fn = 0;
-  for (std::size_t row = 0; row < features.row_count; ++row) {
-    if ((row & 1023U) == 0U && Clock::now() >= deadline) {
-      stats.status = "timeout";
-      stats.reason = "optimizer deadline expired during full-row verification";
-      finish_stats(&result, total_start);
-      return result;
-    }
-    const bool prediction = model_matches_row(candidate_model, features, row);
-    if (prediction && labels[row] == 0) full_fp += 1;
-    if (!prediction && labels[row] == 1) full_fn += 1;
-  }
-  stats.verification_false_positive = full_fp;
-  stats.verification_false_negative = full_fn;
-  stats.verified = full_fp == 0 && full_fn == 0;
-  if (!stats.verified) {
-    stats.status = "verification_failed";
-    stats.reason = "MILP model failed full packed-matrix verification";
-    finish_stats(&result, total_start);
-    return result;
-  }
-
-  // The periodic row checks above bound clock overhead on very large tables;
-  // this final check closes the last partial chunk before committing an
-  // accepted model.
-  if (Clock::now() >= deadline) {
-    stats.status = "timeout";
-    stats.reason = "optimizer deadline expired after full-row verification";
+    stats.status = "unknown";
+    stats.reason = "failed to build the phase-3 inverter incidence";
     stats.verified = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+  stats.inverter_features = inverter_data.features.size();
+
+  MasterPhaseResult lp3 = solve_inverter_phase(
+      terms, coverage_rows, inverter_data, stats.clause_limit,
+      optimal_rule_count, optimal_literal_count, false, deadline,
+      &stats.master_variables, &stats.master_constraints,
+      &stats.master_nonzeros, &stats.inverter_link_constraints);
+  stats.solver_checks += lp3.invoked ? 1 : 0;
+  assign_lp3_phase(lp3, &stats);
+  if (!lp3.optimal) {
+    if (phase_failure_status(lp3.status) == "timeout") {
+      return accept_verified_mip2_after_phase3_timeout(
+          lp3.error.empty() ? "HiGHS LP3 reached the shared deadline"
+                            : lp3.error);
+    }
+    stats.status = phase_failure_status(lp3.status);
+    stats.reason = lp3.error.empty()
+                       ? "HiGHS LP3 did not reach optimality: " + lp3.status
+                       : lp3.error;
+    stats.verified = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+  if (!std::isfinite(lp3.objective) || lp3.objective < -1.0e-7 ||
+      lp3.objective >
+          static_cast<double>(inverter_data.features.size()) + 1.0e-7) {
+    stats.status = "verification_failed";
+    stats.reason = "HiGHS LP3 returned an invalid objective";
+    stats.verified = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+  if (Clock::now() >= deadline) {
+    return accept_verified_mip2_after_phase3_timeout(
+        "shared optimizer deadline expired after HiGHS LP3");
+  }
+
+  MasterPhaseResult mip3 = solve_inverter_phase(
+      terms, coverage_rows, inverter_data, stats.clause_limit,
+      optimal_rule_count, optimal_literal_count, true, deadline,
+      &stats.master_variables, &stats.master_constraints,
+      &stats.master_nonzeros, &stats.inverter_link_constraints);
+  stats.solver_checks += mip3.invoked ? 1 : 0;
+  assign_mip3_phase(mip3, &stats);
+  if (!mip3.optimal) {
+    if (phase_failure_status(mip3.status) == "timeout") {
+      return accept_verified_mip2_after_phase3_timeout(
+          mip3.error.empty() ? "HiGHS MIP3 reached the shared deadline"
+                             : mip3.error);
+    }
+    stats.status = phase_failure_status(mip3.status);
+    stats.reason = mip3.error.empty()
+                       ? "HiGHS MIP3 did not reach optimality: " + mip3.status
+                       : mip3.error;
+    stats.verified = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+  if (Clock::now() >= deadline) {
+    return accept_verified_mip2_after_phase3_timeout(
+        "shared optimizer deadline expired after HiGHS MIP3");
+  }
+
+  const double rounded_inverters = std::round(mip3.objective);
+  const std::size_t phase3_variable_count =
+      terms.size() + inverter_data.features.size();
+  if (!std::isfinite(mip3.objective) ||
+      std::fabs(mip3.objective - rounded_inverters) > 1.0e-6 ||
+      rounded_inverters < 0.0 ||
+      rounded_inverters >
+          static_cast<double>(inverter_data.features.size()) ||
+      mip3.column_values.size() != phase3_variable_count) {
+    stats.status = "verification_failed";
+    stats.reason = "HiGHS MIP3 returned an invalid integral solution";
+    stats.verified = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+
+  DecisionTreeModel candidate_model;
+  std::set<std::size_t> selected_inverters;
+  if (!extract_term_model(terms, mip3.column_values, optimal_rule_count,
+                          optimal_literal_count, &candidate_model,
+                          &stats.reason, &selected_inverters)) {
+    stats.status = "verification_failed";
+    stats.verified = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+
+  if (Clock::now() >= deadline) {
+    return accept_verified_mip2_after_phase3_timeout(
+        "shared optimizer deadline expired extracting the MIP3 model");
+  }
+  bool valid_inverter_columns = true;
+  for (std::size_t inverter = 0;
+       inverter < inverter_data.features.size(); ++inverter) {
+    if ((inverter & 1023U) == 0U && Clock::now() >= deadline) {
+      return accept_verified_mip2_after_phase3_timeout(
+          "shared optimizer deadline expired verifying MIP3 inverter columns");
+    }
+    const double value = mip3.column_values[terms.size() + inverter];
+    if (!std::isfinite(value) ||
+        std::fabs(value - std::round(value)) > 1.0e-6 ||
+        value < -1.0e-6 || value > 1.0 + 1.0e-6 ||
+        (value > 0.5) !=
+            (selected_inverters.count(inverter_data.features[inverter]) != 0)) {
+      valid_inverter_columns = false;
+      break;
+    }
+  }
+  if (Clock::now() >= deadline) {
+    return accept_verified_mip2_after_phase3_timeout(
+        "shared optimizer deadline expired after MIP3 inverter verification");
+  }
+  if (!valid_inverter_columns ||
+      selected_inverters.size() !=
+          static_cast<std::size_t>(rounded_inverters)) {
+    stats.status = "verification_failed";
+    stats.reason = "MIP3 inverter variables violate the OR objective";
+    stats.verified = false;
+    stats.solver_ms = elapsed_ms(solver_start);
+    finish_stats(&result, total_start);
+    return result;
+  }
+
+  const VerificationStatus mip3_verification = verify_candidate_model(
+      candidate_model, signature_result.patterns, candidate_position,
+      features, labels, deadline, &stats, &stats.reason);
+  if (mip3_verification == VerificationStatus::timeout) {
+    return accept_verified_mip2_after_phase3_timeout(stats.reason);
+  }
+  if (mip3_verification != VerificationStatus::verified) {
+    stats.status = "verification_failed";
+    stats.solver_ms = elapsed_ms(solver_start);
     finish_stats(&result, total_start);
     return result;
   }
 
   result.model = std::move(candidate_model);
   stats.accepted = true;
+  stats.hardware_optimal = true;
   stats.optimal = stats.pool_complete && stats.rules_optimal &&
-                  stats.literals_optimal;
+                  stats.literals_optimal && stats.hardware_optimal;
   stats.status = "accepted";
   stats.reason.clear();
   stats.rules_after = result.model.rules.size();
   stats.literals_after = count_literals(result.model);
+  stats.unique_inverters_after = selected_inverters.size();
   stats.rounds_used = 1;
+  stats.solver_ms = elapsed_ms(solver_start);
   finish_stats(&result, total_start);
   return result;
   } catch (const std::exception& exception) {
@@ -1310,8 +2102,11 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     stats.pool_complete = false;
     stats.rules_optimal = false;
     stats.literals_optimal = false;
+    stats.hardware_optimal = false;
+    stats.phase3_timeout_fallback = false;
     stats.rules_after = stats.rules_before;
     stats.literals_after = stats.literals_before;
+    stats.unique_inverters_after = stats.unique_inverters_before;
     stats.status = "unknown";
     stats.reason = std::string("set-cover optimizer exception: ") +
                    exception.what();
