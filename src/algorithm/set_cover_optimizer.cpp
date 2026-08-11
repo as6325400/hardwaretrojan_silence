@@ -2929,12 +2929,8 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
   stats.logic_risk_timing_denominator =
       preliminary_scales.timing_denominator;
   stats.logic_risk_or_depth = preliminary_scales.or_depth;
-  LogicRiskComponents baseline_logic_components;
   std::string component_error;
   if (!compute_logic_risk_components(
-          baseline_model, *cost_context, preliminary_scales, options,
-          &baseline_logic_components, &component_error) ||
-      !compute_logic_risk_components(
           candidate_model, *cost_context, preliminary_scales, options,
           &mip3_logic_components, &component_error)) {
     stats.logic_risk_context_available = false;
@@ -2946,7 +2942,10 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
                                 false, true);
   }
   have_mip3_logic_components = true;
-  assign_logic_risk_components(baseline_logic_components, true, &stats);
+  // "before" is the independently verified MIP3 incumbent.  This makes the
+  // before/after telemetry the marginal effect of phase 4, rather than mixing
+  // in the earlier rule/literal/inverter improvements over the DT baseline.
+  assign_logic_risk_components(mip3_logic_components, true, &stats);
 
   if (options.phase4_timeout_ms == 0) {
     return accept_verified_mip3(
