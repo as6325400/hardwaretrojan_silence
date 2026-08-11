@@ -18,21 +18,12 @@ bool highs_set_cover_backend_available();
 // An extracted model is accepted only after it classifies the complete finite
 // feature matrix with zero error.  A phase-3 timeout may safely retain the
 // already verified MIP2 model, but does not claim hardware or overall
-// optimality.  Other failures, an incomplete term pool, or an unavailable
-// backend preserve baseline_model.
+// optimality.  phase3_timeout_ms may impose a smaller phase-3 deadline while
+// its default shares the remaining global deadline.  Other failures, an
+// incomplete term pool, or an unavailable backend preserve baseline_model.
 RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     const PackedFeatureMatrix& features,
     const std::vector<int>& labels,
     const std::vector<std::size_t>& raw_dt_candidate_features,
     const DecisionTreeModel& baseline_model,
     const RuleOptimizerOptions& options = RuleOptimizerOptions{});
-
-#ifdef SET_COVER_OPTIMIZER_ENABLE_TEST_HOOKS
-namespace set_cover_optimizer_testing {
-
-// Deterministically exercises the safe timeout boundary after MIP2 has been
-// fully verified.  The request is consumed by the next eligible phase-3 run.
-void force_phase3_timeout_after_verified_mip2_once();
-
-}  // namespace set_cover_optimizer_testing
-#endif

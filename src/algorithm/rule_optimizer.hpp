@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -52,6 +54,12 @@ struct RuleOptimizerOptions {
   // default preserves the original two-objective, four-phase behavior.
   RuleCoverThirdObjective cover_third_objective =
       RuleCoverThirdObjective::none;
+
+  // Optional wall-clock sub-budget for the third objective.  The default
+  // shares the remaining global optimizer deadline.  Zero deterministically
+  // accepts the already verified MIP2 model without starting LP3.
+  std::uint64_t phase3_timeout_ms =
+      std::numeric_limits<std::uint64_t>::max();
 };
 
 struct RuleOptimizerStats {
@@ -116,6 +124,8 @@ struct RuleOptimizerStats {
   // incumbent; rules/literals remain optimal, but stats.optimal is false.
   bool phase3_timeout_fallback = false;
   std::string third_objective;
+  std::uint64_t phase3_timeout_ms =
+      std::numeric_limits<std::uint64_t>::max();
 
   std::size_t pool_hyperedges = 0;
   std::size_t pool_redundant_hyperedges = 0;

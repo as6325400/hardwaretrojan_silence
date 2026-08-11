@@ -7,7 +7,6 @@
 #include <utility>
 #include <vector>
 
-#define SET_COVER_OPTIMIZER_ENABLE_TEST_HOOKS
 #include "../algorithm/set_cover_optimizer.hpp"
 
 namespace {
@@ -221,14 +220,14 @@ void test_phase3_deadline_safe_fallback() {
   options.max_literals_per_clause = 1;
   options.cover_third_objective =
       RuleCoverThirdObjective::unique_inverters;
-  set_cover_optimizer_testing::
-      force_phase3_timeout_after_verified_mip2_once();
+  options.phase3_timeout_ms = 0;
   const RuleOptimizationResult fallback =
       optimize(rows, {1, 0}, {0, 1}, baseline, options);
   expect(fallback.stats.status == "accepted_phase3_timeout",
-         "test hook exercises the verified MIP2 phase-3 fallback");
+         "zero phase-3 sub-budget exercises the verified MIP2 fallback");
   expect(fallback.stats.accepted && fallback.stats.verified &&
-             fallback.stats.phase3_timeout_fallback,
+             fallback.stats.phase3_timeout_fallback &&
+             fallback.stats.phase3_timeout_ms == 0,
          "phase-3 timeout safely accepts the previously verified MIP2 model");
   expect(fallback.stats.rules_optimal && fallback.stats.literals_optimal &&
              !fallback.stats.hardware_optimal && !fallback.stats.optimal,

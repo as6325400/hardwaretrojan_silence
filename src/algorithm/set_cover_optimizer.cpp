@@ -5,7 +5,6 @@
 #endif
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -24,8 +23,6 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using Word = PackedFeatureMatrix::word_t;
 using TermKey = std::vector<std::pair<std::size_t, int>>;
-
-std::atomic<bool> force_phase3_timeout_after_verified_mip2{false};
 
 double elapsed_ms(Clock::time_point start) {
   return std::chrono::duration<double, std::milli>(Clock::now() - start)
@@ -953,7 +950,7 @@ MasterPhaseResult solve_inverter_phase(
   MasterPhaseResult result;
   if (phase_start >= deadline) {
     result.status = "Time limit";
-    result.error = "shared optimizer deadline expired before inverter phase";
+    result.error = "phase-3 deadline expired before inverter phase";
     result.elapsed = elapsed_ms(phase_start);
     return result;
   }
@@ -1002,7 +999,7 @@ MasterPhaseResult solve_inverter_phase(
   for (std::size_t row = 0; row < coverage_rows.size(); ++row) {
     if ((row & 1023U) == 0U && Clock::now() >= deadline) {
       result.status = "Time limit";
-      result.error = "shared deadline expired sizing inverter master";
+      result.error = "phase-3 deadline expired sizing inverter master";
       result.elapsed = elapsed_ms(phase_start);
       return result;
     }
@@ -1091,7 +1088,7 @@ MasterPhaseResult solve_inverter_phase(
   for (std::size_t positive = 0; positive < coverage_rows.size(); ++positive) {
     if ((positive & 127U) == 0U && Clock::now() >= deadline) {
       result.status = "Time limit";
-      result.error = "shared deadline expired building inverter cover rows";
+      result.error = "phase-3 deadline expired building inverter cover rows";
       result.elapsed = elapsed_ms(phase_start);
       return result;
     }
@@ -1157,7 +1154,7 @@ MasterPhaseResult solve_inverter_phase(
        inverter < inverter_data.features.size(); ++inverter) {
     if ((inverter & 127U) == 0U && Clock::now() >= deadline) {
       result.status = "Time limit";
-      result.error = "shared deadline expired building inverter OR rows";
+      result.error = "phase-3 deadline expired building inverter OR rows";
       result.elapsed = elapsed_ms(phase_start);
       return result;
     }
@@ -1169,7 +1166,7 @@ MasterPhaseResult solve_inverter_phase(
       if ((processed_incidences++ & 1023U) == 0U &&
           Clock::now() >= deadline) {
         result.status = "Time limit";
-        result.error = "shared deadline expired building inverter links";
+        result.error = "phase-3 deadline expired building inverter links";
         result.elapsed = elapsed_ms(phase_start);
         return result;
       }
@@ -1213,7 +1210,7 @@ MasterPhaseResult solve_inverter_phase(
   if (inverter_link_constraints) *inverter_link_constraints = link_rows;
   if (Clock::now() >= deadline) {
     result.status = "Time limit";
-    result.error = "shared optimizer deadline expired before inverter run";
+    result.error = "phase-3 deadline expired before inverter run";
     result.elapsed = elapsed_ms(phase_start);
     return result;
   }
@@ -1348,15 +1345,6 @@ std::string phase_failure_status(const std::string& solver_status) {
 
 }  // namespace
 
-namespace set_cover_optimizer_testing {
-
-void force_phase3_timeout_after_verified_mip2_once() {
-  force_phase3_timeout_after_verified_mip2.store(
-      true, std::memory_order_relaxed);
-}
-
-}  // namespace set_cover_optimizer_testing
-
 bool highs_set_cover_backend_available() {
 #ifdef USE_HIGHS
   return true;
@@ -1398,6 +1386,7 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
               RuleCoverThirdObjective::unique_inverters
           ? "unique_inverters"
           : "none";
+  stats.phase3_timeout_ms = options.phase3_timeout_ms;
 
 #ifndef USE_HIGHS
   (void)labels;
@@ -1894,7 +1883,7 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
 
   // MIP2 has now been independently checked against both the projected
   // signatures and every packed row.  If the optional hardware phase runs
-  // out of the shared budget, this is therefore a safe accepted fallback,
+  // out of its global/sub-budget, this is therefore a safe accepted fallback,
   // but no phase-3 or overall-optimality claim is made.
   auto accept_verified_mip2_after_phase3_timeout =
       [&](const std::string& reason) -> RuleOptimizationResult {
@@ -1917,17 +1906,34 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     return result;
   };
 
-  if (force_phase3_timeout_after_verified_mip2.exchange(
-          false, std::memory_order_relaxed)) {
+  if (options.phase3_timeout_ms == 0) {
     return accept_verified_mip2_after_phase3_timeout(
-        "test-injected timeout after verified HiGHS MIP2");
+        "phase-3 wall-clock sub-budget is zero");
+  }
+
+  Clock::time_point phase3_deadline = deadline;
+  if (options.phase3_timeout_ms !=
+      std::numeric_limits<std::uint64_t>::max()) {
+    const Clock::time_point phase3_start = Clock::now();
+    using Milliseconds = std::chrono::milliseconds;
+    using MillisecondRep = Milliseconds::rep;
+    if (options.phase3_timeout_ms <=
+        static_cast<std::uint64_t>(
+            std::numeric_limits<MillisecondRep>::max())) {
+      const Milliseconds requested(static_cast<MillisecondRep>(
+          options.phase3_timeout_ms));
+      if (requested < deadline - phase3_start) {
+        phase3_deadline = phase3_start + requested;
+      }
+    }
   }
 
   InverterMasterData inverter_data;
-  if (!build_inverter_master_data(terms, deadline, &inverter_data)) {
-    if (Clock::now() >= deadline) {
+  if (!build_inverter_master_data(terms, phase3_deadline,
+                                  &inverter_data)) {
+    if (Clock::now() >= phase3_deadline) {
       return accept_verified_mip2_after_phase3_timeout(
-          "shared optimizer deadline expired building phase-3 data");
+          "phase-3 deadline expired building inverter data");
     }
     stats.status = "unknown";
     stats.reason = "failed to build the phase-3 inverter incidence";
@@ -1940,7 +1946,7 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
 
   MasterPhaseResult lp3 = solve_inverter_phase(
       terms, coverage_rows, inverter_data, stats.clause_limit,
-      optimal_rule_count, optimal_literal_count, false, deadline,
+      optimal_rule_count, optimal_literal_count, false, phase3_deadline,
       &stats.master_variables, &stats.master_constraints,
       &stats.master_nonzeros, &stats.inverter_link_constraints);
   stats.solver_checks += lp3.invoked ? 1 : 0;
@@ -1948,7 +1954,7 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
   if (!lp3.optimal) {
     if (phase_failure_status(lp3.status) == "timeout") {
       return accept_verified_mip2_after_phase3_timeout(
-          lp3.error.empty() ? "HiGHS LP3 reached the shared deadline"
+          lp3.error.empty() ? "HiGHS LP3 reached the phase-3 deadline"
                             : lp3.error);
     }
     stats.status = phase_failure_status(lp3.status);
@@ -1970,14 +1976,14 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     finish_stats(&result, total_start);
     return result;
   }
-  if (Clock::now() >= deadline) {
+  if (Clock::now() >= phase3_deadline) {
     return accept_verified_mip2_after_phase3_timeout(
-        "shared optimizer deadline expired after HiGHS LP3");
+        "phase-3 deadline expired after HiGHS LP3");
   }
 
   MasterPhaseResult mip3 = solve_inverter_phase(
       terms, coverage_rows, inverter_data, stats.clause_limit,
-      optimal_rule_count, optimal_literal_count, true, deadline,
+      optimal_rule_count, optimal_literal_count, true, phase3_deadline,
       &stats.master_variables, &stats.master_constraints,
       &stats.master_nonzeros, &stats.inverter_link_constraints);
   stats.solver_checks += mip3.invoked ? 1 : 0;
@@ -1985,7 +1991,7 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
   if (!mip3.optimal) {
     if (phase_failure_status(mip3.status) == "timeout") {
       return accept_verified_mip2_after_phase3_timeout(
-          mip3.error.empty() ? "HiGHS MIP3 reached the shared deadline"
+          mip3.error.empty() ? "HiGHS MIP3 reached the phase-3 deadline"
                              : mip3.error);
     }
     stats.status = phase_failure_status(mip3.status);
@@ -1997,9 +2003,9 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     finish_stats(&result, total_start);
     return result;
   }
-  if (Clock::now() >= deadline) {
+  if (Clock::now() >= phase3_deadline) {
     return accept_verified_mip2_after_phase3_timeout(
-        "shared optimizer deadline expired after HiGHS MIP3");
+        "phase-3 deadline expired after HiGHS MIP3");
   }
 
   const double rounded_inverters = std::round(mip3.objective);
@@ -2031,16 +2037,17 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
     return result;
   }
 
-  if (Clock::now() >= deadline) {
+  if (Clock::now() >= phase3_deadline) {
     return accept_verified_mip2_after_phase3_timeout(
-        "shared optimizer deadline expired extracting the MIP3 model");
+        "phase-3 deadline expired extracting the MIP3 model");
   }
   bool valid_inverter_columns = true;
   for (std::size_t inverter = 0;
        inverter < inverter_data.features.size(); ++inverter) {
-    if ((inverter & 1023U) == 0U && Clock::now() >= deadline) {
+    if ((inverter & 1023U) == 0U &&
+        Clock::now() >= phase3_deadline) {
       return accept_verified_mip2_after_phase3_timeout(
-          "shared optimizer deadline expired verifying MIP3 inverter columns");
+          "phase-3 deadline expired verifying MIP3 inverter columns");
     }
     const double value = mip3.column_values[terms.size() + inverter];
     if (!std::isfinite(value) ||
@@ -2052,9 +2059,9 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
       break;
     }
   }
-  if (Clock::now() >= deadline) {
+  if (Clock::now() >= phase3_deadline) {
     return accept_verified_mip2_after_phase3_timeout(
-        "shared optimizer deadline expired after MIP3 inverter verification");
+        "phase-3 deadline expired after MIP3 inverter verification");
   }
   if (!valid_inverter_columns ||
       selected_inverters.size() !=
@@ -2069,7 +2076,7 @@ RuleOptimizationResult optimize_dnf_rules_highs_set_cover(
 
   const VerificationStatus mip3_verification = verify_candidate_model(
       candidate_model, signature_result.patterns, candidate_position,
-      features, labels, deadline, &stats, &stats.reason);
+      features, labels, phase3_deadline, &stats, &stats.reason);
   if (mip3_verification == VerificationStatus::timeout) {
     return accept_verified_mip2_after_phase3_timeout(stats.reason);
   }
