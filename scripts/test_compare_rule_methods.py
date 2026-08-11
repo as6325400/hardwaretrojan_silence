@@ -286,6 +286,62 @@ class SummaryParserTest(unittest.TestCase):
             },
         )
 
+    def test_numeric_sum_is_exact_and_excludes_non_additive_metadata(self) -> None:
+        uint64_max = (1 << 64) - 1
+        summaries = [
+            {
+                "_line": 1,
+                "rule_build_attempt": 1,
+                "cec_attempt": 1,
+                "synth_pass": 1,
+                "refine_rounds": 1,
+                "literal_node": 101,
+                "literal_expected": 1,
+                "literal_forced": -1,
+                "cover_phase3_timeout_ms": uint64_max,
+                "cover_phase4_timeout_ms": uint64_max,
+                "cover_logic_risk_unique_weight": 0.25,
+                "cover_logic_risk_fanout_weight": 0.25,
+                "cover_logic_risk_timing_weight": 0.5,
+                "optimizer_checks": uint64_max,
+                "candidate_count": 2,
+                "solver_ms": 1.25,
+            },
+            {
+                "_line": 2,
+                "rule_build_attempt": 2,
+                "cec_attempt": 1,
+                "synth_pass": 1,
+                "refine_rounds": 2,
+                "literal_node": 202,
+                "literal_expected": 0,
+                "literal_forced": 1,
+                "cover_phase3_timeout_ms": uint64_max,
+                "cover_phase4_timeout_ms": uint64_max,
+                "cover_logic_risk_unique_weight": 0.25,
+                "cover_logic_risk_fanout_weight": 0.25,
+                "cover_logic_risk_timing_weight": 0.5,
+                "optimizer_checks": uint64_max,
+                "candidate_count": 3,
+                "solver_ms": 2.75,
+            },
+        ]
+
+        aggregates = runner._summary_aggregates(summaries)
+        numeric_sum = aggregates["numeric_sum"]
+        self.assertEqual(numeric_sum["optimizer_checks"], 2 * uint64_max)
+        self.assertIsInstance(numeric_sum["optimizer_checks"], int)
+        self.assertEqual(numeric_sum["candidate_count"], 5)
+        self.assertEqual(numeric_sum["solver_ms"], 4.0)
+        for key in runner._NON_ADDITIVE_SUMMARY_KEYS:
+            self.assertNotIn(key, numeric_sum)
+
+        # Non-additive fields remain available without loss in raw snapshots.
+        self.assertEqual(
+            aggregates["first"]["cover_phase3_timeout_ms"], uint64_max
+        )
+        self.assertEqual(aggregates["last"]["refine_rounds"], 2)
+
 
 class EndToEndTest(RunnerFixture):
     def test_atomic_artifacts_metrics_and_resume(self) -> None:

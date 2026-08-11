@@ -438,6 +438,32 @@ def _associate_rule_build_attempts(
     return attempts, unlinked
 
 
+_NON_ADDITIVE_SUMMARY_KEYS = frozenset(
+    {
+        # Stable identifiers and categorical literal metadata are useful in
+        # first/last snapshots, but adding them across attempts has no metric
+        # interpretation.
+        "cec_attempt",
+        "synth_pass",
+        "rule_build_attempt",
+        "literal_node",
+        "literal_expected",
+        "literal_forced",
+        # This is a cumulative counter emitted on every miter summary.  Its
+        # final value is the number of refinement rounds; summing snapshots
+        # would double-count earlier rounds.
+        "refine_rounds",
+        # Optimizer configuration is repeated on every synthesis summary.
+        # Keep it in first/last and the raw summaries, not numeric_sum.
+        "cover_phase3_timeout_ms",
+        "cover_phase4_timeout_ms",
+        "cover_logic_risk_unique_weight",
+        "cover_logic_risk_fanout_weight",
+        "cover_logic_risk_timing_weight",
+    }
+)
+
+
 def _summary_aggregates(
     summaries: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
@@ -446,21 +472,23 @@ def _summary_aggregates(
     ignored = {"_raw", "_line", "_parse_error", "_unparsed_tail"}
     first = {key: value for key, value in summaries[0].items() if key not in ignored}
     last = {key: value for key, value in summaries[-1].items() if key not in ignored}
-    sums: Dict[str, float] = {}
-    all_integral: Dict[str, bool] = {}
+    sums: Dict[str, Any] = {}
     for summary in summaries:
         for key, value in summary.items():
-            if key in ignored or isinstance(value, bool) or not isinstance(
-                value, (int, float)
+            if (
+                key in ignored
+                or key in _NON_ADDITIVE_SUMMARY_KEYS
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
             ):
                 continue
-            sums[key] = sums.get(key, 0.0) + float(value)
-            all_integral[key] = all_integral.get(key, True) and isinstance(value, int)
-    numeric_sum: Dict[str, Any] = {
-        key: int(value) if all_integral.get(key, False) else value
-        for key, value in sums.items()
-    }
-    return {"first": first, "last": last, "numeric_sum": numeric_sum}
+            if key not in sums:
+                # Do not coerce integers through float: telemetry contains
+                # UINT64_MAX sentinels and Python's int keeps their sums exact.
+                sums[key] = value
+            else:
+                sums[key] += value
+    return {"first": first, "last": last, "numeric_sum": sums}
 
 
 def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
