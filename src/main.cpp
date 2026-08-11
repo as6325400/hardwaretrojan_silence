@@ -2183,6 +2183,19 @@ int main(int argc, char** argv) {
       } else {
         cout << options.rule_cover_phase3_timeout_ms;
       }
+      cout << " fourth_objective "
+           << (options.rule_cover_logic_risk_proxy ? "logic_risk" : "none")
+           << " logic_risk_weights "
+           << options.rule_cover_unique_feature_weight << ','
+           << options.rule_cover_fanout_weight << ','
+           << options.rule_cover_timing_weight
+           << " phase4_timeout_ms ";
+      if (options.rule_cover_phase4_timeout_ms ==
+          std::numeric_limits<std::uint64_t>::max()) {
+        cout << "shared";
+      } else {
+        cout << options.rule_cover_phase4_timeout_ms;
+      }
     }
     cout << "\n";
   }
@@ -2643,6 +2656,17 @@ int main(int argc, char** argv) {
               : RuleCoverThirdObjective::none;
       mining_options.rule_optimizer_options.phase3_timeout_ms =
           options.rule_cover_phase3_timeout_ms;
+      mining_options.rule_optimizer_options.cover_logic_risk_proxy =
+          options.rule_cover_logic_risk_proxy;
+      mining_options.rule_optimizer_options
+          .logic_risk_unique_feature_weight =
+          options.rule_cover_unique_feature_weight;
+      mining_options.rule_optimizer_options.logic_risk_fanout_weight =
+          options.rule_cover_fanout_weight;
+      mining_options.rule_optimizer_options.logic_risk_timing_weight =
+          options.rule_cover_timing_weight;
+      mining_options.rule_optimizer_options.phase4_timeout_ms =
+          options.rule_cover_phase4_timeout_ms;
 
       if (!run_mining(golden,
                       working_trojan,
@@ -2737,16 +2761,57 @@ int main(int argc, char** argv) {
          << (rule_synth_telemetry.optimizer_stats.literals_optimal ? 1 : 0)
          << " cover_hardware_optimal "
          << (rule_synth_telemetry.optimizer_stats.hardware_optimal ? 1 : 0)
+         << " cover_logic_risk_optimal "
+         << (rule_synth_telemetry.optimizer_stats.logic_risk_optimal ? 1 : 0)
          << " cover_phase3_timeout_fallback "
          << (rule_synth_telemetry.optimizer_stats.phase3_timeout_fallback
+                 ? 1
+                 : 0)
+         << " cover_phase4_timeout_fallback "
+         << (rule_synth_telemetry.optimizer_stats.phase4_timeout_fallback
+                 ? 1
+                 : 0)
+         << " cover_phase4_unavailable_fallback "
+         << (rule_synth_telemetry.optimizer_stats.phase4_unavailable_fallback
                  ? 1
                  : 0)
          << " cover_third_objective "
          << (rule_synth_telemetry.optimizer_stats.third_objective.empty()
                  ? "none"
                  : rule_synth_telemetry.optimizer_stats.third_objective)
+         << " cover_fourth_objective "
+         << (rule_synth_telemetry.optimizer_stats.fourth_objective.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.fourth_objective)
          << " cover_phase3_timeout_ms "
          << rule_synth_telemetry.optimizer_stats.phase3_timeout_ms
+         << " cover_phase4_timeout_ms "
+         << rule_synth_telemetry.optimizer_stats.phase4_timeout_ms
+         << " cover_logic_risk_context "
+         << (rule_synth_telemetry.optimizer_stats
+                     .logic_risk_context_available
+                 ? 1
+                 : 0)
+         << " cover_logic_risk_unique_weight "
+         << rule_synth_telemetry.optimizer_stats
+                .logic_risk_unique_feature_weight
+         << " cover_logic_risk_fanout_weight "
+         << rule_synth_telemetry.optimizer_stats.logic_risk_fanout_weight
+         << " cover_logic_risk_timing_weight "
+         << rule_synth_telemetry.optimizer_stats.logic_risk_timing_weight
+         << " cover_logic_risk_max_fanout_log "
+         << rule_synth_telemetry.optimizer_stats.logic_risk_max_fanout_log
+         << " cover_logic_risk_unique_denominator "
+         << rule_synth_telemetry.optimizer_stats
+                .logic_risk_unique_denominator
+         << " cover_logic_risk_fanout_denominator "
+         << rule_synth_telemetry.optimizer_stats
+                .logic_risk_fanout_denominator
+         << " cover_logic_risk_timing_denominator "
+         << rule_synth_telemetry.optimizer_stats
+                .logic_risk_timing_denominator
+         << " cover_logic_risk_or_depth "
+         << rule_synth_telemetry.optimizer_stats.logic_risk_or_depth
          << " cover_terms_generated "
          << rule_synth_telemetry.optimizer_stats.pool_terms_generated
          << " cover_terms_unique "
@@ -2764,6 +2829,35 @@ int main(int argc, char** argv) {
          << rule_synth_telemetry.optimizer_stats.inverter_features
          << " cover_inverter_links "
          << rule_synth_telemetry.optimizer_stats.inverter_link_constraints
+         << " cover_feature_variables "
+         << rule_synth_telemetry.optimizer_stats.logic_risk_feature_variables
+         << " cover_feature_links "
+         << rule_synth_telemetry.optimizer_stats
+                .logic_risk_feature_link_constraints
+         << " cover_unique_features_before "
+         << rule_synth_telemetry.optimizer_stats.unique_features_before
+         << " cover_unique_features_after "
+         << rule_synth_telemetry.optimizer_stats.unique_features_after
+         << " cover_feature_loads_before "
+         << rule_synth_telemetry.optimizer_stats.feature_loads_before
+         << " cover_feature_loads_after "
+         << rule_synth_telemetry.optimizer_stats.feature_loads_after
+         << " cover_fanout_stress_before "
+         << rule_synth_telemetry.optimizer_stats.fanout_stress_before
+         << " cover_fanout_stress_after "
+         << rule_synth_telemetry.optimizer_stats.fanout_stress_after
+         << " cover_max_term_arrival_before "
+         << rule_synth_telemetry.optimizer_stats.max_term_arrival_before
+         << " cover_max_term_arrival_after "
+         << rule_synth_telemetry.optimizer_stats.max_term_arrival_after
+         << " cover_match_depth_before "
+         << rule_synth_telemetry.optimizer_stats.match_depth_proxy_before
+         << " cover_match_depth_after "
+         << rule_synth_telemetry.optimizer_stats.match_depth_proxy_after
+         << " cover_logic_risk_objective_before "
+         << rule_synth_telemetry.optimizer_stats.logic_risk_objective_before
+         << " cover_logic_risk_objective_after "
+         << rule_synth_telemetry.optimizer_stats.logic_risk_objective_after
          << " cover_variables "
          << rule_synth_telemetry.optimizer_stats.master_variables
          << " cover_constraints "
@@ -2832,10 +2926,31 @@ int main(int argc, char** argv) {
          << rule_synth_telemetry.optimizer_stats.mip3_gap
          << " mip3_nodes "
          << rule_synth_telemetry.optimizer_stats.mip3_nodes
+         << " lp4_status "
+         << (rule_synth_telemetry.optimizer_stats.lp4_status.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.lp4_status)
+         << " lp4_objective "
+         << rule_synth_telemetry.optimizer_stats.lp4_objective
+         << " lp4_iterations "
+         << rule_synth_telemetry.optimizer_stats.lp4_iterations
+         << " mip4_status "
+         << (rule_synth_telemetry.optimizer_stats.mip4_status.empty()
+                 ? "none"
+                 : rule_synth_telemetry.optimizer_stats.mip4_status)
+         << " mip4_objective "
+         << rule_synth_telemetry.optimizer_stats.mip4_objective
+         << " mip4_bound "
+         << rule_synth_telemetry.optimizer_stats.mip4_dual_bound
+         << " mip4_gap "
+         << rule_synth_telemetry.optimizer_stats.mip4_gap
+         << " mip4_nodes "
+         << rule_synth_telemetry.optimizer_stats.mip4_nodes
          << " mip_nodes "
          << (rule_synth_telemetry.optimizer_stats.mip1_nodes +
              rule_synth_telemetry.optimizer_stats.mip2_nodes +
-             rule_synth_telemetry.optimizer_stats.mip3_nodes)
+             rule_synth_telemetry.optimizer_stats.mip3_nodes +
+             rule_synth_telemetry.optimizer_stats.mip4_nodes)
          << " synthesized_rules " << result.model.rules.size()
          << " synthesized_literals " << count_model_literals(result.model)
          << " synthesized_depth " << max_model_rule_literals(result.model)

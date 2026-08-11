@@ -1,5 +1,6 @@
 #include "cli_options.hpp"
 
+#include <cmath>
 #include <iostream>
 
 #include "../../extern/CLI11/CLI11.hpp"
@@ -30,6 +31,11 @@ void print_usage(const char* prog) {
                " [--rule-opt-max-literals N] [--rule-cover-max-terms N]"
                " [--rule-cover-third-objective none|unique-inverters]"
                " [--rule-cover-phase3-timeout-ms N]"
+               " [--rule-cover-fourth-objective none|logic-risk]"
+               " [--rule-cover-logic-risk-unique-weight X]"
+               " [--rule-cover-logic-risk-fanout-weight X]"
+               " [--rule-cover-logic-risk-timing-weight X]"
+               " [--rule-cover-phase4-timeout-ms N]"
                " [--rule-formal-refine] [--rule-formal-timeout-ms N]"
                " [--rule-formal-max-rounds N] [--rule-formal-cex-batch N]"
                " [--force-split] [--no-strict] [--no-virtual]\n";
@@ -100,6 +106,27 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
       app.add_option("--rule-cover-phase3-timeout-ms",
                      out->rule_cover_phase3_timeout_ms,
                      "MILP phase-3 wall-clock sub-budget in milliseconds");
+  std::string cover_fourth_objective = "logic-risk";
+  CLI::Option* cover_fourth =
+      app.add_option("--rule-cover-fourth-objective",
+                     cover_fourth_objective,
+                     "MILP fourth objective: none or logic-risk");
+  CLI::Option* cover_unique_weight =
+      app.add_option("--rule-cover-logic-risk-unique-weight",
+                     out->rule_cover_unique_feature_weight,
+                     "MILP distinct feature-tap proxy weight");
+  CLI::Option* cover_fanout_weight =
+      app.add_option("--rule-cover-logic-risk-fanout-weight",
+                     out->rule_cover_fanout_weight,
+                     "MILP base-fanout load proxy weight");
+  CLI::Option* cover_timing_weight =
+      app.add_option("--rule-cover-logic-risk-timing-weight",
+                     out->rule_cover_timing_weight,
+                     "MILP unit-level depth proxy weight");
+  CLI::Option* cover_phase4_timeout =
+      app.add_option("--rule-cover-phase4-timeout-ms",
+                     out->rule_cover_phase4_timeout_ms,
+                     "MILP phase-4 wall-clock sub-budget in milliseconds");
   CLI::Option* formal_refine =
       app.add_flag("--rule-formal-refine", out->rule_formal_refine,
                    "Refine learned rules with SAT FN/FP counterexamples");
@@ -219,6 +246,64 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
   }
   out->rule_cover_minimize_inverters =
       cover_third_objective == "unique-inverters";
+  if (cover_fourth_objective != "none" &&
+      cover_fourth_objective != "logic-risk") {
+    if (error) {
+      *error = "Invalid --rule-cover-fourth-objective '" +
+               cover_fourth_objective + "' (expected none or logic-risk)";
+    }
+    return ParseStatus::error;
+  }
+  const bool fourth_knob_used =
+      cover_unique_weight->count() || cover_fanout_weight->count() ||
+      cover_timing_weight->count() || cover_phase4_timeout->count();
+  if (out->rule_method != RuleMethod::milp_cover &&
+      (cover_fourth->count() || fourth_knob_used)) {
+    if (error) {
+      *error =
+          "rule-cover fourth-objective options require --rule-method "
+          "milp-cover";
+    }
+    return ParseStatus::error;
+  }
+  out->rule_cover_logic_risk_proxy =
+      cover_fourth_objective == "logic-risk";
+  if (!out->rule_cover_minimize_inverters) {
+    if ((cover_fourth->count() && out->rule_cover_logic_risk_proxy) ||
+        fourth_knob_used) {
+      if (error) {
+        *error =
+            "logic-risk fourth objective requires the unique-inverters "
+            "third objective";
+      }
+      return ParseStatus::error;
+    }
+    // An implicit default must not turn an explicit phase-3 ablation into an
+    // invalid configuration.
+    out->rule_cover_logic_risk_proxy = false;
+  }
+  if (!out->rule_cover_logic_risk_proxy && fourth_knob_used) {
+    if (error) {
+      *error =
+          "logic-risk weights and phase-4 timeout require "
+          "--rule-cover-fourth-objective logic-risk";
+    }
+    return ParseStatus::error;
+  }
+  const double unique_weight = out->rule_cover_unique_feature_weight;
+  const double fanout_weight = out->rule_cover_fanout_weight;
+  const double timing_weight = out->rule_cover_timing_weight;
+  if (!std::isfinite(unique_weight) || !std::isfinite(fanout_weight) ||
+      !std::isfinite(timing_weight) || unique_weight < 0.0 ||
+      fanout_weight < 0.0 || timing_weight < 0.0) {
+    if (error) *error = "logic-risk weights must be finite and non-negative";
+    return ParseStatus::error;
+  }
+  if (out->rule_cover_logic_risk_proxy && unique_weight == 0.0 &&
+      fanout_weight == 0.0 && timing_weight == 0.0) {
+    if (error) *error = "at least one logic-risk weight must be positive";
+    return ParseStatus::error;
+  }
   const bool formal_option_used =
       formal_refine->count() || formal_timeout->count() ||
       formal_rounds->count() || formal_batch->count();

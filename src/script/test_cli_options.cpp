@@ -78,8 +78,28 @@ bool expect_milp_options(std::vector<std::string> args) {
       options.rule_opt_max_literals != 4 ||
       options.rule_cover_max_terms != 123 ||
       options.rule_cover_minimize_inverters ||
+      options.rule_cover_logic_risk_proxy ||
       options.rule_cover_phase3_timeout_ms != 0) {
     std::cerr << "milp option parse failed: status="
+              << static_cast<int>(status) << " error=" << error << "\n";
+    return false;
+  }
+  return true;
+}
+
+bool expect_logic_risk_options(std::vector<std::string> args) {
+  AppOptions options;
+  std::string error;
+  const ParseStatus status = parse(std::move(args), &options, &error);
+  if (status != ParseStatus::ok ||
+      options.rule_method != RuleMethod::milp_cover ||
+      !options.rule_cover_minimize_inverters ||
+      !options.rule_cover_logic_risk_proxy ||
+      options.rule_cover_unique_feature_weight != 1.0 ||
+      options.rule_cover_fanout_weight != 2.0 ||
+      options.rule_cover_timing_weight != 3.0 ||
+      options.rule_cover_phase4_timeout_ms != 0) {
+    std::cerr << "logic-risk option parse failed: status="
               << static_cast<int>(status) << " error=" << error << "\n";
     return false;
   }
@@ -165,6 +185,17 @@ int main() {
                           "--rule-cover-phase3-timeout-ms", "0"});
   ok &= expect_milp_options(configured_milp);
 
+  auto configured_logic_risk = positional;
+  configured_logic_risk.insert(
+      configured_logic_risk.end(),
+      {"--rule-method", "milp-cover",
+       "--rule-cover-fourth-objective", "logic-risk",
+       "--rule-cover-logic-risk-unique-weight", "1",
+       "--rule-cover-logic-risk-fanout-weight", "2",
+       "--rule-cover-logic-risk-timing-weight", "3",
+       "--rule-cover-phase4-timeout-ms", "0"});
+  ok &= expect_logic_risk_options(configured_logic_risk);
+
   auto formal_z3 = positional;
   formal_z3.insert(formal_z3.end(),
                    {"--rule-method", "z3-pb",
@@ -236,6 +267,52 @@ int main() {
   ok &= expect_error(invalid_cover_cost,
                      "expected none or unique-inverters",
                      "invalid cover cost");
+
+  auto invalid_fourth = positional;
+  invalid_fourth.insert(
+      invalid_fourth.end(),
+      {"--rule-method", "milp-cover",
+       "--rule-cover-fourth-objective", "physical-sta"});
+  ok &= expect_error(invalid_fourth, "expected none or logic-risk",
+                     "invalid fourth objective");
+
+  auto fourth_with_z3 = positional;
+  fourth_with_z3.insert(
+      fourth_with_z3.end(),
+      {"--rule-method", "z3-pb",
+       "--rule-cover-fourth-objective", "none"});
+  ok &= expect_error(fourth_with_z3, "require --rule-method milp-cover",
+                     "fourth objective with z3-pb");
+
+  auto fourth_without_third = positional;
+  fourth_without_third.insert(
+      fourth_without_third.end(),
+      {"--rule-method", "milp-cover",
+       "--rule-cover-third-objective", "none",
+       "--rule-cover-fourth-objective", "logic-risk"});
+  ok &= expect_error(fourth_without_third,
+                     "requires the unique-inverters third objective",
+                     "logic-risk without inverter objective");
+
+  auto negative_logic_weight = positional;
+  negative_logic_weight.insert(
+      negative_logic_weight.end(),
+      {"--rule-method", "milp-cover",
+       "--rule-cover-logic-risk-fanout-weight", "-1"});
+  ok &= expect_error(negative_logic_weight,
+                     "finite and non-negative",
+                     "negative logic-risk weight");
+
+  auto zero_logic_weights = positional;
+  zero_logic_weights.insert(
+      zero_logic_weights.end(),
+      {"--rule-method", "milp-cover",
+       "--rule-cover-logic-risk-unique-weight", "0",
+       "--rule-cover-logic-risk-fanout-weight", "0",
+       "--rule-cover-logic-risk-timing-weight", "0"});
+  ok &= expect_error(zero_logic_weights,
+                     "at least one logic-risk weight",
+                     "zero logic-risk weights");
 
   auto z3_option_with_milp = positional;
   z3_option_with_milp.insert(

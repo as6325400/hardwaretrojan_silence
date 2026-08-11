@@ -152,12 +152,18 @@ check_method milp-cover milp-cover --rule-method milp-cover
 [[ "$(summary_value cover_rules_optimal "$test_tmp/milp-cover.out")" == "1" ]]
 [[ "$(summary_value cover_literals_optimal "$test_tmp/milp-cover.out")" == "1" ]]
 [[ "$(summary_value cover_hardware_optimal "$test_tmp/milp-cover.out")" == "1" ]]
+[[ "$(summary_value cover_logic_risk_optimal "$test_tmp/milp-cover.out")" == "1" ]]
 [[ "$(summary_value cover_third_objective "$test_tmp/milp-cover.out")" == \
     "unique_inverters" ]]
+[[ "$(summary_value cover_fourth_objective "$test_tmp/milp-cover.out")" == \
+    "logic_risk_proxy" ]]
+[[ "$(summary_value cover_logic_risk_context "$test_tmp/milp-cover.out")" == "1" ]]
 [[ "$(summary_value mip1_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
 [[ "$(summary_value mip2_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
 [[ "$(summary_value lp3_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
 [[ "$(summary_value mip3_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
+[[ "$(summary_value lp4_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
+[[ "$(summary_value mip4_status "$test_tmp/milp-cover.out")" == "Optimal" ]]
 [[ "$(summary_value cover_inverters_after "$test_tmp/milp-cover.out")" -le \
     "$(summary_value cover_inverters_before "$test_tmp/milp-cover.out")" ]]
 
@@ -166,6 +172,16 @@ check_method milp-cover-formal milp-cover --rule-method milp-cover \
 [[ "$(grep -c '^rule_miter_summary ' "$test_tmp/milp-cover-formal.out")" -ge 1 ]]
 [[ "$(miter_value status "$test_tmp/milp-cover-formal.out")" == "proved" ]]
 [[ "$(miter_value proved "$test_tmp/milp-cover-formal.out")" == "1" ]]
+
+check_method milp-cover-phase4-timeout milp-cover --rule-method milp-cover \
+    --rule-cover-phase4-timeout-ms 0
+[[ "$(summary_value optimizer_status "$test_tmp/milp-cover-phase4-timeout.out")" == \
+    "accepted_phase4_timeout" ]]
+[[ "$(summary_value optimizer_accepted "$test_tmp/milp-cover-phase4-timeout.out")" == "1" ]]
+[[ "$(summary_value optimizer_optimal "$test_tmp/milp-cover-phase4-timeout.out")" == "0" ]]
+[[ "$(summary_value cover_hardware_optimal "$test_tmp/milp-cover-phase4-timeout.out")" == "1" ]]
+[[ "$(summary_value cover_logic_risk_optimal "$test_tmp/milp-cover-phase4-timeout.out")" == "0" ]]
+[[ "$(summary_value cover_phase4_timeout_fallback "$test_tmp/milp-cover-phase4-timeout.out")" == "1" ]]
 
 check_method milp-cover-timeout milp-cover --rule-method milp-cover \
     --rule-opt-timeout-ms 0

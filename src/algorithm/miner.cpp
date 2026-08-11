@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <numeric>
+#include <queue>
 #include <random>
 #include <sys/sysinfo.h>
 
@@ -57,6 +59,142 @@ std::vector<int> build_feature_nodes(const circuit& trojan,
     nodes.insert(nodes.end(), pi_indices.begin(), pi_indices.end());
   }
   return nodes;
+}
+
+bool build_rule_cover_cost_context(
+    const circuit& net,
+    const std::vector<int>& feature_nodes,
+    std::size_t matrix_feature_count,
+    RuleCoverCostContext* context,
+    std::string* reason) {
+  if (!context) return false;
+  *context = RuleCoverCostContext{};
+  if (feature_nodes.size() != matrix_feature_count) {
+    if (reason) {
+      *reason = "feature-node count does not match packed feature matrix";
+    }
+    return false;
+  }
+
+  const std::size_t node_count = net.node_count();
+  std::vector<std::size_t> indegree(node_count, 0);
+  std::vector<std::size_t> fanout(node_count, 0);
+  std::vector<std::size_t> arrival(node_count, 0);
+  std::vector<std::vector<int>> consumers(node_count);
+  std::size_t gate_count = 0;
+
+  for (std::size_t node = 0; node < node_count; ++node) {
+    const cell& current = net.get_cell(static_cast<int>(node));
+    if (current.ctype != CType::GATE) continue;
+    gate_count += 1;
+    if (current.inputs.empty()) {
+      if (reason) *reason = "gate has no inputs: " + net.node_name(node);
+      return false;
+    }
+    for (int input : current.inputs) {
+      if (input < 0 || static_cast<std::size_t>(input) >= node_count) {
+        if (reason) *reason = "gate input index is out of range";
+        return false;
+      }
+      const cell& input_cell = net.get_cell(input);
+      if (input_cell.ctype == CType::UNDEF) {
+        if (reason) *reason = "gate input references an undefined node";
+        return false;
+      }
+      const std::size_t input_index = static_cast<std::size_t>(input);
+      if (fanout[input_index] == std::numeric_limits<std::size_t>::max()) {
+        if (reason) *reason = "feature fanout count overflows";
+        return false;
+      }
+      fanout[input_index] += 1;
+      if (input_cell.ctype == CType::GATE) {
+        indegree[node] += 1;
+        consumers[input_index].push_back(static_cast<int>(node));
+      }
+    }
+  }
+  // Treat each primary-output port as one additional sink.  Otherwise a gate
+  // driving only a PO would appear to have zero load and be artificially
+  // favored by the routing/fanout proxy.
+  for (int output : net.po_indices()) {
+    if (output < 0 || static_cast<std::size_t>(output) >= node_count) {
+      if (reason) *reason = "primary output index is out of range";
+      return false;
+    }
+    const std::size_t output_index = static_cast<std::size_t>(output);
+    if (fanout[output_index] == std::numeric_limits<std::size_t>::max()) {
+      if (reason) *reason = "primary output fanout count overflows";
+      return false;
+    }
+    fanout[output_index] += 1;
+  }
+
+  std::queue<int> ready;
+  for (std::size_t node = 0; node < node_count; ++node) {
+    if (net.get_cell(static_cast<int>(node)).ctype == CType::GATE &&
+        indegree[node] == 0) {
+      ready.push(static_cast<int>(node));
+    }
+  }
+  std::size_t processed = 0;
+  while (!ready.empty()) {
+    const int gate = ready.front();
+    ready.pop();
+    const std::size_t gate_index = static_cast<std::size_t>(gate);
+    std::size_t maximum_input_arrival = 0;
+    for (int input : net.get_cell(gate).inputs) {
+      maximum_input_arrival = std::max(
+          maximum_input_arrival, arrival[static_cast<std::size_t>(input)]);
+    }
+    if (maximum_input_arrival ==
+        std::numeric_limits<std::size_t>::max()) {
+      if (reason) *reason = "feature arrival level overflows";
+      return false;
+    }
+    arrival[gate_index] = maximum_input_arrival + 1;
+    processed += 1;
+    for (int consumer : consumers[gate_index]) {
+      const std::size_t consumer_index =
+          static_cast<std::size_t>(consumer);
+      if (indegree[consumer_index] == 0) {
+        if (reason) *reason = "invalid feature fanout indegree";
+        return false;
+      }
+      indegree[consumer_index] -= 1;
+      if (indegree[consumer_index] == 0) ready.push(consumer);
+    }
+  }
+  if (processed != gate_count) {
+    if (reason) *reason = "circuit contains a combinational cycle";
+    return false;
+  }
+
+  context->features.reserve(feature_nodes.size());
+  for (int feature_node : feature_nodes) {
+    if (feature_node < 0 ||
+        static_cast<std::size_t>(feature_node) >= node_count ||
+        net.get_cell(feature_node).ctype == CType::UNDEF) {
+      if (reason) *reason = "rule feature node is invalid";
+      *context = RuleCoverCostContext{};
+      return false;
+    }
+    const std::size_t index = static_cast<std::size_t>(feature_node);
+    context->features.push_back(
+        RuleCoverFeatureMetric{fanout[index], arrival[index]});
+  }
+  for (int output : net.po_indices()) {
+    context->circuit_level = std::max(
+        context->circuit_level, arrival[static_cast<std::size_t>(output)]);
+  }
+  if (net.po_indices().empty()) {
+    for (std::size_t node = 0; node < node_count; ++node) {
+      if (net.get_cell(static_cast<int>(node)).ctype == CType::GATE) {
+        context->circuit_level =
+            std::max(context->circuit_level, arrival[node]);
+      }
+    }
+  }
+  return true;
 }
 
 using FeatureWord = PackedFeatureMatrix::word_t;
@@ -1449,6 +1587,22 @@ bool run_mining_loop(const circuit& golden,
   result->hard_added = 0;
   result->rounds_used = 0;
 
+  RuleCoverCostContext cover_cost_context;
+  const RuleCoverCostContext* cover_cost_context_ptr = nullptr;
+  if (optimizer_backend == MiningRuleOptimizer::milp_cover &&
+      rule_optimizer_options &&
+      rule_optimizer_options->cover_logic_risk_proxy) {
+    std::string context_reason;
+    if (build_rule_cover_cost_context(
+            trojan, feature_nodes, data->features.feature_count,
+            &cover_cost_context, &context_reason)) {
+      cover_cost_context_ptr = &cover_cost_context;
+    } else {
+      std::cerr << "rule_cover_cost_context unavailable: "
+                << context_reason << "\n";
+    }
+  }
+
   for (std::size_t round = 0; round < total_rounds; ++round) {
     if (!train_model(*data,
                      options,
@@ -1510,7 +1664,8 @@ bool run_mining_loop(const circuit& golden,
             data->labels,
             raw_dt_candidate_features,
             result->model,
-            effective_options);
+            effective_options,
+            cover_cost_context_ptr);
       } else {
         optimized = optimize_dnf_rules_z3_pb(
             data->features,

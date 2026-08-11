@@ -48,6 +48,14 @@ struct AppOptions {
   bool rule_cover_minimize_inverters = true;
   std::uint64_t rule_cover_phase3_timeout_ms =
       std::numeric_limits<std::uint64_t>::max();
+  // Fourth lexicographic MILP objective.  This is a graph-level structural
+  // risk proxy, not physical area or static timing analysis.
+  bool rule_cover_logic_risk_proxy = true;
+  double rule_cover_unique_feature_weight = 0.25;
+  double rule_cover_fanout_weight = 0.25;
+  double rule_cover_timing_weight = 0.50;
+  std::uint64_t rule_cover_phase4_timeout_ms =
+      std::numeric_limits<std::uint64_t>::max();
   bool rule_formal_refine = false;
   std::uint64_t rule_formal_timeout_ms = 10000;
   std::size_t rule_formal_max_rounds = 5;
