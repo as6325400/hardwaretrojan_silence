@@ -1219,6 +1219,8 @@ std::vector<LiteralPatchCutCandidate> collect_literal_patch_cut_candidates(
 bool try_verified_literal_patch_cut(const circuit& golden,
                                     const circuit& base,
                                     const PatternStats& stats,
+                                    const std::vector<std::vector<int>>&
+                                        protected_nontrigger_patterns,
                                     const MiningResult& result,
                                     circuit* patched_out,
                                     int* selected_node,
@@ -1302,8 +1304,36 @@ bool try_verified_literal_patch_cut(const circuit& golden,
       cerr << "\n";
       continue;
     }
+
+    // A direct literal cut is unconditional: unlike the learned DNF, it is
+    // not guarded by the trigger predicate.  Preserve every false-positive
+    // counterexample learned from formal refinement or patch CEC before
+    // accepting the cut.  Keeping this check separate from the trigger set
+    // also makes the reported mismatch index unambiguous.
+    if (!protected_nontrigger_patterns.empty()) {
+      mismatch_index = 0;
+      verify_error.clear();
+      const bool negatives_verified = verify_patch_groundtruth(
+          golden, trial, protected_nontrigger_patterns, &mismatch_index,
+          &verify_error);
+      if (!negatives_verified) {
+        const double verify_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - verify_start).count();
+        cerr << "[TIMING]   literal_patch_cut_verify: "
+             << verify_ms << " ms (FAIL)\n";
+        cerr << "literal_patch_cut_try "
+             << base.node_name(cand.node_idx)
+             << " forced " << cand.forced_value
+             << " failed: protected non-trigger " << verify_error
+             << " pattern " << mismatch_index << "\n";
+        continue;
+      }
+    }
     cerr << "[TIMING]   final_verify: "
-         << verify_ms << " ms (PASS)\n";
+         << std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - verify_start).count()
+         << " ms (PASS)\n";
 
     std::size_t trial_area = 0;
     std::size_t trial_level = 0;
@@ -2987,6 +3017,7 @@ int main(int argc, char** argv) {
       if (try_verified_literal_patch_cut(golden,
                                          working_trojan,
                                          stats,
+                                         extra_nontrigger_patterns,
                                          result,
                                          &literal_cut,
                                          &literal_cut_node,
