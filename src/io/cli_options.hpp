@@ -48,6 +48,10 @@ struct AppOptions {
   bool rule_cover_minimize_inverters = true;
   std::uint64_t rule_cover_phase3_timeout_ms =
       std::numeric_limits<std::uint64_t>::max();
+  bool rule_formal_refine = false;
+  std::uint64_t rule_formal_timeout_ms = 10000;
+  std::size_t rule_formal_max_rounds = 5;
+  std::size_t rule_formal_cex_batch = 5;
 };
 
 ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::string* error); // Parse CLI args into AppOptions.
