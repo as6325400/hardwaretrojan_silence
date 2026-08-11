@@ -32,8 +32,20 @@ Golden + Trojan .bench
      └─ bounded-DNF 0-1 PB optimization over the finite training matrix
         │
         ▼
-  Rule simplification and patch selection
-  ├─ verified common-literal cut / single-literal trigger kill
+  Rule simplification and verified direct-literal cut selection
+        │
+        ▼
+  Optional SAT rule refinement (`--rule-formal-refine`, z3-pb only)
+  ├─ direct literal cut: explicitly skipped (the DNF is bypassed)
+  └─ conditional DNF:
+     ├─ E(x) = OR of Golden/Trojan PO mismatches
+     ├─ R(x) = learned DNF rule
+     ├─ find FN: E(x) AND NOT R(x), or FP: NOT E(x) AND R(x)
+     └─ feed up to 5 circuit-derived counterexamples back and rebuild
+        │
+        ▼
+  Patch application
+  ├─ direct literal cut / single-literal trigger kill
   ├─ merge multi-rule match logic when needed
   └─ payload fix (Z3-guided node selection + rule-controlled patch)
         │
@@ -124,8 +136,14 @@ bin/main <golden.bench> <trojan.bench> <groundtruth.json> [output.bench] [option
 | `--rule-opt-cex-batch N` | 5 | Misclassified finite-training signatures added per CEGIS check |
 | `--rule-opt-max-clauses N` | 0 | DNF clause cap; `0` derives it from the DT baseline rule count, while an explicit nonzero cap is honored |
 | `--rule-opt-max-literals N` | 10 | Literals per DNF clause; `0` uses the largest baseline clause |
+| `--rule-formal-refine` | off | Use a SAT rule miter to feed whole-input FN/FP counterexamples back into `z3-pb` |
+| `--rule-formal-timeout-ms N` | 10000 | Soft wall-clock budget for each SAT rule-miter check |
+| `--rule-formal-max-rounds N` | 5 | Maximum rule rebuilds caused by SAT counterexamples |
+| `--rule-formal-cex-batch N` | 5 | Counterexamples returned per check; range 1–5 |
 
 `z3-pb` changes rule synthesis only; downstream payload-node optimization and patch application are shared with the other methods. It uses Z3 Optimize as a pseudo-Boolean/MaxSMT backend. Its Boolean formulation is 0-1 ILP-equivalent, but it is not a generic MILP solver and does not construct or expose an LP relaxation, so there is no reported MILP gap. “Optimal” and “verified” telemetry apply only to the bounded candidate set and finite training matrix. Whole-input correctness is established by ABC CEC.
+
+With `--rule-formal-refine`, the learned rule is additionally compared against the circuit-derived observable-error predicate over the full PI space. SAT witnesses are labeled from the Golden/Trojan miter itself—no ground-truth membership lookup is used for this feedback—and are accumulated as positive or protected negative training rows. `FN/FP UNSAT` proves `E(x) ↔ R(x)` for that conditional rule. A verified direct literal cut bypasses the DNF, so its rule miter is reported as `skipped`; the independent external ABC CEC remains the final patch-correctness authority in every case.
 
 `rule_synth_summary synthesized_*` records the model immediately after rule synthesis. `rule_apply_summary` separately records the post-signature/applied mechanism and its effective rule/literal/depth counts; a verified direct literal cut is identified with `rule_model_used=0` and an effective `1/1/1` condition.
 
@@ -202,6 +220,8 @@ python3 scripts/compare_rule_methods.py \
 The runner enforces `--jobs 1` because methods for one case can otherwise race on a shared intermediate rule-merge netlist. It pins `ABC_BIN` to the fingerprinted ABC executable, requires the independent external CEC marker and a zero exit status, and rechecks all tool/input identities after each run. `wall_ms` covers execution; the separate `provenance_verification_ms` field records the post-run identity check.
 
 Artifacts include per-method logs, patched netlists, JSON records, aggregate CSV/JSON, pre-run fingerprints with post-run mutation checks, and the external ABC CEC result. The tracked 28-row projection is [`experiments/rule_method_ab_2026-08-11/paired_results.csv`](experiments/rule_method_ab_2026-08-11/paired_results.csv). See [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md) for the v2 comparison and limitations.
+
+The full 482-case Z3-PB benchmark and the same-binary formal OFF/ON ablation are tracked under [`experiments/z3_pb_v0_vs_v0_v5_2026-08-12`](experiments/z3_pb_v0_vs_v0_v5_2026-08-12/) and [`experiments/z3_pb_formal_ab_v0_full_2026-08-12`](experiments/z3_pb_formal_ab_v0_full_2026-08-12/). The latter keeps external ABC CEC as the PASS criterion and separates the formal flag's causal effect from the other backported correctness fixes. See [`Z3_PB_FORMAL_REFINEMENT_REPORT.md`](Z3_PB_FORMAL_REFINEMENT_REPORT.md) for the presentation-ready combined report.
 
 ## ABC Setup
 

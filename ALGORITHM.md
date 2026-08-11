@@ -142,6 +142,26 @@ Z3 Optimize 以 lexicographic objectives 先最小化 active clauses，再最小
 
 這是 Z3 Optimize 的 **0–1 pseudo-Boolean / MaxSMT formulation**，在此 Boolean model 上可稱 0–1 ILP-equivalent；它不是 generic MILP solver，也不建立或公開 LP relaxation，因此沒有可報告的 MILP optimality gap。`optimizer_optimal=1` 與 `optimizer_verified=1` 只適用於目前 candidate union、clause/literal bounds 與有限 training matrix，不代表全部 PI input exact。全輸入功能正確性仍須由 ABC CEC 證明。
 
+#### 3.D Optional SAT rule-miter refinement
+
+`--rule-formal-refine` 只適用於 `z3-pb`。它在 rule 後處理完成、conditional patch 建立前，以同一組具名 PI 同時編碼 Golden 與 Trojan circuit：
+
+```
+E(x) = OR_po (Golden_po(x) XOR Trojan_po(x))
+R(x) = OR_k AND_literal rule[k](x)
+
+false negative query = E(x) AND NOT R(x)
+false positive query = NOT E(x) AND R(x)
+```
+
+- FN SAT witness 表示 circuit 確實有 observable error，但目前 DNF 漏掉，回灌為 positive row。
+- FP SAT witness 表示 DNF 成立但 circuit 沒有 observable error，回灌為 protected negative row。
+- 每次最多回傳 `--rule-formal-cex-batch` 筆，累積後重跑目前的 Z3-PB synthesis；最多 `--rule-formal-max-rounds` 次。
+- 只有 FN 與 FP 兩個 query 都是 UNSAT，才能標記該 conditional rule 的 `E↔R` proved。timeout、unknown 或仍有 counterexample 都不是 proof。
+- 每個 SAT model 都會再由 scalar Golden/Trojan simulation 與 DNF evaluation 驗證方向；PI/PO 依名稱對齊，而不是假設宣告順序相同。
+
+這條回灌路徑的 label 完全由 circuit miter 的 `E(x)` 決定，不以 ground-truth 檔案判斷 witness membership。它與 Z3-PB 內部只掃 finite training signatures 的 CEGIS 不同：rule miter 查的是整個 PI 空間。若後續採 verified direct literal cut，conditional DNF 不再是實際 repair predicate，因此輸出 `rule_miter_summary status skipped reason literal_patch_cut`；最終 patched circuit 是否正確仍由 ABC CEC 決定。
+
 ### 4. Final Mining 與 rule 後處理
 
 三種 rule methods 都會建立 final training matrix 與至少一棵 DT；`z3-pb` 再以同一 matrix 重合成 bounded DNF。以下資料結構三種方法共用。
@@ -940,6 +960,10 @@ CEC Retry Loop（最多 5 輪）：
 | `--rule-opt-cex-batch N` | 5 | 每次加入的有限-training counterexample signatures 上限 |
 | `--rule-opt-max-clauses N` | 0 | DNF clause cap；0 由 baseline rule count 推導，明確非零值不再被 baseline count 截斷 |
 | `--rule-opt-max-literals N` | 10 | 每條 clause literal cap；0 使用 baseline 最大 clause 長度 |
+| `--rule-formal-refine` | off | 啟用 full-PI SAT rule miter，將 FN/FP counterexamples 回灌到 Z3-PB |
+| `--rule-formal-timeout-ms N` | 10000 | 每次 rule-miter 的 soft wall-clock budget |
+| `--rule-formal-max-rounds N` | 5 | SAT counterexample 造成的最大 rebuild 次數 |
+| `--rule-formal-cex-batch N` | 5 | 每次 miter 最多回傳的 counterexamples，範圍 1–5 |
 
 ---
 
@@ -965,5 +989,7 @@ python3 scripts/compare_rule_methods.py \
 runner 強制 `--jobs 1`，避免同 case 的兩種方法競爭共用 rule-merge 中間檔；非 1 的值會在寫 artifact 前被拒絕。它把 internal CEC 的 `ABC_BIN` 固定到已 fingerprint 的 ABC，external CEC 同時要求 equivalence marker 與 return code 0。每次 run 完成後會重查所有 tool/input identities；`wall_ms` 記錄 execution，而額外的 `provenance_verification_ms` 記錄 post-run identity check。
 
 runner 會保存 stdout、stderr、patched bench、external CEC logs、JSON record，以及帶 pre-run fingerprints 與 post-run mutation check 的 aggregate CSV/JSON。可追蹤的 28-row 投影在 [`experiments/rule_method_ab_2026-08-11/paired_results.csv`](experiments/rule_method_ab_2026-08-11/paired_results.csv)；完整結果、commit 鏈、artifact SHA 與限制見 [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md)。
+
+完整 V0 可執行母體（482 cases）的純 Z3-PB 對 v0–v5 結果在 [`experiments/z3_pb_v0_vs_v0_v5_2026-08-12`](experiments/z3_pb_v0_vs_v0_v5_2026-08-12/)；同一 frozen binary 下 formal OFF/ON 的 clean ablation 在 [`experiments/z3_pb_formal_ab_v0_full_2026-08-12`](experiments/z3_pb_formal_ab_v0_full_2026-08-12/)。整合說明見 [`Z3_PB_FORMAL_REFINEMENT_REPORT.md`](Z3_PB_FORMAL_REFINEMENT_REPORT.md)。報告以 external ABC CEC 為 success authority，並分開呈現 finite-training optimal、rule-miter proved 與 direct-cut skipped 三種語義。
 
 面積比較應採 runner 對最終 patched bench 重新量測的 `actual_area_delta_trojan` / `actual_area_delta_golden`。main 的 `reported_area_delta` 是流程內摘要；正式 v2 hard artifacts 的 8 個 multi-rule runs 中，它都低估了包含 rule-match logic 的最終面積增量。
