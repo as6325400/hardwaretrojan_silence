@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -31,13 +32,13 @@ import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
-RUNNER_SCHEMA_VERSION = "rule-method-ab-run/2"
+RUNNER_SCHEMA_VERSION = "rule-method-ab-run/3"
 MANIFEST_SCHEMA_VERSION = "rule-method-ab-cases/1"
-SUMMARY_SCHEMA_VERSION = "rule-method-ab-summary/2"
+SUMMARY_SCHEMA_VERSION = "rule-method-ab-summary/3"
 DEFAULT_MANIFEST = Path("configs/rule_method_ab_cases.json")
 DEFAULT_OUTPUT_ROOT = Path("validation/rule_method_ab")
 DEFAULT_METHODS = ("vn-retrain", "z3-pb")
-SUPPORTED_METHODS = ("vn-retrain", "dt", "z3-pb")
+SUPPORTED_METHODS = ("vn-retrain", "dt", "z3-pb", "milp-cover")
 
 
 class RunnerError(RuntimeError):
@@ -169,6 +170,21 @@ def _positive_number(value: Any, label: str) -> float:
     if parsed <= 0:
         raise RunnerError(f"{label} must be a positive number")
     return parsed
+
+
+def _nonnegative_finite_number(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RunnerError(f"{label} must be a finite non-negative number")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        raise RunnerError(f"{label} must be a finite non-negative number")
+    return parsed
+
+
+def _nonnegative_integer(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RunnerError(f"{label} must be a non-negative integer")
+    return value
 
 
 def load_manifest(
@@ -353,6 +369,101 @@ def parse_rule_apply_summaries(stdout: str) -> List[Dict[str, Any]]:
     return summaries
 
 
+def parse_rule_miter_summaries(stdout: str) -> List[Dict[str, Any]]:
+    """Parse every order-independent rule_miter_summary line."""
+    summaries: List[Dict[str, Any]] = []
+    for line_number, line in enumerate(stdout.splitlines(), start=1):
+        if not line.startswith("rule_miter_summary "):
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError as exc:
+            summaries.append(
+                {"_raw": line, "_line": line_number, "_parse_error": str(exc)}
+            )
+            continue
+        parsed: Dict[str, Any] = {"_raw": line, "_line": line_number}
+        tail = tokens[1:]
+        if len(tail) % 2:
+            parsed["_parse_error"] = "odd number of key/value tokens"
+            parsed["_unparsed_tail"] = tail[-1]
+            tail = tail[:-1]
+        for index in range(0, len(tail), 2):
+            parsed[tail[index]] = _parse_scalar(tail[index + 1])
+        summaries.append(parsed)
+    return summaries
+
+
+def _associate_rule_build_attempts(
+    synth_summaries: Sequence[Mapping[str, Any]],
+    apply_summaries: Sequence[Mapping[str, Any]],
+    miter_summaries: Sequence[Mapping[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
+    """Join telemetry by its stable build ID instead of output position."""
+    groups: Dict[Any, Dict[str, Any]] = {}
+    unlinked: Dict[str, List[Dict[str, Any]]] = {
+        "rule_synth_summaries": [],
+        "rule_apply_summaries": [],
+        "rule_miter_summaries": [],
+    }
+    collections = (
+        ("rule_synth_summaries", synth_summaries),
+        ("rule_apply_summaries", apply_summaries),
+        ("rule_miter_summaries", miter_summaries),
+    )
+    for collection_name, summaries in collections:
+        for raw_summary in summaries:
+            summary = dict(raw_summary)
+            attempt = summary.get("rule_build_attempt")
+            if isinstance(attempt, bool) or not isinstance(attempt, (int, str)):
+                unlinked[collection_name].append(summary)
+                continue
+            group = groups.setdefault(
+                attempt,
+                {
+                    "rule_build_attempt": attempt,
+                    "rule_synth_summaries": [],
+                    "rule_apply_summaries": [],
+                    "rule_miter_summaries": [],
+                },
+            )
+            group[collection_name].append(summary)
+
+    def attempt_sort_key(value: Any) -> Tuple[int, Any]:
+        if isinstance(value, int):
+            return (0, value)
+        return (1, str(value))
+
+    attempts = [groups[key] for key in sorted(groups, key=attempt_sort_key)]
+    return attempts, unlinked
+
+
+_NON_ADDITIVE_SUMMARY_KEYS = frozenset(
+    {
+        # Stable identifiers and categorical literal metadata are useful in
+        # first/last snapshots, but adding them across attempts has no metric
+        # interpretation.
+        "cec_attempt",
+        "synth_pass",
+        "rule_build_attempt",
+        "literal_node",
+        "literal_expected",
+        "literal_forced",
+        # This is a cumulative counter emitted on every miter summary.  Its
+        # final value is the number of refinement rounds; summing snapshots
+        # would double-count earlier rounds.
+        "refine_rounds",
+        # Optimizer configuration is repeated on every synthesis summary.
+        # Keep it in first/last and the raw summaries, not numeric_sum.
+        "cover_phase3_timeout_ms",
+        "cover_phase4_timeout_ms",
+        "cover_logic_risk_unique_weight",
+        "cover_logic_risk_fanout_weight",
+        "cover_logic_risk_timing_weight",
+    }
+)
+
+
 def _summary_aggregates(
     summaries: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
@@ -361,26 +472,32 @@ def _summary_aggregates(
     ignored = {"_raw", "_line", "_parse_error", "_unparsed_tail"}
     first = {key: value for key, value in summaries[0].items() if key not in ignored}
     last = {key: value for key, value in summaries[-1].items() if key not in ignored}
-    sums: Dict[str, float] = {}
-    all_integral: Dict[str, bool] = {}
+    sums: Dict[str, Any] = {}
     for summary in summaries:
         for key, value in summary.items():
-            if key in ignored or isinstance(value, bool) or not isinstance(
-                value, (int, float)
+            if (
+                key in ignored
+                or key in _NON_ADDITIVE_SUMMARY_KEYS
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
             ):
                 continue
-            sums[key] = sums.get(key, 0.0) + float(value)
-            all_integral[key] = all_integral.get(key, True) and isinstance(value, int)
-    numeric_sum: Dict[str, Any] = {
-        key: int(value) if all_integral.get(key, False) else value
-        for key, value in sums.items()
-    }
-    return {"first": first, "last": last, "numeric_sum": numeric_sum}
+            if key not in sums:
+                # Do not coerce integers through float: telemetry contains
+                # UINT64_MAX sentinels and Python's int keeps their sums exact.
+                sums[key] = value
+            else:
+                sums[key] += value
+    return {"first": first, "last": last, "numeric_sum": sums}
 
 
 def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
     summaries = parse_rule_synth_summaries(stdout)
     apply_summaries = parse_rule_apply_summaries(stdout)
+    miter_summaries = parse_rule_miter_summaries(stdout)
+    build_attempts, unlinked_summaries = _associate_rule_build_attempts(
+        summaries, apply_summaries, miter_summaries
+    )
     runtime_matches = re.findall(
         r"\[TIMING\]\s+TOTAL:\s+([0-9]+(?:\.[0-9]+)?)\s+ms", stderr
     )
@@ -413,6 +530,12 @@ def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
         "rule_apply_summaries": apply_summaries,
         "rule_apply_aggregates": _summary_aggregates(apply_summaries),
         "rule_apply_summary_count": len(apply_summaries),
+        "rule_miter_summaries": miter_summaries,
+        "rule_miter_aggregates": _summary_aggregates(miter_summaries),
+        "rule_miter_summary_count": len(miter_summaries),
+        "rule_build_attempts": build_attempts,
+        "rule_build_attempt_count": len(build_attempts),
+        "rule_build_unlinked_summaries": unlinked_summaries,
         "runtime_ms": float(runtime_matches[-1]) if runtime_matches else None,
         "cec_rounds": int(cec_matches[-1]) if cec_matches else None,
         "gt_verify": "PASS" if verify_pass else "FAIL",
@@ -943,8 +1066,11 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         "actual_level_delta_golden": delta_golden.get("level_delta"),
         "rule_synth_summary_count": parsed.get("rule_synth_summary_count"),
         "rule_apply_summary_count": parsed.get("rule_apply_summary_count"),
+        "rule_miter_summary_count": parsed.get("rule_miter_summary_count"),
+        "rule_build_attempt_count": parsed.get("rule_build_attempt_count"),
         "binary_sha256": tools.get("binary", {}).get("sha256"),
         "abc_sha256": tools.get("abc", {}).get("sha256"),
+        "highs_library_sha256": tools.get("highs_library", {}).get("sha256"),
         "cache_key": record.get("cache_key"),
         "stdout_log": artifacts.get("stdout"),
         "stderr_log": artifacts.get("stderr"),
@@ -957,6 +1083,16 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         ),
         "rule_apply_summaries_json": json.dumps(
             parsed.get("rule_apply_summaries", []), separators=(",", ":")
+        ),
+        "rule_miter_summaries_json": json.dumps(
+            parsed.get("rule_miter_summaries", []), separators=(",", ":")
+        ),
+        "rule_build_attempts_json": json.dumps(
+            parsed.get("rule_build_attempts", []), separators=(",", ":")
+        ),
+        "rule_build_unlinked_summaries_json": json.dumps(
+            parsed.get("rule_build_unlinked_summaries", {}),
+            separators=(",", ":"),
         ),
     }
     aggregates = parsed.get("rule_synth_aggregates", {})
@@ -973,6 +1109,13 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
             continue
         for key, value in values.items():
             row[f"apply_{group}_{key}"] = value
+    miter_aggregates = parsed.get("rule_miter_aggregates", {})
+    for group in ("first", "last", "numeric_sum"):
+        values = miter_aggregates.get(group, {})
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            row[f"miter_{group}_{key}"] = value
     return row
 
 
@@ -987,10 +1130,14 @@ BASE_CSV_COLUMNS = [
     "patched_area", "patched_level", "actual_area_delta_trojan",
     "actual_level_delta_trojan", "actual_area_delta_golden",
     "actual_level_delta_golden", "rule_synth_summary_count",
-    "rule_apply_summary_count",
-    "binary_sha256", "abc_sha256", "cache_key", "stdout_log", "stderr_log",
+    "rule_apply_summary_count", "rule_miter_summary_count",
+    "rule_build_attempt_count",
+    "binary_sha256", "abc_sha256", "highs_library_sha256", "cache_key",
+    "stdout_log", "stderr_log",
     "cec_stdout_log", "cec_stderr_log", "patched_bench", "command_json",
     "rule_synth_summaries_json", "rule_apply_summaries_json",
+    "rule_miter_summaries_json", "rule_build_attempts_json",
+    "rule_build_unlinked_summaries_json",
 ]
 
 
@@ -1097,6 +1244,90 @@ def _validate_executable(path: Path, label: str) -> None:
         raise RunnerError(f"{label} is not executable: {path}")
 
 
+def _validate_regular_file(path: Path, label: str) -> None:
+    if not path.is_file():
+        raise RunnerError(f"{label} not found: {path}")
+
+
+def _is_highs_soname(value: str) -> bool:
+    return bool(re.fullmatch(r"libhighs\.so(?:\..+)?", Path(value).name.lower()))
+
+
+def _resolved_highs_libraries(binary: Path) -> List[Path]:
+    """Return the libhighs objects resolved by the platform dynamic loader."""
+    try:
+        result = subprocess.run(
+            ["ldd", str(binary)], text=True, capture_output=True,
+            timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RunnerError(
+            f"cannot inspect solver binary linkage with ldd: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().replace("\n", "; ")
+        if len(detail) > 512:
+            detail = detail[:512]
+        raise RunnerError(
+            f"cannot inspect solver binary linkage with ldd (exit "
+            f"{result.returncode}): {detail or 'no diagnostic'}"
+        )
+
+    resolved: List[Path] = []
+    missing: List[str] = []
+    for raw_line in (result.stdout + "\n" + result.stderr).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "=>" in line:
+            soname, raw_target = line.split("=>", 1)
+            soname = soname.strip().split()[0]
+            if not _is_highs_soname(soname):
+                continue
+            target = raw_target.strip()
+            if target.startswith("not found"):
+                missing.append(soname)
+                continue
+            target = target.rsplit(" (", 1)[0].strip()
+        else:
+            target = line.rsplit(" (", 1)[0].strip()
+            if not _is_highs_soname(target):
+                continue
+        candidate = Path(target)
+        if candidate.is_file():
+            resolved.append(candidate.resolve())
+        else:
+            missing.append(target)
+
+    if missing:
+        raise RunnerError(
+            "solver binary has an unresolved HiGHS dependency: "
+            + ", ".join(missing)
+        )
+    if not resolved:
+        raise RunnerError(
+            f"solver binary is not dynamically linked to libhighs: {binary}"
+        )
+    return resolved
+
+
+def _validate_highs_library_linkage(binary: Path, highs_library: Path) -> None:
+    """Require --highs-library to be the libhighs actually loaded by binary."""
+    _validate_regular_file(highs_library, "HiGHS library")
+    linked = _resolved_highs_libraries(binary)
+    for candidate in linked:
+        try:
+            if highs_library.samefile(candidate):
+                return
+        except OSError:
+            continue
+    raise RunnerError(
+        "--highs-library does not match the libhighs resolved by the solver "
+        f"binary; provided={highs_library}, resolved="
+        + ", ".join(str(path) for path in linked)
+    )
+
+
 def _validate_binary_methods(binary: Path, methods: Sequence[str]) -> None:
     try:
         result = subprocess.run(
@@ -1128,6 +1359,55 @@ def _create_parser(repo_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--bin", type=Path, default=Path("bin/main"))
     parser.add_argument("--abc", type=Path, default=Path("abc"))
     parser.add_argument(
+        "--highs-library", type=Path,
+        help="libhighs shared library used by --method milp-cover",
+    )
+    parser.add_argument(
+        "--rule-cover-fourth-objective",
+        choices=("none", "logic-risk"),
+        help="MILP fourth objective; passed only to milp-cover runs",
+    )
+    parser.add_argument(
+        "--rule-cover-logic-risk-unique-weight",
+        type=float,
+        help="MILP distinct feature-tap proxy weight",
+    )
+    parser.add_argument(
+        "--rule-cover-logic-risk-fanout-weight",
+        type=float,
+        help="MILP base-fanout load proxy weight",
+    )
+    parser.add_argument(
+        "--rule-cover-logic-risk-timing-weight",
+        type=float,
+        help="MILP unit-level depth proxy weight",
+    )
+    parser.add_argument(
+        "--rule-cover-phase4-timeout-ms",
+        type=int,
+        help="MILP phase-4 wall-clock sub-budget in milliseconds",
+    )
+    parser.add_argument(
+        "--rule-formal-refine",
+        action="store_true",
+        help="enable SAT rule refinement for z3-pb and milp-cover runs",
+    )
+    parser.add_argument(
+        "--rule-formal-timeout-ms",
+        type=int,
+        help="SAT rule-miter soft wall-clock budget",
+    )
+    parser.add_argument(
+        "--rule-formal-max-rounds",
+        type=int,
+        help="maximum SAT rule-refinement rebuilds",
+    )
+    parser.add_argument(
+        "--rule-formal-cex-batch",
+        type=int,
+        help="SAT counterexamples returned per check (1-5)",
+    )
+    parser.add_argument(
         "--show", type=Path,
         help="optional area/level helper (default: bin/show or bin/script/show)",
     )
@@ -1147,6 +1427,42 @@ def _resolve_cli_path(repo_root: Path, path: Path) -> Path:
     return path.resolve() if path.is_absolute() else (repo_root / path).resolve()
 
 
+def _method_experiment_args(method: str, args: argparse.Namespace) -> Tuple[str, ...]:
+    """Return only the experiment knobs accepted by this rule backend."""
+    values: List[str] = []
+    if method == "milp-cover":
+        if args.rule_cover_fourth_objective is not None:
+            values.extend(
+                ("--rule-cover-fourth-objective",
+                 args.rule_cover_fourth_objective)
+            )
+        p4_values = (
+            ("--rule-cover-logic-risk-unique-weight",
+             args.rule_cover_logic_risk_unique_weight),
+            ("--rule-cover-logic-risk-fanout-weight",
+             args.rule_cover_logic_risk_fanout_weight),
+            ("--rule-cover-logic-risk-timing-weight",
+             args.rule_cover_logic_risk_timing_weight),
+            ("--rule-cover-phase4-timeout-ms",
+             args.rule_cover_phase4_timeout_ms),
+        )
+        for option, value in p4_values:
+            if value is not None:
+                values.extend((option, str(value)))
+
+    if args.rule_formal_refine and method in ("z3-pb", "milp-cover"):
+        values.append("--rule-formal-refine")
+        formal_values = (
+            ("--rule-formal-timeout-ms", args.rule_formal_timeout_ms),
+            ("--rule-formal-max-rounds", args.rule_formal_max_rounds),
+            ("--rule-formal-cex-batch", args.rule_formal_cex_batch),
+        )
+        for option, value in formal_values:
+            if value is not None:
+                values.extend((option, str(value)))
+    return tuple(values)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     default_repo = Path(__file__).resolve().parents[1]
     parser = _create_parser(default_repo)
@@ -1156,6 +1472,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         manifest_path = _resolve_cli_path(repo_root, args.manifest)
         binary = _resolve_cli_path(repo_root, args.bin)
         abc = _resolve_cli_path(repo_root, args.abc)
+        highs_library: Optional[Path] = (
+            _resolve_cli_path(repo_root, args.highs_library)
+            if args.highs_library is not None
+            else None
+        )
         if args.show is not None:
             show_binary: Optional[Path] = _resolve_cli_path(repo_root, args.show)
         else:
@@ -1169,6 +1490,85 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         methods = list(args.method or DEFAULT_METHODS)
         if len(methods) != len(set(methods)):
             raise RunnerError("--method values must be unique")
+        if "milp-cover" in methods and highs_library is None:
+            raise RunnerError(
+                "--highs-library PATH is required with --method milp-cover"
+            )
+        if "milp-cover" not in methods and highs_library is not None:
+            raise RunnerError(
+                "--highs-library requires --method milp-cover"
+            )
+        p4_values = (
+            ("--rule-cover-logic-risk-unique-weight",
+             args.rule_cover_logic_risk_unique_weight),
+            ("--rule-cover-logic-risk-fanout-weight",
+             args.rule_cover_logic_risk_fanout_weight),
+            ("--rule-cover-logic-risk-timing-weight",
+             args.rule_cover_logic_risk_timing_weight),
+        )
+        p4_knobs_used = any(value is not None for _, value in p4_values) or (
+            args.rule_cover_phase4_timeout_ms is not None
+        )
+        p4_options_used = (
+            args.rule_cover_fourth_objective is not None or p4_knobs_used
+        )
+        if p4_options_used and "milp-cover" not in methods:
+            raise RunnerError(
+                "rule-cover fourth-objective options require "
+                "--method milp-cover"
+            )
+        if args.rule_cover_fourth_objective == "none" and p4_knobs_used:
+            raise RunnerError(
+                "logic-risk weights and phase-4 timeout require "
+                "--rule-cover-fourth-objective logic-risk"
+            )
+        for option, value in p4_values:
+            if value is not None:
+                _nonnegative_finite_number(value, option)
+        if args.rule_cover_phase4_timeout_ms is not None:
+            _nonnegative_integer(
+                args.rule_cover_phase4_timeout_ms,
+                "--rule-cover-phase4-timeout-ms",
+            )
+        supplied_weights = [value for _, value in p4_values if value is not None]
+        if (
+            args.rule_cover_fourth_objective != "none"
+            and len(supplied_weights) == 3
+            and all(float(value) == 0.0 for value in supplied_weights)
+        ):
+            raise RunnerError("at least one logic-risk weight must be positive")
+
+        formal_knobs_used = any(
+            value is not None
+            for value in (
+                args.rule_formal_timeout_ms,
+                args.rule_formal_max_rounds,
+                args.rule_formal_cex_batch,
+            )
+        )
+        optimizer_methods = {"z3-pb", "milp-cover"}.intersection(methods)
+        if args.rule_formal_refine and not optimizer_methods:
+            raise RunnerError(
+                "--rule-formal-refine requires --method z3-pb or milp-cover"
+            )
+        if formal_knobs_used and not args.rule_formal_refine:
+            raise RunnerError(
+                "rule formal refinement options require --rule-formal-refine"
+            )
+        if args.rule_formal_timeout_ms is not None:
+            _nonnegative_integer(
+                args.rule_formal_timeout_ms, "--rule-formal-timeout-ms"
+            )
+        if (
+            args.rule_formal_max_rounds is not None
+            and args.rule_formal_max_rounds <= 0
+        ):
+            raise RunnerError("--rule-formal-max-rounds must be positive")
+        if (
+            args.rule_formal_cex_batch is not None
+            and not 1 <= args.rule_formal_cex_batch <= 5
+        ):
+            raise RunnerError("--rule-formal-cex-batch must be between 1 and 5")
         if args.jobs != 1:
             raise RunnerError(
                 "--jobs must be 1: methods for the same case can write the "
@@ -1211,6 +1611,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     *common_args,
                     "--rule-method",
                     method,
+                    *_method_experiment_args(method, args),
                 )
                 schedules.append(
                     (
@@ -1258,7 +1659,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             show_binary = None
         _validate_binary_methods(binary, methods)
-        print("Fingerprinting binary, ABC, and selected input files ...")
+        if highs_library is not None:
+            _validate_highs_library_linkage(binary, highs_library)
+        print(
+            "Fingerprinting binary, ABC, solver libraries, and selected "
+            "input files ..."
+        )
         identity_cache: Dict[Path, Dict[str, Any]] = {}
 
         def identity(path: Path) -> Dict[str, Any]:
@@ -1274,6 +1680,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
         if show_binary is not None:
             tools_identity["show"] = identity(show_binary)
+        if highs_library is not None:
+            tools_identity["highs_library"] = identity(highs_library)
         context_payload = {
             "runner_schema": RUNNER_SCHEMA_VERSION,
             "runner_sha256": tools_identity["runner"]["sha256"],
@@ -1287,9 +1695,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if show_binary is not None
                 else None
             ),
+            "highs_library_sha256": (
+                tools_identity.get("highs_library", {}).get("sha256")
+                if highs_library is not None
+                else None
+            ),
             "common_args": common_args,
             "timeout_override": args.timeout,
             "abc_timeout": args.abc_timeout,
+            "rule_cover_fourth_objective": args.rule_cover_fourth_objective,
+            "rule_cover_logic_risk_weights": {
+                "unique": args.rule_cover_logic_risk_unique_weight,
+                "fanout": args.rule_cover_logic_risk_fanout_weight,
+                "timing": args.rule_cover_logic_risk_timing_weight,
+            },
+            "rule_cover_phase4_timeout_ms": args.rule_cover_phase4_timeout_ms,
+            "rule_formal_refine": args.rule_formal_refine,
+            "rule_formal_timeout_ms": args.rule_formal_timeout_ms,
+            "rule_formal_max_rounds": args.rule_formal_max_rounds,
+            "rule_formal_cex_batch": args.rule_formal_cex_batch,
         }
         context_payload["context_key"] = _sha256_bytes(
             json.dumps(context_payload, sort_keys=True).encode("utf-8")
@@ -1352,6 +1776,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "binary": str(binary),
             "abc": str(abc),
             "show": str(show_binary) if show_binary is not None else None,
+            "highs_library": (
+                str(highs_library) if highs_library is not None else None
+            ),
+            "rule_cover_fourth_objective": args.rule_cover_fourth_objective,
+            "rule_cover_logic_risk_weights": {
+                "unique": args.rule_cover_logic_risk_unique_weight,
+                "fanout": args.rule_cover_logic_risk_fanout_weight,
+                "timing": args.rule_cover_logic_risk_timing_weight,
+            },
+            "rule_cover_phase4_timeout_ms": args.rule_cover_phase4_timeout_ms,
+            "rule_formal_refine": args.rule_formal_refine,
+            "rule_formal_timeout_ms": args.rule_formal_timeout_ms,
+            "rule_formal_max_rounds": args.rule_formal_max_rounds,
+            "rule_formal_cex_batch": args.rule_formal_cex_batch,
             "context_key": context_payload["context_key"],
             "environment": environment_meta,
         }
