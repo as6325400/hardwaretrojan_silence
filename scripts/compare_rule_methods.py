@@ -32,13 +32,25 @@ import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
-RUNNER_SCHEMA_VERSION = "rule-method-ab-run/3"
+RUNNER_SCHEMA_VERSION = "rule-method-ab-run/4"
 MANIFEST_SCHEMA_VERSION = "rule-method-ab-cases/1"
-SUMMARY_SCHEMA_VERSION = "rule-method-ab-summary/3"
+SUMMARY_SCHEMA_VERSION = "rule-method-ab-summary/4"
 DEFAULT_MANIFEST = Path("configs/rule_method_ab_cases.json")
 DEFAULT_OUTPUT_ROOT = Path("validation/rule_method_ab")
 DEFAULT_METHODS = ("vn-retrain", "z3-pb")
-SUPPORTED_METHODS = ("vn-retrain", "dt", "z3-pb", "milp-cover")
+SUPPORTED_METHODS = (
+    "vn-retrain", "dt", "z3-pb", "milp-cover", "dac25-inspired"
+)
+DAC25_DEFAULT_CANDIDATE_LIMIT = 64
+DAC25_DEFAULT_MAX_TARGETS = 3
+
+_RULE_FORMAL_VALUE_OPTIONS = frozenset(
+    {
+        "--rule-formal-timeout-ms",
+        "--rule-formal-max-rounds",
+        "--rule-formal-cex-batch",
+    }
+)
 
 
 class RunnerError(RuntimeError):
@@ -394,10 +406,36 @@ def parse_rule_miter_summaries(stdout: str) -> List[Dict[str, Any]]:
     return summaries
 
 
+def parse_rectification_summaries(stdout: str) -> List[Dict[str, Any]]:
+    """Parse every order-independent rectification_summary telemetry line."""
+    summaries: List[Dict[str, Any]] = []
+    for line_number, line in enumerate(stdout.splitlines(), start=1):
+        if not line.startswith("rectification_summary "):
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError as exc:
+            summaries.append(
+                {"_raw": line, "_line": line_number, "_parse_error": str(exc)}
+            )
+            continue
+        parsed: Dict[str, Any] = {"_raw": line, "_line": line_number}
+        tail = tokens[1:]
+        if len(tail) % 2:
+            parsed["_parse_error"] = "odd number of key/value tokens"
+            parsed["_unparsed_tail"] = tail[-1]
+            tail = tail[:-1]
+        for index in range(0, len(tail), 2):
+            parsed[tail[index]] = _parse_scalar(tail[index + 1])
+        summaries.append(parsed)
+    return summaries
+
+
 def _associate_rule_build_attempts(
     synth_summaries: Sequence[Mapping[str, Any]],
     apply_summaries: Sequence[Mapping[str, Any]],
     miter_summaries: Sequence[Mapping[str, Any]],
+    rectification_summaries: Sequence[Mapping[str, Any]] = (),
 ) -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
     """Join telemetry by its stable build ID instead of output position."""
     groups: Dict[Any, Dict[str, Any]] = {}
@@ -405,11 +443,13 @@ def _associate_rule_build_attempts(
         "rule_synth_summaries": [],
         "rule_apply_summaries": [],
         "rule_miter_summaries": [],
+        "rectification_summaries": [],
     }
     collections = (
         ("rule_synth_summaries", synth_summaries),
         ("rule_apply_summaries", apply_summaries),
         ("rule_miter_summaries", miter_summaries),
+        ("rectification_summaries", rectification_summaries),
     )
     for collection_name, summaries in collections:
         for raw_summary in summaries:
@@ -425,6 +465,7 @@ def _associate_rule_build_attempts(
                     "rule_synth_summaries": [],
                     "rule_apply_summaries": [],
                     "rule_miter_summaries": [],
+                    "rectification_summaries": [],
                 },
             )
             group[collection_name].append(summary)
@@ -446,6 +487,8 @@ _NON_ADDITIVE_SUMMARY_KEYS = frozenset(
         "cec_attempt",
         "synth_pass",
         "rule_build_attempt",
+        "rectification_attempt",
+        "set_attempt",
         "literal_node",
         "literal_expected",
         "literal_forced",
@@ -495,8 +538,9 @@ def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
     summaries = parse_rule_synth_summaries(stdout)
     apply_summaries = parse_rule_apply_summaries(stdout)
     miter_summaries = parse_rule_miter_summaries(stdout)
+    rectification_summaries = parse_rectification_summaries(stdout)
     build_attempts, unlinked_summaries = _associate_rule_build_attempts(
-        summaries, apply_summaries, miter_summaries
+        summaries, apply_summaries, miter_summaries, rectification_summaries
     )
     runtime_matches = re.findall(
         r"\[TIMING\]\s+TOTAL:\s+([0-9]+(?:\.[0-9]+)?)\s+ms", stderr
@@ -533,6 +577,11 @@ def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
         "rule_miter_summaries": miter_summaries,
         "rule_miter_aggregates": _summary_aggregates(miter_summaries),
         "rule_miter_summary_count": len(miter_summaries),
+        "rectification_summaries": rectification_summaries,
+        "rectification_aggregates": _summary_aggregates(
+            rectification_summaries
+        ),
+        "rectification_summary_count": len(rectification_summaries),
         "rule_build_attempts": build_attempts,
         "rule_build_attempt_count": len(build_attempts),
         "rule_build_unlinked_summaries": unlinked_summaries,
@@ -1067,9 +1116,13 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         "rule_synth_summary_count": parsed.get("rule_synth_summary_count"),
         "rule_apply_summary_count": parsed.get("rule_apply_summary_count"),
         "rule_miter_summary_count": parsed.get("rule_miter_summary_count"),
+        "rectification_summary_count": parsed.get(
+            "rectification_summary_count"
+        ),
         "rule_build_attempt_count": parsed.get("rule_build_attempt_count"),
         "binary_sha256": tools.get("binary", {}).get("sha256"),
         "abc_sha256": tools.get("abc", {}).get("sha256"),
+        "dac25_abc_sha256": tools.get("dac25_abc", {}).get("sha256"),
         "highs_library_sha256": tools.get("highs_library", {}).get("sha256"),
         "cache_key": record.get("cache_key"),
         "stdout_log": artifacts.get("stdout"),
@@ -1086,6 +1139,9 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         ),
         "rule_miter_summaries_json": json.dumps(
             parsed.get("rule_miter_summaries", []), separators=(",", ":")
+        ),
+        "rectification_summaries_json": json.dumps(
+            parsed.get("rectification_summaries", []), separators=(",", ":")
         ),
         "rule_build_attempts_json": json.dumps(
             parsed.get("rule_build_attempts", []), separators=(",", ":")
@@ -1116,6 +1172,13 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
             continue
         for key, value in values.items():
             row[f"miter_{group}_{key}"] = value
+    rectification_aggregates = parsed.get("rectification_aggregates", {})
+    for group in ("first", "last", "numeric_sum"):
+        values = rectification_aggregates.get(group, {})
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            row[f"rectification_{group}_{key}"] = value
     return row
 
 
@@ -1131,12 +1194,14 @@ BASE_CSV_COLUMNS = [
     "actual_level_delta_trojan", "actual_area_delta_golden",
     "actual_level_delta_golden", "rule_synth_summary_count",
     "rule_apply_summary_count", "rule_miter_summary_count",
-    "rule_build_attempt_count",
-    "binary_sha256", "abc_sha256", "highs_library_sha256", "cache_key",
+    "rectification_summary_count", "rule_build_attempt_count",
+    "binary_sha256", "abc_sha256", "dac25_abc_sha256",
+    "highs_library_sha256", "cache_key",
     "stdout_log", "stderr_log",
     "cec_stdout_log", "cec_stderr_log", "patched_bench", "command_json",
     "rule_synth_summaries_json", "rule_apply_summaries_json",
-    "rule_miter_summaries_json", "rule_build_attempts_json",
+    "rule_miter_summaries_json", "rectification_summaries_json",
+    "rule_build_attempts_json",
     "rule_build_unlinked_summaries_json",
 ]
 
@@ -1408,6 +1473,36 @@ def _create_parser(repo_root: Path) -> argparse.ArgumentParser:
         help="SAT counterexamples returned per check (1-5)",
     )
     parser.add_argument(
+        "--dac25-selector-timeout-ms",
+        type=int,
+        help="DAC25-inspired selector timeout in milliseconds",
+    )
+    parser.add_argument(
+        "--dac25-candidate-limit",
+        type=int,
+        help="maximum DAC25-inspired rectification candidates",
+    )
+    parser.add_argument(
+        "--dac25-max-targets",
+        type=int,
+        help="maximum targets in a DAC25-inspired candidate set",
+    )
+    parser.add_argument(
+        "--dac25-max-sets",
+        type=int,
+        help="maximum DAC25-inspired candidate sets to validate",
+    )
+    parser.add_argument(
+        "--dac25-runeco-timeout-s",
+        type=int,
+        help="DAC25-inspired runeco timeout in seconds",
+    )
+    parser.add_argument(
+        "--dac25-abc-bin",
+        type=Path,
+        help="ABC executable used internally by DAC25-inspired runeco",
+    )
+    parser.add_argument(
         "--show", type=Path,
         help="optional area/level helper (default: bin/show or bin/script/show)",
     )
@@ -1430,6 +1525,20 @@ def _resolve_cli_path(repo_root: Path, path: Path) -> Path:
 def _method_experiment_args(method: str, args: argparse.Namespace) -> Tuple[str, ...]:
     """Return only the experiment knobs accepted by this rule backend."""
     values: List[str] = []
+    if method == "dac25-inspired":
+        dac25_values = (
+            ("--dac25-selector-timeout-ms", args.dac25_selector_timeout_ms),
+            ("--dac25-candidate-limit", args.dac25_candidate_limit),
+            ("--dac25-max-targets", args.dac25_max_targets),
+            ("--dac25-max-sets", args.dac25_max_sets),
+            ("--dac25-runeco-timeout-s", args.dac25_runeco_timeout_s),
+            ("--dac25-abc-bin", args.dac25_abc_bin),
+        )
+        for option, value in dac25_values:
+            if value is not None:
+                values.extend((option, str(value)))
+        return tuple(values)
+
     if method == "milp-cover":
         if args.rule_cover_fourth_objective is not None:
             values.extend(
@@ -1463,6 +1572,43 @@ def _method_experiment_args(method: str, args: argparse.Namespace) -> Tuple[str,
     return tuple(values)
 
 
+def _common_args_for_method(
+    common_args: Sequence[str], method: str
+) -> Tuple[str, ...]:
+    """Remove manifest-level formal flags from DAC25 repair invocations.
+
+    Historical manifests may place formal-refinement options in common_args.
+    They remain byte-for-byte unchanged for every pre-existing method, while
+    the independent DAC25 repair flow must not accidentally enable rule-miter
+    refinement merely because the same manifest is reused.
+    """
+    if method != "dac25-inspired":
+        return tuple(common_args)
+    filtered: List[str] = []
+    index = 0
+    while index < len(common_args):
+        option = common_args[index]
+        if option == "--rule-formal-refine":
+            index += 1
+            continue
+        if option in _RULE_FORMAL_VALUE_OPTIONS:
+            # A malformed manifest is still rejected deterministically instead
+            # of silently interpreting the next option as a value.
+            if (
+                index + 1 >= len(common_args)
+                or common_args[index + 1].startswith("--")
+            ):
+                raise RunnerError(f"manifest common argument lacks value: {option}")
+            index += 2
+            continue
+        if any(option.startswith(prefix + "=") for prefix in _RULE_FORMAL_VALUE_OPTIONS):
+            index += 1
+            continue
+        filtered.append(option)
+        index += 1
+    return tuple(filtered)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     default_repo = Path(__file__).resolve().parents[1]
     parser = _create_parser(default_repo)
@@ -1472,6 +1618,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         manifest_path = _resolve_cli_path(repo_root, args.manifest)
         binary = _resolve_cli_path(repo_root, args.bin)
         abc = _resolve_cli_path(repo_root, args.abc)
+        dac25_abc_bin: Optional[Path] = (
+            _resolve_cli_path(repo_root, args.dac25_abc_bin)
+            if args.dac25_abc_bin is not None
+            else None
+        )
+        # Keep command construction independent of the caller's working
+        # directory, just like --bin, --abc, and --highs-library.
+        args.dac25_abc_bin = dac25_abc_bin
         highs_library: Optional[Path] = (
             _resolve_cli_path(repo_root, args.highs_library)
             if args.highs_library is not None
@@ -1497,6 +1651,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if "milp-cover" not in methods and highs_library is not None:
             raise RunnerError(
                 "--highs-library requires --method milp-cover"
+            )
+        dac25_values = (
+            ("--dac25-selector-timeout-ms", args.dac25_selector_timeout_ms),
+            ("--dac25-candidate-limit", args.dac25_candidate_limit),
+            ("--dac25-max-targets", args.dac25_max_targets),
+            ("--dac25-max-sets", args.dac25_max_sets),
+            ("--dac25-runeco-timeout-s", args.dac25_runeco_timeout_s),
+            ("--dac25-abc-bin", dac25_abc_bin),
+        )
+        dac25_options_used = any(value is not None for _, value in dac25_values)
+        if dac25_options_used and "dac25-inspired" not in methods:
+            raise RunnerError(
+                "DAC25 options require --method dac25-inspired"
+            )
+        for option, value in dac25_values[:5]:
+            if value is not None and value <= 0:
+                raise RunnerError(f"{option} must be positive")
+        effective_candidate_limit = (
+            args.dac25_candidate_limit
+            if args.dac25_candidate_limit is not None
+            else DAC25_DEFAULT_CANDIDATE_LIMIT
+        )
+        effective_max_targets = (
+            args.dac25_max_targets
+            if args.dac25_max_targets is not None
+            else DAC25_DEFAULT_MAX_TARGETS
+        )
+        if effective_max_targets > effective_candidate_limit:
+            raise RunnerError(
+                "--dac25-max-targets cannot exceed --dac25-candidate-limit"
             )
         p4_values = (
             ("--rule-cover-logic-risk-unique-weight",
@@ -1602,15 +1786,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 method_ordinal = methods.index(method)
                 timeout_seconds = float(args.timeout or case.timeout_seconds)
                 paths = _case_paths(roots, case)
+                compatible_rule_method = (
+                    "z3-pb" if method == "dac25-inspired" else method
+                )
+                repair_args = (
+                    ("--repair-method", "dac25-inspired")
+                    if method == "dac25-inspired"
+                    else ()
+                )
                 command = (
                     binary_command,
                     str(paths.golden),
                     str(paths.trojan),
                     str(paths.groundtruth),
                     "<staged-patched-bench>",
-                    *common_args,
+                    *_common_args_for_method(common_args, method),
                     "--rule-method",
-                    method,
+                    compatible_rule_method,
+                    *repair_args,
                     *_method_experiment_args(method, args),
                 )
                 schedules.append(
@@ -1646,6 +1839,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         _validate_executable(binary, "solver binary")
         _validate_executable(abc, "ABC binary")
+        if dac25_abc_bin is not None:
+            _validate_executable(dac25_abc_bin, "DAC25 ABC binary")
         if show_binary is None:
             print(
                 "warning: area/level helper unavailable; structural metrics will be blank",
@@ -1682,6 +1877,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             tools_identity["show"] = identity(show_binary)
         if highs_library is not None:
             tools_identity["highs_library"] = identity(highs_library)
+        if dac25_abc_bin is not None:
+            tools_identity["dac25_abc"] = identity(dac25_abc_bin)
         context_payload = {
             "runner_schema": RUNNER_SCHEMA_VERSION,
             "runner_sha256": tools_identity["runner"]["sha256"],
@@ -1690,6 +1887,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "methods": methods,
             "binary_sha256": tools_identity["binary"]["sha256"],
             "abc_sha256": tools_identity["abc"]["sha256"],
+            "dac25_abc_bin": (
+                str(dac25_abc_bin) if dac25_abc_bin is not None else None
+            ),
+            "dac25_abc_sha256": tools_identity.get("dac25_abc", {}).get(
+                "sha256"
+            ),
             "show_sha256": (
                 tools_identity.get("show", {}).get("sha256")
                 if show_binary is not None
@@ -1714,6 +1917,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "rule_formal_timeout_ms": args.rule_formal_timeout_ms,
             "rule_formal_max_rounds": args.rule_formal_max_rounds,
             "rule_formal_cex_batch": args.rule_formal_cex_batch,
+            "dac25_selector_timeout_ms": args.dac25_selector_timeout_ms,
+            "dac25_candidate_limit": args.dac25_candidate_limit,
+            "dac25_max_targets": args.dac25_max_targets,
+            "dac25_max_sets": args.dac25_max_sets,
+            "dac25_runeco_timeout_s": args.dac25_runeco_timeout_s,
         }
         context_payload["context_key"] = _sha256_bytes(
             json.dumps(context_payload, sort_keys=True).encode("utf-8")
@@ -1775,6 +1983,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "manifest_sha256": manifest_sha,
             "binary": str(binary),
             "abc": str(abc),
+            "dac25_abc_bin": (
+                str(dac25_abc_bin) if dac25_abc_bin is not None else None
+            ),
             "show": str(show_binary) if show_binary is not None else None,
             "highs_library": (
                 str(highs_library) if highs_library is not None else None
@@ -1790,6 +2001,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "rule_formal_timeout_ms": args.rule_formal_timeout_ms,
             "rule_formal_max_rounds": args.rule_formal_max_rounds,
             "rule_formal_cex_batch": args.rule_formal_cex_batch,
+            "dac25_selector_timeout_ms": args.dac25_selector_timeout_ms,
+            "dac25_candidate_limit": args.dac25_candidate_limit,
+            "dac25_max_targets": args.dac25_max_targets,
+            "dac25_max_sets": args.dac25_max_sets,
+            "dac25_runeco_timeout_s": args.dac25_runeco_timeout_s,
             "context_key": context_payload["context_key"],
             "environment": environment_meta,
         }

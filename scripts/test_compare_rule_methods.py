@@ -28,7 +28,11 @@ import time
 
 if "--help" in sys.argv:
     print("Usage: fake <g> <t> <gt> <out> "
-          "[--rule-method vn-retrain|dt|z3-pb|milp-cover]")
+          "[--rule-method vn-retrain|dt|z3-pb|milp-cover] "
+          "[--repair-method legacy|dac25-inspired] "
+          "[--dac25-selector-timeout-ms N] [--dac25-candidate-limit N] "
+          "[--dac25-max-targets N] [--dac25-max-sets N] "
+          "[--dac25-runeco-timeout-s N] [--dac25-abc-bin PATH]")
     raise SystemExit(0)
 
 expected_abc = os.environ.get("FAKE_EXPECT_ABC_BIN")
@@ -36,7 +40,18 @@ if expected_abc and os.environ.get("ABC_BIN") != expected_abc:
     print("ABC_BIN was not pinned to the runner's --abc", file=sys.stderr)
     raise SystemExit(3)
 
-method = sys.argv[sys.argv.index("--rule-method") + 1]
+rule_method = sys.argv[sys.argv.index("--rule-method") + 1]
+repair_method = (
+    sys.argv[sys.argv.index("--repair-method") + 1]
+    if "--repair-method" in sys.argv
+    else "legacy"
+)
+method = "dac25-inspired" if repair_method == "dac25-inspired" else rule_method
+if method == "dac25-inspired" and any(
+    arg.startswith("--rule-formal-") for arg in sys.argv
+):
+    print("formal flags leaked into DAC25 invocation", file=sys.stderr)
+    raise SystemExit(4)
 counter = os.environ.get("FAKE_INVOCATION_COUNTER")
 if counter:
     with Path(counter).open("a", encoding="utf-8") as sink:
@@ -54,7 +69,17 @@ Path(sys.argv[4]).write_text(
     "INPUT(a)\nOUTPUT(n1)\nn1 = BUF(a)\n# " + method + "\n",
     encoding="utf-8",
 )
-if method == "z3-pb":
+if method == "dac25-inspired":
+    print("rectification_summary strategy z3-pb repair_method dac25-inspired "
+          "cec_attempt 1 synth_pass 1 rule_build_attempt 2 "
+          "rectification_attempt 1 source selector status enumerated "
+          "raw_candidates 64 filtered_candidates 20 selector_ms 4.2")
+    print("rectification_summary strategy z3-pb repair_method dac25-inspired "
+          "cec_attempt 1 synth_pass 1 rule_build_attempt 2 "
+          "rectification_attempt 1 set_attempt 1 source dac25_runeco "
+          "status selected sets_checked 3 feasible_sets 1 selected_targets 1 "
+          "patch_trials 1 proved 1 patch_ms 31.0")
+elif method == "z3-pb":
     print("rule_synth_summary strategy z3-pb cec_attempt 1 synth_pass 1 "
           "rule_build_attempt 1 dt_builds 1 candidate_count 17 solver_status optimal "
           "pb_variables 13 final_rules 2 final_literals 3 final_depth 2 synth_ms 4.5")
@@ -245,6 +270,13 @@ class SummaryParserTest(unittest.TestCase):
             "total_ms 1.5\n"
             "rule_miter_summary rule_build_attempt 1 status counterexamples "
             "proved 0 returned 2 total_ms 2.5\n"
+            # Rectification telemetry is also joined by build ID, not position.
+            "rectification_summary rule_build_attempt 2 "
+            "rectification_attempt 1 set_attempt 2 status selected "
+            "source \"proof core\" solver_ms 6.75\n"
+            "rectification_summary rule_build_attempt 1 "
+            "rectification_attempt 1 set_attempt 1 status infeasible "
+            "source selector solver_ms 3.25\n"
         )
         summaries = runner.parse_rule_synth_summaries(stdout)
         self.assertEqual(len(summaries), 2)
@@ -265,6 +297,15 @@ class SummaryParserTest(unittest.TestCase):
         self.assertEqual(
             parsed["rule_miter_aggregates"]["numeric_sum"]["total_ms"], 4.0
         )
+        self.assertEqual(parsed["rectification_summary_count"], 2)
+        self.assertEqual(
+            parsed["rectification_aggregates"]["numeric_sum"]["solver_ms"],
+            10.0,
+        )
+        self.assertNotIn(
+            "set_attempt",
+            parsed["rectification_aggregates"]["numeric_sum"],
+        )
         self.assertEqual(parsed["rule_build_attempt_count"], 2)
         attempts = {
             item["rule_build_attempt"]: item
@@ -278,13 +319,32 @@ class SummaryParserTest(unittest.TestCase):
             attempts[2]["rule_miter_summaries"][0]["status"], "proved"
         )
         self.assertEqual(
+            attempts[1]["rectification_summaries"][0]["status"],
+            "infeasible",
+        )
+        self.assertEqual(
+            attempts[2]["rectification_summaries"][0]["source"],
+            "proof core",
+        )
+        self.assertEqual(
             parsed["rule_build_unlinked_summaries"],
             {
                 "rule_synth_summaries": [],
                 "rule_apply_summaries": [],
                 "rule_miter_summaries": [],
+                "rectification_summaries": [],
             },
         )
+
+    def test_rectification_parser_preserves_malformed_lines(self) -> None:
+        parsed = runner.parse_rectification_summaries(
+            "rectification_summary status selected dangling\n"
+            "rectification_summary status \"unterminated\n"
+        )
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0]["status"], "selected")
+        self.assertEqual(parsed[0]["_unparsed_tail"], "dangling")
+        self.assertIn("_parse_error", parsed[1])
 
     def test_numeric_sum_is_exact_and_excludes_non_additive_metadata(self) -> None:
         uint64_max = (1 << 64) - 1
@@ -470,6 +530,136 @@ class EndToEndTest(RunnerFixture):
         self.assertEqual(rows["z3-pb"]["rule_miter_summary_count"], "2")
         linked = json.loads(rows["z3-pb"]["rule_build_attempts_json"])
         self.assertEqual(linked[0]["rule_build_attempt"], 1)
+
+    def test_dac25_command_cache_artifacts_and_rectification_csv(self) -> None:
+        self.assertEqual(
+            runner.main(
+                self.args(
+                    "--method", "z3-pb",
+                    "--method", "dac25-inspired",
+                    "--rule-formal-refine",
+                    "--rule-formal-timeout-ms", "7",
+                    "--rule-formal-max-rounds", "2",
+                    "--rule-formal-cex-batch", "3",
+                    "--dac25-selector-timeout-ms", "11000",
+                    "--dac25-candidate-limit", "40",
+                    "--dac25-max-targets", "4",
+                    "--dac25-max-sets", "9",
+                    "--dac25-runeco-timeout-s", "22",
+                    "--dac25-abc-bin", str(self.abc_path),
+                )
+            ),
+            0,
+        )
+
+        z3_record = json.loads(
+            (self.output / "records" / "case1--z3-pb.json").read_text()
+        )
+        dac_record = json.loads(
+            (
+                self.output
+                / "records"
+                / "case1--dac25-inspired.json"
+            ).read_text()
+        )
+        self.assertNotEqual(z3_record["cache_key"], dac_record["cache_key"])
+        self.assertIn("--rule-formal-refine", z3_record["command"])
+        self.assertFalse(
+            any(
+                value.startswith("--rule-formal-")
+                for value in dac_record["command"]
+            )
+        )
+        self.assertEqual(
+            dac_record["command"][
+                dac_record["command"].index("--rule-method") + 1
+            ],
+            "z3-pb",
+        )
+        self.assertEqual(
+            dac_record["command"][
+                dac_record["command"].index("--repair-method") + 1
+            ],
+            "dac25-inspired",
+        )
+        for option, value in (
+            ("--dac25-selector-timeout-ms", "11000"),
+            ("--dac25-candidate-limit", "40"),
+            ("--dac25-max-targets", "4"),
+            ("--dac25-max-sets", "9"),
+            ("--dac25-runeco-timeout-s", "22"),
+            ("--dac25-abc-bin", str(self.abc_path.resolve())),
+        ):
+            index = dac_record["command"].index(option)
+            self.assertEqual(dac_record["command"][index + 1], value)
+            self.assertNotIn(option, z3_record["command"])
+
+        self.assertEqual(dac_record["method"], "dac25-inspired")
+        self.assertEqual(dac_record["parsed"]["rectification_summary_count"], 2)
+        self.assertEqual(dac_record["parsed"]["rule_build_attempt_count"], 1)
+        linked = dac_record["parsed"]["rule_build_attempts"][0]
+        self.assertEqual(linked["rule_build_attempt"], 2)
+        self.assertEqual(len(linked["rectification_summaries"]), 2)
+        self.assertEqual(
+            dac_record["parsed"]["rectification_aggregates"]["last"][
+                "status"
+            ],
+            "selected",
+        )
+        patched = self.output / dac_record["artifacts"]["patched_bench"]
+        self.assertTrue(patched.is_file())
+        self.assertIn("--dac25-inspired", patched.name)
+
+        context = json.loads((self.output / "run_context.json").read_text())
+        self.assertEqual(context["methods"], ["z3-pb", "dac25-inspired"])
+        self.assertEqual(context["dac25_candidate_limit"], 40)
+        dac25_abc_identity = dac_record["identities"]["tools"]["dac25_abc"]
+        self.assertEqual(
+            context["dac25_abc_sha256"], dac25_abc_identity["sha256"]
+        )
+        summary = json.loads((self.output / "summary.json").read_text())
+        self.assertEqual(summary["invocation"]["dac25_max_sets"], 9)
+        with (self.output / "results.csv").open(
+            newline="", encoding="utf-8"
+        ) as source:
+            rows = {row["method"]: row for row in csv.DictReader(source)}
+        dac_row = rows["dac25-inspired"]
+        self.assertEqual(dac_row["rectification_summary_count"], "2")
+        self.assertEqual(dac_row["rectification_last_status"], "selected")
+        self.assertEqual(dac_row["rectification_numeric_sum_patch_ms"], "31.0")
+        self.assertEqual(
+            dac_row["dac25_abc_sha256"], dac25_abc_identity["sha256"]
+        )
+        raw_rectification = json.loads(
+            dac_row["rectification_summaries_json"]
+        )
+        self.assertEqual(len(raw_rectification), 2)
+
+    def test_dac25_filters_manifest_formal_flags_only_for_dac(self) -> None:
+        common = (
+            "--depth", "10", "--rule-formal-refine",
+            "--rule-formal-timeout-ms", "8",
+            "--rule-formal-max-rounds=2",
+            "--rule-formal-cex-batch", "1",
+        )
+        self.assertEqual(
+            runner._common_args_for_method(common, "z3-pb"), common
+        )
+        self.assertEqual(
+            runner._common_args_for_method(common, "dac25-inspired"),
+            ("--depth", "10"),
+        )
+
+    def test_dac25_options_require_dac25_method(self) -> None:
+        self.assertEqual(
+            runner.main(
+                self.args(
+                    "--method", "z3-pb", "--dac25-candidate-limit", "8"
+                )
+            ),
+            2,
+        )
+        self.assertFalse(self.output.exists())
 
     def test_formal_knobs_require_refine_flag(self) -> None:
         self.assertEqual(
