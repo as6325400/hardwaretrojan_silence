@@ -76,8 +76,14 @@ void test_real_abc_when_available() {
   const fs::path output = temp / "patched.bench";
   circuit golden = make_golden();
   const circuit trojan = make_trojan();
+  std::error_code relative_error;
+  const fs::path relative_abc =
+      fs::relative(fs::path(abc), fs::current_path(), relative_error);
+  const std::string abc_argument =
+      !relative_error && !relative_abc.empty() ? relative_abc.string()
+                                                : std::string(abc);
   const Dac25RunecoResult result = run_dac25_runeco(
-      golden, trojan, {trojan.node_index("q")}, abc, 10,
+      golden, trojan, {trojan.node_index("q")}, abc_argument, 10,
       output.string());
   expect(result.ok(), std::string("runeco succeeds: ") + result.reason);
   expect(result.metrics.selected_targets == 1,
@@ -90,14 +96,22 @@ void test_real_abc_when_available() {
   std::string error;
   expect(bench_io::parse_bench_file(output.string(), patched, &error),
          "runeco BENCH output parses: " + error);
+  expect(result.metrics.patched_area == patched.area() &&
+             result.metrics.patched_level == patched.level(),
+         "reported patch QoR matches the published normalized artifact");
   if (patched.po_count() == 1 && patched.pi_count() == 2) {
     for (int a = 0; a <= 1; ++a) {
       for (int b = 0; b <= 1; ++b) {
         std::vector<int> golden_pattern{a, b};
         std::vector<int> patched_pattern;
         for (int pi : patched.pi_indices()) {
-          patched_pattern.push_back(patched.node_name(pi) == "pi_0" ? a : b);
+          const std::string& name = patched.node_name(pi);
+          expect(name == "a" || name == "b",
+                 "patched circuit restores original PI names");
+          patched_pattern.push_back(name == "a" ? a : b);
         }
+        expect(patched.node_name(patched.po_indices().front()) == "y",
+               "patched circuit restores the original PO name");
         const std::vector<int> golden_output = golden.simulate(golden_pattern);
         const std::vector<int> patched_output = patched.simulate(patched_pattern);
         expect(golden_output == patched_output,

@@ -7,8 +7,10 @@ import csv
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -23,6 +25,7 @@ from scripts import compare_rule_methods as runner
 FAKE_MAIN = r'''#!/usr/bin/env python3
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 
@@ -56,6 +59,13 @@ counter = os.environ.get("FAKE_INVOCATION_COUNTER")
 if counter:
     with Path(counter).open("a", encoding="utf-8") as sink:
         sink.write(method + "\n")
+child_pid_path = os.environ.get("FAKE_CHILD_PID_PATH")
+if child_pid_path:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        preexec_fn=os.setpgrp,
+    )
+    Path(child_pid_path).write_text(str(child.pid), encoding="ascii")
 if os.environ.get("FAKE_MAIN_SLEEP"):
     time.sleep(float(os.environ["FAKE_MAIN_SLEEP"]))
 if os.environ.get("FAKE_MUTATE_INPUT"):
@@ -729,6 +739,33 @@ class EndToEndTest(RunnerFixture):
         self.assertEqual(record["status"], "TIMEOUT")
         self.assertEqual(record["timeout_stage"], "main")
         self.assertIsNone(record["artifacts"]["cec_stdout"])
+
+    def test_timeout_kills_child_in_a_separate_process_group(self) -> None:
+        child_pid_path = self.root / "child.pid"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "FAKE_MAIN_SLEEP": "2",
+                "FAKE_CHILD_PID_PATH": str(child_pid_path),
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                runner.main(
+                    self.args(
+                        "--method", "dac25-inspired", "--timeout", "0.15"
+                    )
+                ),
+                0,
+            )
+        child_pid = int(child_pid_path.read_text(encoding="ascii"))
+        deadline = time.monotonic() + 2.0
+        while Path(f"/proc/{child_pid}").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(
+            Path(f"/proc/{child_pid}").exists(),
+            "outer timeout must not leave the runeco-style child alive",
+        )
 
     def test_missing_nonnull_artifact_invalidates_resume(self) -> None:
         self.assertEqual(

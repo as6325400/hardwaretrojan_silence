@@ -2278,7 +2278,7 @@ int main(int argc, char** argv) {
            << dac25.reason << "\n";
       cout << "cec_rounds 0\n";
       cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
-      return 0;
+      return 2;
     }
     const Dac25RunecoResult& selected =
         dac25.trials[dac25.selected_trial].runeco;

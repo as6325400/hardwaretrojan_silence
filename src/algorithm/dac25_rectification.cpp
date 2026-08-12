@@ -303,8 +303,14 @@ ObservedMismatch find_observed_mismatch(const circuit& golden,
       return result;
     }
     solver.add(mismatch_expr(ctx, golden_vars, trojan_vars, alignment));
+    const unsigned remaining = remaining_timeout_ms(start, timeout_ms);
+    if (remaining == 0) {
+      result.status = Dac25ValidationStatus::timeout;
+      result.reason = "observed-mismatch encoding exhausted the deadline";
+      return result;
+    }
     z3::params params(ctx);
-    params.set("timeout", remaining_timeout_ms(start, timeout_ms));
+    params.set("timeout", remaining);
     params.set("random_seed", 0U);
     solver.set(params);
     const auto solve_start = Clock::now();

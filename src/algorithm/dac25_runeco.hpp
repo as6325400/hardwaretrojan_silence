@@ -55,8 +55,10 @@ struct Dac25RunecoResult {
 // DAC25-inspired target set.  Each selected Trojan gate is removed from the
 // serialized implementation and replaced by exactly one floating internal
 // wire named t_0, t_1, ...; every original fanout and PO connection observes
-// that same wire.  The external process is isolated in a unique temporary
-// directory and killed as a process group when the hard deadline expires.
+// that same wire.  The external process runs in a unique temporary directory
+// and its own deadline terminates the complete ABC child process group.  The
+// benchmark harness separately terminates the full descendant tree when its
+// outer deadline fires.
 Dac25RunecoResult run_dac25_runeco(
     const circuit& golden,
     const circuit& trojan,

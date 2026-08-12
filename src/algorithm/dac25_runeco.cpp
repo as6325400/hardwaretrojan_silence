@@ -99,6 +99,7 @@ ProcessResult run_abc_process(const std::string& executable,
     return result;
   }
   if (pid == 0) {
+    setpgid(0, 0);
     if (chdir(workdir.c_str()) != 0 ||
         dup2(stdout_fd, STDOUT_FILENO) < 0 ||
         dup2(stderr_fd, STDERR_FILENO) < 0) {
@@ -111,6 +112,13 @@ ProcessResult run_abc_process(const std::string& executable,
     _exit(127);
   }
 
+  // Close the fork/setpgid race so even an immediate timeout can address the
+  // entire ABC process group.  EACCES only means the child already exec'd
+  // after establishing the same group itself.
+  if (setpgid(pid, pid) != 0 && errno != EACCES && errno != ESRCH) {
+    result.error = std::string("setpgid failed: ") + std::strerror(errno);
+  }
+
   close(stdout_fd);
   close(stderr_fd);
   result.launched = true;
@@ -121,14 +129,14 @@ ProcessResult run_abc_process(const std::string& executable,
     if (waited == pid) break;
     if (waited < 0) {
       result.error = std::string("waitpid failed: ") + std::strerror(errno);
-      kill(pid, SIGKILL);
+      kill(-pid, SIGKILL);
       waitpid(pid, &wait_status, 0);
       break;
     }
     if (timeout_seconds == 0 ||
         elapsed_ms(start) >= static_cast<double>(timeout_seconds) * 1000.0) {
       result.timed_out = true;
-      kill(pid, SIGTERM);
+      kill(-pid, SIGTERM);
       const auto grace = Clock::now();
       while (elapsed_ms(grace) < 1000.0) {
         const pid_t grace_waited = waitpid(pid, &wait_status, WNOHANG);
@@ -136,7 +144,7 @@ ProcessResult run_abc_process(const std::string& executable,
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
       if (waitpid(pid, &wait_status, WNOHANG) == 0) {
-        kill(pid, SIGKILL);
+        kill(-pid, SIGKILL);
         waitpid(pid, &wait_status, 0);
       }
       break;
@@ -379,6 +387,111 @@ bool atomic_write_bench(const fs::path& path,
   return true;
 }
 
+std::string unique_node_name(const circuit& net, const std::string& prefix) {
+  std::size_t suffix = 0;
+  std::string name;
+  do {
+    name = prefix + std::to_string(suffix++);
+  } while (net.has_node(name));
+  return name;
+}
+
+bool restore_interface_names(circuit* net,
+                             const std::vector<std::string>& pi_names,
+                             const std::vector<std::string>& po_names,
+                             std::string* error) {
+  if (!net || net->pi_count() != pi_names.size() ||
+      net->po_count() != po_names.size()) {
+    if (error) *error = "normalized patch PI/PO count mismatch";
+    return false;
+  }
+  std::unordered_set<std::string> desired;
+  std::unordered_map<std::string, std::size_t> pi_position;
+  for (const std::string& name : pi_names) {
+    const std::size_t position = pi_position.size();
+    if (name.empty() || !desired.insert(name).second ||
+        !pi_position.emplace(name, position).second) {
+      if (error) *error = "duplicate/empty original interface name";
+      return false;
+    }
+  }
+  std::unordered_set<std::string> seen_po;
+  for (const std::string& name : po_names) {
+    if (name.empty() || !seen_po.insert(name).second) {
+      if (error) *error = "duplicate/empty original PO name";
+      return false;
+    }
+    // BENCH permits OUTPUT(pi_name).  The normalized ABC netlist represents
+    // that output through a separate po_N node; restore the alias below by
+    // redirecting the PO index to the corresponding restored PI.
+    if (pi_position.find(name) == pi_position.end()) desired.insert(name);
+  }
+
+  std::vector<int> pi_nodes(net->pi_indices().begin(),
+                            net->pi_indices().end());
+  std::vector<int> po_nodes(net->po_indices().begin(),
+                            net->po_indices().end());
+  std::unordered_set<int> interface_nodes(pi_nodes.begin(), pi_nodes.end());
+  interface_nodes.insert(po_nodes.begin(), po_nodes.end());
+
+  // First free all current interface names.  Then move any internal node that
+  // happens to use an original port name before restoring that port.  This
+  // keeps the output drop-in compatible even when an original name resembles
+  // ABC's generated n_N names.
+  for (int node : interface_nodes) {
+    const std::string temporary =
+        unique_node_name(*net, "__dac25_port_tmp_");
+    if (!net->rename_node(node, temporary, error)) return false;
+  }
+  for (const std::string& name : desired) {
+    if (!net->has_node(name)) continue;
+    const int conflict = net->node_index(name);
+    const std::string temporary =
+        unique_node_name(*net, "__dac25_internal_tmp_");
+    if (!net->rename_node(conflict, temporary, error)) return false;
+  }
+  for (std::size_t i = 0; i < pi_nodes.size(); ++i) {
+    if (!net->rename_node(pi_nodes[i], pi_names[i], error)) return false;
+  }
+  for (std::size_t i = 0; i < po_nodes.size(); ++i) {
+    auto alias = pi_position.find(po_names[i]);
+    if (alias != pi_position.end()) {
+      net->set_po_index(i, pi_nodes[alias->second]);
+    } else if (!net->rename_node(po_nodes[i], po_names[i], error)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool normalize_bench_with_abc(const std::string& abc_executable,
+                              const fs::path& workdir,
+                              const fs::path& input,
+                              const fs::path& output,
+                              std::uint64_t timeout_seconds,
+                              const std::string& log_stem,
+                              ProcessResult* process,
+                              circuit* parsed,
+                              std::string* error) {
+  if (!process || !parsed) return false;
+  const std::string command =
+      "read " + input.filename().string() +
+      "; strash; write_bench -l " + output.filename().string();
+  *process = run_abc_process(abc_executable, command, workdir,
+                             std::min<std::uint64_t>(timeout_seconds, 30),
+                             log_stem);
+  if (!process->launched || process->timed_out || process->exit_code != 0 ||
+      !fs::is_regular_file(output)) {
+    if (error) *error = "ABC could not normalize BENCH " + input.string();
+    return false;
+  }
+  if (!bench_io::parse_bench_file(output.string(), *parsed, error)) {
+    if (error && error->empty()) *error = "normalized BENCH parse failed";
+    return false;
+  }
+  return true;
+}
+
 std::size_t parse_metric(const std::string& text,
                          const std::regex& expression) {
   std::smatch match;
@@ -428,12 +541,22 @@ Dac25RunecoResult run_dac25_runeco(
   Dac25RunecoResult result;
   const auto total_start = Clock::now();
   result.metrics.selected_targets = selected_target_nodes.size();
-  result.metrics.trojan_area = trojan.area();
-  result.metrics.trojan_level = trojan.level();
   if (selected_target_nodes.empty() || abc_executable.empty() ||
       hard_timeout_seconds == 0 || output_bench_path.empty()) {
     result.reason = "targets, ABC executable, timeout, and output are required";
     return result;
+  }
+
+  std::string resolved_abc = abc_executable;
+  if (abc_executable.find('/') != std::string::npos) {
+    std::error_code path_error;
+    const fs::path absolute = fs::absolute(abc_executable, path_error);
+    if (path_error) {
+      result.reason = "cannot resolve ABC executable: " +
+                      path_error.message();
+      return result;
+    }
+    resolved_abc = absolute.lexically_normal().string();
   }
 
   std::unordered_map<int, std::size_t> target_position;
@@ -487,6 +610,8 @@ Dac25RunecoResult run_dac25_runeco(
   const std::unordered_map<int, std::size_t> no_targets;
   if (!serialize_verilog(trojan, pi_names, po_names, target_position,
                          temporary.path / "F.v", &error) ||
+      !serialize_verilog(trojan, pi_names, po_names, no_targets,
+                         temporary.path / "T.v", &error) ||
       !serialize_verilog(golden, pi_names, po_names, no_targets,
                          temporary.path / "G.v", &error) ||
       !write_weight_file(trojan, pi_names, po_names, target_position,
@@ -500,12 +625,35 @@ Dac25RunecoResult run_dac25_runeco(
   result.used_weight_file = true;
   result.metrics.serialize_ms = elapsed_ms(serialize_start);
 
+  // QoR deltas and trial ranking must use one structural representation.
+  // Normalize the unpatched Trojan through the same ABC strash/write_bench
+  // flow used for every synthesized patch.
+  const auto trojan_convert_start = Clock::now();
+  ProcessResult trojan_conversion;
+  circuit normalized_trojan;
+  if (!normalize_bench_with_abc(
+          resolved_abc, temporary.path, temporary.path / "T.v",
+          temporary.path / "trojan_normalized.bench", hard_timeout_seconds,
+          "normalize_trojan", &trojan_conversion, &normalized_trojan,
+          &error)) {
+    result.metrics.convert_ms += elapsed_ms(trojan_convert_start);
+    result.status = Dac25RunecoStatus::conversion_failed;
+    result.reason = error;
+    result.stdout_log = trojan_conversion.stdout_text;
+    result.stderr_log = trojan_conversion.stderr_text;
+    result.metrics.total_ms = elapsed_ms(total_start);
+    return result;
+  }
+  result.metrics.convert_ms += elapsed_ms(trojan_convert_start);
+  result.metrics.trojan_area = normalized_trojan.area();
+  result.metrics.trojan_level = normalized_trojan.level();
+
   const std::string runeco_command =
       "runeco -T " + std::to_string(hard_timeout_seconds) +
       " -c -u F.v G.v weight.txt";
   const auto runeco_start = Clock::now();
   ProcessResult runeco = run_abc_process(
-      abc_executable, runeco_command, temporary.path,
+      resolved_abc, runeco_command, temporary.path,
       hard_timeout_seconds + 2, "runeco");
   result.metrics.runeco_ms = elapsed_ms(runeco_start);
   result.exit_code = runeco.exit_code;
@@ -549,22 +697,21 @@ Dac25RunecoResult run_dac25_runeco(
       result.stdout_log, std::regex(R"(Added\s+:\s+gate\s+=\s+([0-9]+))"));
 
   const auto convert_start = Clock::now();
-  ProcessResult conversion = run_abc_process(
-      abc_executable,
-      "read out.v; strash; write_bench -l patched.bench", temporary.path,
-      std::min<std::uint64_t>(hard_timeout_seconds, 30), "convert");
-  result.metrics.convert_ms = elapsed_ms(convert_start);
+  ProcessResult conversion;
+  circuit patched;
+  bool converted = normalize_bench_with_abc(
+      resolved_abc, temporary.path, temporary.path / "out.v",
+      temporary.path / "patched.bench", hard_timeout_seconds, "convert",
+      &conversion, &patched, &error);
+  result.metrics.convert_ms += elapsed_ms(convert_start);
   result.stdout_log += conversion.stdout_text;
   result.stderr_log += conversion.stderr_text;
-  if (!conversion.launched || conversion.timed_out || conversion.exit_code != 0 ||
-      !fs::is_regular_file(temporary.path / "patched.bench")) {
-    result.status = Dac25RunecoStatus::conversion_failed;
-    result.reason = conversion.timed_out
-                        ? "ABC BENCH conversion timed out"
-                        : "ABC could not convert out.v to primitive BENCH";
+  bool recovered_constant = false;
+  if (!converted) {
     // Current ABC runeco emits a malformed zero-input module instance for a
     // constant patch.  Recover that fully specified special case directly
-    // from patch.v instead of rejecting a valid constant ECO.
+    // from patch.v, then normalize it through the exact same ABC flow as a
+    // nonconstant patch before ranking or publishing it.
     if (result.metrics.patch_inputs == 0 && !patch_verilog.empty()) {
       circuit constant_patch = trojan;
       bool parsed_all = true;
@@ -582,32 +729,39 @@ Dac25RunecoResult run_dac25_runeco(
         const int value = match[1].str().back() == '1' ? 1 : 0;
         constant_patch.force_gate_const(selected_target_nodes[i], value);
       }
-      if (parsed_all &&
-          atomic_write_bench(output_bench_path, &constant_patch, &error)) {
-        result.metrics.patched_area = constant_patch.area();
-        result.metrics.patched_level = constant_patch.level();
-        result.metrics.area_delta =
-            static_cast<std::int64_t>(result.metrics.patched_area) -
-            static_cast<std::int64_t>(result.metrics.trojan_area);
-        result.metrics.level_delta =
-            static_cast<std::int64_t>(result.metrics.patched_level) -
-            static_cast<std::int64_t>(result.metrics.trojan_level);
-        result.status = Dac25RunecoStatus::success;
-        result.reason = "recovered verified zero-input constant runeco patch";
-        result.metrics.total_ms = elapsed_ms(total_start);
-        return result;
+      if (parsed_all && bench_io::write_bench_file(
+                            (temporary.path / "constant_raw.bench").string(),
+                            constant_patch, &error)) {
+        const auto constant_convert_start = Clock::now();
+        ProcessResult constant_conversion;
+        converted = normalize_bench_with_abc(
+            resolved_abc, temporary.path,
+            temporary.path / "constant_raw.bench",
+            temporary.path / "constant_normalized.bench",
+            hard_timeout_seconds, "convert_constant", &constant_conversion,
+            &patched, &error);
+        result.metrics.convert_ms += elapsed_ms(constant_convert_start);
+        result.stdout_log += constant_conversion.stdout_text;
+        result.stderr_log += constant_conversion.stderr_text;
+        recovered_constant = converted;
       }
     }
+  }
+  if (!converted) {
+    result.status = Dac25RunecoStatus::conversion_failed;
+    result.reason = conversion.timed_out
+                        ? "ABC BENCH conversion timed out"
+                        : error.empty()
+                              ? "ABC could not convert the runeco patch"
+                              : error;
     result.stdout_log += "\npatch.v:\n" + patch_verilog;
     result.metrics.total_ms = elapsed_ms(total_start);
     return result;
   }
 
-  circuit patched;
-  if (!bench_io::parse_bench_file((temporary.path / "patched.bench").string(),
-                                  patched, &error)) {
-    result.status = Dac25RunecoStatus::conversion_failed;
-    result.reason = "converted BENCH parse error: " + error;
+  if (!restore_interface_names(&patched, pi_names, po_names, &error)) {
+    result.status = Dac25RunecoStatus::write_failed;
+    result.reason = "could not restore original patch interface: " + error;
     result.metrics.total_ms = elapsed_ms(total_start);
     return result;
   }
@@ -627,7 +781,9 @@ Dac25RunecoResult run_dac25_runeco(
   }
 
   result.status = Dac25RunecoStatus::success;
-  result.reason = "runeco synthesized and verified the ECO patch";
+  result.reason = recovered_constant
+                      ? "recovered and normalized verified constant ECO patch"
+                      : "runeco synthesized and verified the ECO patch";
   result.metrics.total_ms = elapsed_ms(total_start);
   return result;
 }

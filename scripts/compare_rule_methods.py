@@ -646,7 +646,46 @@ def _abc_quote_path(path: Path) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _linux_descendant_pids(root_pid: int) -> List[int]:
+    """Snapshot the Linux process tree before the root can re-parent it."""
+    descendants: List[int] = []
+    pending = [root_pid]
+    seen = {root_pid}
+    while pending:
+        parent = pending.pop()
+        children_path = Path(f"/proc/{parent}/task/{parent}/children")
+        try:
+            raw_children = children_path.read_text(encoding="ascii").split()
+        except OSError:
+            continue
+        for raw in raw_children:
+            try:
+                child = int(raw)
+            except ValueError:
+                continue
+            if child <= 0 or child in seen:
+                continue
+            seen.add(child)
+            descendants.append(child)
+            pending.append(child)
+    return descendants
+
+
+def _signal_pids(pids: Sequence[int], sig: signal.Signals) -> None:
+    for pid in reversed(tuple(pids)):
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
+    # DAC/runeco deliberately uses a child process group so its own timeout can
+    # kill ABC and ABC's helpers.  On the runner's outer timeout, snapshot and
+    # signal every descendant as well as main's session group; otherwise that
+    # separate group could survive and contaminate later serial cases.
+    descendants = _linux_descendant_pids(process.pid)
+    _signal_pids(descendants, signal.SIGTERM)
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
@@ -656,6 +695,11 @@ def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
         return
     except subprocess.TimeoutExpired:
         pass
+    descendants.extend(
+        pid for pid in _linux_descendant_pids(process.pid)
+        if pid not in descendants
+    )
+    _signal_pids(descendants, signal.SIGKILL)
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
@@ -910,7 +954,12 @@ def _execute_run(
         timeout_stage = "main"
     elif main_result.launch_error is not None:
         status = "HARNESS_ERROR"
-    elif main_result.returncode != 0:
+    elif (
+        run.method == "dac25-inspired"
+        and (not staged_patch.is_file() or staged_patch.stat().st_size == 0)
+    ):
+        status = "NO_PATCH"
+    elif main_result.returncode != 0 and run.method != "dac25-inspired":
         status = f"ERROR_{main_result.returncode}"
     elif not staged_patch.is_file() or staged_patch.stat().st_size == 0:
         status = "NO_PATCH"
