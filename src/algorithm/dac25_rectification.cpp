@@ -387,17 +387,110 @@ bool same_gate_structure(const circuit& golden,
   return lhs_inputs == rhs_inputs;
 }
 
-bool looks_like_inserted_auxiliary(const std::string& name) {
-  if (name.size() < 2 || name[0] != 'r') return false;
-  return std::all_of(name.begin() + 1, name.end(), [](char c) {
-    return std::isdigit(static_cast<unsigned char>(c)) != 0;
-  });
+bool eval_gate_scalar(const cell& gate,
+                      const std::vector<int>& values,
+                      int* out) {
+  if (!out || gate.inputs.empty()) return false;
+  auto input = [&](std::size_t position, int* value) {
+    const int idx = gate.inputs.at(position);
+    if (idx < 0 || static_cast<std::size_t>(idx) >= values.size()) {
+      return false;
+    }
+    *value = values[static_cast<std::size_t>(idx)] != 0 ? 1 : 0;
+    return true;
+  };
+  int acc = 0;
+  if (!input(0, &acc)) return false;
+  switch (gate.gtype) {
+    case GType::AND:
+    case GType::NAND:
+      for (std::size_t i = 1; i < gate.inputs.size(); ++i) {
+        int value = 0;
+        if (!input(i, &value)) return false;
+        acc &= value;
+      }
+      *out = gate.gtype == GType::NAND ? 1 - acc : acc;
+      return true;
+    case GType::OR:
+    case GType::NOR:
+      for (std::size_t i = 1; i < gate.inputs.size(); ++i) {
+        int value = 0;
+        if (!input(i, &value)) return false;
+        acc |= value;
+      }
+      *out = gate.gtype == GType::NOR ? 1 - acc : acc;
+      return true;
+    case GType::NOT:
+      if (gate.inputs.size() != 1U) return false;
+      *out = 1 - acc;
+      return true;
+    case GType::BUFF:
+      if (gate.inputs.size() != 1U) return false;
+      *out = acc;
+      return true;
+    case GType::XOR:
+    case GType::XNOR:
+      for (std::size_t i = 1; i < gate.inputs.size(); ++i) {
+        int value = 0;
+        if (!input(i, &value)) return false;
+        acc ^= value;
+      }
+      *out = gate.gtype == GType::XNOR ? 1 - acc : acc;
+      return true;
+  }
+  return false;
+}
+
+bool simulate_nodes(const circuit& net,
+                    const std::unordered_map<std::string, int>& pi_values,
+                    int override_node,
+                    int override_value,
+                    std::vector<int>* values,
+                    std::string* error) {
+  if (!values) return false;
+  values->assign(net.node_count(), 0);
+  for (std::size_t i = 0; i < net.node_count(); ++i) {
+    const cell& node = net.get_cell(static_cast<int>(i));
+    if (node.ctype == CType::CONST) {
+      (*values)[i] = node.val != 0 ? 1 : 0;
+    } else if (node.ctype == CType::PI) {
+      auto found = pi_values.find(net.node_name(static_cast<int>(i)));
+      if (found == pi_values.end()) {
+        if (error) *error = "simulation PI value is missing";
+        return false;
+      }
+      (*values)[i] = found->second != 0 ? 1 : 0;
+    } else if (node.ctype == CType::UNDEF) {
+      if (error) *error = "simulation encountered undefined node";
+      return false;
+    }
+  }
+  for (int idx : net.eval_order()) {
+    if (idx < 0 || static_cast<std::size_t>(idx) >= net.node_count()) {
+      if (error) *error = "simulation eval-order node out of range";
+      return false;
+    }
+    if (idx == override_node) {
+      (*values)[static_cast<std::size_t>(idx)] = override_value != 0 ? 1 : 0;
+      continue;
+    }
+    const cell& gate = net.get_cell(idx);
+    int value = 0;
+    if (gate.ctype != CType::GATE ||
+        !eval_gate_scalar(gate, *values, &value)) {
+      if (error) *error = "could not evaluate gate " + net.node_name(idx);
+      return false;
+    }
+    (*values)[static_cast<std::size_t>(idx)] = value;
+  }
+  return true;
 }
 
 std::vector<Dac25Candidate> build_candidates(
     const circuit& golden,
     const circuit& trojan,
     const std::vector<int>& mismatch_po_nodes,
+    const std::vector<int>& observed_pi_values,
     std::size_t* raw_count) {
   const std::size_t n = trojan.node_count();
   std::vector<std::size_t> fanout(n, 0);
@@ -443,6 +536,37 @@ std::vector<Dac25Candidate> build_candidates(
     }
   }
 
+  Alignment alignment;
+  std::string simulation_error;
+  if (!build_alignment(golden, trojan, &alignment, &simulation_error)) {
+    throw std::runtime_error(simulation_error);
+  }
+  if (observed_pi_values.size() != alignment.pi_names.size()) {
+    throw std::runtime_error("observed PI pattern width mismatch");
+  }
+  std::unordered_map<std::string, int> pi_values;
+  for (std::size_t i = 0; i < alignment.pi_names.size(); ++i) {
+    pi_values.emplace(alignment.pi_names[i], observed_pi_values[i]);
+  }
+  std::vector<int> golden_values;
+  std::vector<int> trojan_values;
+  if (!simulate_nodes(golden, pi_values, -1, 0, &golden_values,
+                      &simulation_error) ||
+      !simulate_nodes(trojan, pi_values, -1, 0, &trojan_values,
+                      &simulation_error)) {
+    throw std::runtime_error(simulation_error);
+  }
+  std::size_t mismatches_before = 0;
+  for (std::size_t i = 0; i < alignment.golden_po.size(); ++i) {
+    if (golden_values[static_cast<std::size_t>(alignment.golden_po[i])] !=
+        trojan_values[static_cast<std::size_t>(alignment.trojan_po[i])]) {
+      mismatches_before += 1;
+    }
+  }
+  if (mismatches_before == 0) {
+    throw std::runtime_error("observed mismatch pattern simulated equivalent");
+  }
+
   std::vector<Dac25Candidate> candidates;
   for (std::size_t i = 0; i < n; ++i) {
     if (!in_union[i]) continue;
@@ -455,6 +579,7 @@ std::vector<Dac25Candidate> build_candidates(
     candidate.fanout = fanout[i];
     candidate.mismatching_po_cone_count = cone_count[i];
     candidate.distance_to_observed_mismatch = distance[i];
+    candidate.observed_mismatches_before = mismatches_before;
     if (!golden.has_node(candidate.name)) {
       candidate.absent_from_golden = true;
     } else {
@@ -463,17 +588,37 @@ std::vector<Dac25Candidate> build_candidates(
           !same_gate_structure(golden, golden_idx, trojan, candidate.node);
     }
 
-    // Stable, deterministic heuristic.  The public DAC'25 material describes
-    // grouping/ranking but does not publish its exact formula.  We therefore
-    // expose this implementation-defined score instead of claiming parity.
+    std::vector<int> flipped_values;
+    if (!simulate_nodes(trojan, pi_values, candidate.node,
+                        1 - trojan_values[i], &flipped_values,
+                        &simulation_error)) {
+      throw std::runtime_error(simulation_error);
+    }
+    for (std::size_t po = 0; po < alignment.golden_po.size(); ++po) {
+      if (golden_values[static_cast<std::size_t>(alignment.golden_po[po])] !=
+          flipped_values[static_cast<std::size_t>(alignment.trojan_po[po])]) {
+        candidate.observed_mismatches_after_flip += 1;
+      }
+    }
+    candidate.observed_flip_repairs =
+        candidate.observed_mismatches_after_flip == 0;
+
+    // Stable, deterministic, intervention-based heuristic.  The public
+    // DAC'25 material describes grouping/ranking but does not publish its
+    // exact formula.  We expose this score instead of claiming parity.  It
+    // deliberately does not special-case dataset names such as r0/r1.
     std::int64_t score = 0;
-    if (looks_like_inserted_auxiliary(candidate.name)) score += 4000000000LL;
+    if (candidate.observed_flip_repairs) score += 8000000000LL;
+    const std::int64_t reduction =
+        static_cast<std::int64_t>(mismatches_before) -
+        static_cast<std::int64_t>(candidate.observed_mismatches_after_flip);
+    score += reduction * 100000000LL;
     if (candidate.structurally_different) score += 2000000000LL;
-    if (candidate.primary_output) score += 500000000LL;
+    if (candidate.primary_output) score -= 500000000LL;
     score += static_cast<std::int64_t>(candidate.mismatching_po_cone_count) *
              1000000LL;
     if (candidate.absent_from_golden) score += 100000LL;
-    score -= static_cast<std::int64_t>(candidate.distance_to_observed_mismatch) *
+    score += static_cast<std::int64_t>(candidate.distance_to_observed_mismatch) *
              1000LL;
     score -= static_cast<std::int64_t>(candidate.fanout);
     candidate.score = score;
@@ -743,7 +888,8 @@ Dac25PlanResult plan_dac25_rectification(
   const auto candidate_start = Clock::now();
   try {
     result.candidates = build_candidates(
-        golden, trojan, observed.trojan_po_nodes, &result.raw_candidates);
+        golden, trojan, observed.trojan_po_nodes, observed.pi_values,
+        &result.raw_candidates);
   } catch (const std::exception& e) {
     result.status = Dac25PlanStatus::invalid;
     result.reason = e.what();

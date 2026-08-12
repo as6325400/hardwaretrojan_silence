@@ -66,6 +66,9 @@ struct Dac25Candidate {
   std::size_t mismatching_po_cone_count = 0;
   std::size_t fanout = 0;
   std::size_t distance_to_observed_mismatch = 0;
+  std::size_t observed_mismatches_before = 0;
+  std::size_t observed_mismatches_after_flip = 0;
+  bool observed_flip_repairs = false;
   std::int64_t score = 0;
 };
 
