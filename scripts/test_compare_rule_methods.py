@@ -231,6 +231,11 @@ class RunnerFixture(unittest.TestCase):
 
 
 class SummaryParserTest(unittest.TestCase):
+    def test_rejects_dot_path_components(self) -> None:
+        for value in (".", ".."):
+            with self.assertRaises(runner.RunnerError):
+                runner._safe_component(value, "component")
+
     def test_preserves_generic_and_strategy_specific_keys(self) -> None:
         stdout = (
             "noise\n"

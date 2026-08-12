@@ -415,16 +415,17 @@ def main() -> int:
         )
         for arm, paths in (("off", args.off_results), ("on", args.on_results)):
             for index, result_path in enumerate(paths, start=1):
+                snapshot_dir = raw_dir / f"{arm}_{index:02d}"
                 snapshots.append(
                     _atomic_copy(
                         result_path,
-                        raw_dir / f"{arm}_{index:02d}_results.csv",
+                        snapshot_dir / "results.csv",
                     )
                 )
                 snapshots.append(
                     _atomic_copy(
                         result_path.parent / "run_context.json",
-                        raw_dir / f"{arm}_{index:02d}_run_context.json",
+                        snapshot_dir / "run_context.json",
                     )
                 )
     summary = {

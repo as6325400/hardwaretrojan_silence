@@ -52,7 +52,11 @@ def _safe_relative(value: object, label: str) -> Path:
 
 
 def _safe_component(value: object, label: str) -> str:
-    if not isinstance(value, str) or SAFE_COMPONENT_RE.fullmatch(value) is None:
+    if (
+        not isinstance(value, str)
+        or value in {".", ".."}
+        or SAFE_COMPONENT_RE.fullmatch(value) is None
+    ):
         raise RuntimeError(f"unsafe {label}: {value!r}")
     return value
 

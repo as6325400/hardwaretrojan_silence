@@ -230,9 +230,15 @@ class V4ManifestTest(unittest.TestCase):
             manifest = generator.build_manifest(
                 source, Path("validation/v4_inputs"), 10.0
             )
-            manifest["cases"][0]["circuit"] = "../../escape"
+            manifest["cases"][0]["circuit"] = ".."
             with self.assertRaisesRegex(RuntimeError, "unsafe circuit"):
                 materializer.materialize(source, temp / "target", manifest, "all_ready")
+
+    def test_generator_rejects_dot_components(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "unsafe benchmark"):
+            generator._safe_component("..", "benchmark")
+        with self.assertRaisesRegex(RuntimeError, "unsafe case_id"):
+            generator._safe_component(".", "case_id")
 
 
 if __name__ == "__main__":

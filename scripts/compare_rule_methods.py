@@ -145,7 +145,7 @@ def _load_json(path: Path) -> Dict[str, Any]:
 
 
 def _safe_component(value: str, label: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+    if value in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
         raise RunnerError(f"unsafe {label}: {value!r}")
     return value
 
