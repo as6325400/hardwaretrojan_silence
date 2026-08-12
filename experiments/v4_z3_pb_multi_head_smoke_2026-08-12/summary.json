@@ -1,0 +1,159 @@
+{
+  "aggregate": {
+    "all_cases_wall": {
+      "multi_head_ms": 1433821.9061949058,
+      "multi_over_scalar": 1.0005875689187107,
+      "scalar_ms": 1432979.9317258876
+    },
+    "both_pass": {
+      "case_count": 3,
+      "multi_head_runtime_ms": 5219.43,
+      "multi_head_wall_ms": 5525.510983890854,
+      "multi_over_scalar_runtime_geomean": 1.5329422553026777,
+      "multi_over_scalar_wall_geomean": 1.4111629238806829,
+      "runtime_case_count": 3,
+      "scalar_runtime_ms": 7609.097,
+      "scalar_wall_ms": 7917.877485044301
+    },
+    "both_pass_qor": {
+      "case_count": 3,
+      "multi_head_and_delta_trojan_mean": 7.666666666666667,
+      "multi_head_and_delta_trojan_sum": 23.0,
+      "multi_head_level_delta_trojan_mean": 0.3333333333333333,
+      "scalar_and_delta_trojan_mean": 7.333333333333333,
+      "scalar_and_delta_trojan_sum": 22.0,
+      "scalar_level_delta_trojan_mean": 1.0
+    },
+    "case_count": 13,
+    "gains": 6,
+    "multi_head_pass": 9,
+    "multi_head_statuses": {
+      "CEC_FAIL": 2,
+      "PASS": 9,
+      "TIMEOUT": 2
+    },
+    "multi_head_telemetry": {
+      "cases_with_discovery": 13,
+      "cases_with_patch": 11,
+      "cec_feedback_labels_added": 40.0,
+      "cec_feedback_new_heads": 2.0,
+      "cec_feedback_rounds": 15.0,
+      "final_heads_sum": 28.0,
+      "formal_cex_added": 1340.0,
+      "formal_cex_returned": 1360.0,
+      "formal_global_cex_added": 1348.0,
+      "formal_miter_ms": 486460.91149999993,
+      "formal_solver_checks": 1484.0,
+      "head_rule_events": 331.0,
+      "passing_cases_all_heads_proved": 9,
+      "proved_heads_sum": 23.0,
+      "scoped_formal_refinement_rebuild_events": 266.0
+    },
+    "pass_delta": 6,
+    "regressions": 0,
+    "scalar_pass": 3,
+    "scalar_statuses": {
+      "CEC_FAIL": 4,
+      "NO_PATCH": 4,
+      "PASS": 3,
+      "TIMEOUT": 2
+    },
+    "transitions": {
+      "CEC_FAIL->PASS": 2,
+      "CEC_FAIL->TIMEOUT": 2,
+      "NO_PATCH->PASS": 4,
+      "PASS->PASS": 3,
+      "TIMEOUT->CEC_FAIL": 2
+    }
+  },
+  "correctness_authority": "external ABC CEC",
+  "paired_results_sha256": "456551481e5ae039185ee1ce0f1c5e5d2cc34a5ff6996ec5e5df045324f064ed",
+  "provenance": {
+    "abc_sha256": "627ee77136889096c2d8aa11ef9adffb666504867f29508180ac10fc596093e3",
+    "case_ids": [
+      "aes_n2_t5_o000_s9000_7aac57e8",
+      "aes_n3_t5_o000_s9000_7aac57e8",
+      "c7552_n5_t5_o000_s9503_209d2aa4",
+      "c880_n1_t3_o000_s2007_6c8940cd",
+      "c880_n1_t5_o000_s2001_6c8940cd",
+      "c880_n2_t3_o000_s2004_6c8940cd",
+      "c880_n2_t3_o500_s6004_6c8940cd",
+      "c880_n2_t5_o000_s2006_6c8940cd",
+      "c880_n3_t3_o000_s2004_6c8940cd",
+      "c880_n3_t5_o000_s2001_6c8940cd",
+      "c880_n3_t5_o500_s6004_6c8940cd",
+      "mem_ctrl_n2_t5_o000_s2003_bef1125c",
+      "mem_ctrl_n3_t5_o000_s2003_bef1125c"
+    ],
+    "config": {
+      "abc_timeout": 60.0,
+      "common_args": [
+        "--depth",
+        "10",
+        "--neg-ratio",
+        "50",
+        "--mine-rounds",
+        "15",
+        "--mine-max",
+        "5000"
+      ],
+      "rule_formal_cex_batch": 5,
+      "rule_formal_max_rounds": 5,
+      "rule_formal_refine": true,
+      "rule_formal_timeout_ms": 10000,
+      "rule_multi_head": true,
+      "rule_multi_head_max_rounds": 20,
+      "timeout_override": 300.0
+    },
+    "manifest": "experiments/v4_z3_pb_formal_smoke_2026-08-12/raw/source_manifest.json",
+    "manifest_sha256": "a85a6a75260a9ff659d91ec4bc50a432e1343979418e94a24c581448fbacee82",
+    "multi_head_binary_sha256": "534b5eb47e069e0a947efd5d2a8daa1b3605ebc0c85d950f1d7814d9f605342f",
+    "multi_head_runner_sha256": "b400e600a368fafd651360686a940f4c4a3b0a1e514d1941098028d53538d8ae",
+    "multi_head_sources": [
+      {
+        "context_key": "ccbe77fcaa03be03c174ad44783db6515c8eaa5d427494572cabfb3c284d6680",
+        "context_path": "experiments/v4_z3_pb_multi_head_smoke_2026-08-12/raw/multi_head/run_context.json",
+        "context_sha256": "ea393486713c6e839e23a65d9e79fc2fa4cd4d60a66d4e28aa5813fc88308663",
+        "path": "experiments/v4_z3_pb_multi_head_smoke_2026-08-12/raw/multi_head/results.csv",
+        "profile": "smoke_extended",
+        "rows": 13,
+        "runner_schema": "rule-method-ab-run/4",
+        "sha256": "e5ccb6a470faa040c1fae8dd35997e496fa53cffbf886959a00c3159f3b875d2"
+      }
+    ],
+    "multi_head_summary": {
+      "path": "experiments/v4_z3_pb_multi_head_smoke_2026-08-12/raw/multi_head/summary.json",
+      "record_count": 13,
+      "schema_version": "rule-method-ab-summary/4",
+      "sha256": "ceb4a87e6f81e08672e3a6e3534f92bfa2f47d1351f46ba85005a8d64e7d8d86"
+    },
+    "profile": "smoke_extended",
+    "scalar_binary_sha256": "2bebfa7eadefbcbda545d255dbd26bfa2da85a7adeb0097bffd9d36a61668b41",
+    "scalar_runner_sha256": "bb85251ea9cf7bfcbe98f140a5f3a1395ee3f3a7810ccb154c1b041bcf40a614",
+    "scalar_sources": [
+      {
+        "context_key": "5dcc952abb45c87ebf9b1f692d75c9e56642a40c8f253c104fc61568cd342c3b",
+        "context_path": "experiments/v4_z3_pb_formal_smoke_2026-08-12/raw/on_01/run_context.json",
+        "context_sha256": "c65a6e787d17f71e12a7c499564269f5df7bb650c92187eb1fdeb11890bb4404",
+        "path": "experiments/v4_z3_pb_formal_smoke_2026-08-12/raw/on_01/results.csv",
+        "profile": "smoke_fast",
+        "rows": 9,
+        "runner_schema": "rule-method-ab-run/3",
+        "sha256": "9bf44381ce7d33d3e2b9a7fe6327f5a6045f3d4986cc707a60162257a3de7fc3"
+      },
+      {
+        "context_key": "99801b982de3cd1fa9e3a8b2852dff92e2e84082cc802ac457cbad18ed796906",
+        "context_path": "experiments/v4_z3_pb_formal_smoke_2026-08-12/raw/on_02/run_context.json",
+        "context_sha256": "390f149e02ec5f6dafc7bea5adb931c5be096cb1cd00cdce1e160d59948ab593",
+        "path": "experiments/v4_z3_pb_formal_smoke_2026-08-12/raw/on_02/results.csv",
+        "profile": "all_ready",
+        "rows": 4,
+        "runner_schema": "rule-method-ab-run/3",
+        "sha256": "088e4ed32ad188f29ba0d8a32d8a19538052463e19315338cf9ddcedc7314dc6"
+      }
+    ],
+    "show_sha256": "4517349556e40cf3468dc37802a4ceb8430df53c0447a2e36cf889f4fd9a4082",
+    "validated_input_case_count": 13
+  },
+  "schema_version": "v4-z3-pb-multi-head-comparison/1"
+}

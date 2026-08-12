@@ -1,0 +1,39 @@
+{
+  "abc_sha256": "627ee77136889096c2d8aa11ef9adffb666504867f29508180ac10fc596093e3",
+  "abc_timeout": 60.0,
+  "binary_sha256": "534b5eb47e069e0a947efd5d2a8daa1b3605ebc0c85d950f1d7814d9f605342f",
+  "common_args": [
+    "--depth",
+    "10",
+    "--neg-ratio",
+    "50",
+    "--mine-rounds",
+    "15",
+    "--mine-max",
+    "5000"
+  ],
+  "context_key": "ccbe77fcaa03be03c174ad44783db6515c8eaa5d427494572cabfb3c284d6680",
+  "highs_library_sha256": null,
+  "manifest_sha256": "a85a6a75260a9ff659d91ec4bc50a432e1343979418e94a24c581448fbacee82",
+  "methods": [
+    "z3-pb"
+  ],
+  "profile": "smoke_extended",
+  "rule_cover_fourth_objective": null,
+  "rule_cover_logic_risk_weights": {
+    "fanout": null,
+    "timing": null,
+    "unique": null
+  },
+  "rule_cover_phase4_timeout_ms": null,
+  "rule_formal_cex_batch": 5,
+  "rule_formal_max_rounds": 5,
+  "rule_formal_refine": true,
+  "rule_formal_timeout_ms": 10000,
+  "rule_multi_head": true,
+  "rule_multi_head_max_rounds": 20,
+  "runner_schema": "rule-method-ab-run/4",
+  "runner_sha256": "b400e600a368fafd651360686a940f4c4a3b0a1e514d1941098028d53538d8ae",
+  "show_sha256": "4517349556e40cf3468dc37802a4ceb8430df53c0447a2e36cf889f4fd9a4082",
+  "timeout_override": 300.0
+}

@@ -140,10 +140,22 @@ bin/main <golden.bench> <trojan.bench> <groundtruth.json> [output.bench] [option
 | `--rule-formal-timeout-ms N` | 10000 | Soft wall-clock budget for each SAT rule-miter check |
 | `--rule-formal-max-rounds N` | 5 | Maximum rule rebuilds caused by SAT counterexamples |
 | `--rule-formal-cex-batch N` | 5 | Counterexamples returned per check; range 1–5 |
+| `--rule-multi-head` | off | With Z3-PB + formal refinement, learn one repair predicate per mismatching PO and compose independent PO XOR heads |
+| `--rule-multi-head-max-rounds N` | 20 | Maximum SAT-driven rebuilds for each multi-head predicate |
 
 `z3-pb` changes rule synthesis only; downstream payload-node optimization and patch application are shared with the other methods. It uses Z3 Optimize as a pseudo-Boolean/MaxSMT backend. Its Boolean formulation is 0-1 ILP-equivalent, but it is not a generic MILP solver and does not construct or expose an LP relaxation, so there is no reported MILP gap. “Optimal” and “verified” telemetry apply only to the bounded candidate set and finite training matrix. Whole-input correctness is established by ABC CEC.
 
 With `--rule-formal-refine`, the learned rule is additionally compared against the circuit-derived observable-error predicate over the full PI space. SAT witnesses are labeled from the Golden/Trojan miter itself—no ground-truth membership lookup is used for this feedback—and are accumulated as positive or protected negative training rows. `FN/FP UNSAT` proves `E(x) ↔ R(x)` for that conditional rule. A verified direct literal cut bypasses the DNF, so its rule miter is reported as `skipped`; the independent external ABC CEC remains the final patch-correctness authority in every case.
+
+`--rule-multi-head` is an opt-in multi-Trojan repair policy.  For every
+observed mismatching output `o`, it learns and formally refines an independent
+predicate `R_o(x)` against `E_o(x) = Golden_o(x) XOR Trojan_o(x)`, then builds
+`Patched_o = Trojan_o XOR R_o`.  Every predicate is materialized from the same
+immutable Trojan graph before any output is changed.  A head consumes its own
+SAT witnesses; those witnesses are also retained with all per-PO labels so a
+later-discovered head starts from the complete known corpus.  Whole-patch CEC
+counterexamples update every current head and can discover a previously unseen
+output head.  The historical scalar policy remains the default.
 
 `rule_synth_summary synthesized_*` records the model immediately after rule synthesis. `rule_apply_summary` separately records the post-signature/applied mechanism and its effective rule/literal/depth counts; a verified direct literal cut is identified with `rule_model_used=0` and an effective `1/1/1` condition.
 
@@ -224,6 +236,20 @@ Artifacts include per-method logs, patched netlists, JSON records, aggregate CSV
 The full 482-case Z3-PB benchmark and the same-binary formal OFF/ON ablation are tracked under [`experiments/z3_pb_v0_vs_v0_v5_2026-08-12`](experiments/z3_pb_v0_vs_v0_v5_2026-08-12/) and [`experiments/z3_pb_formal_ab_v0_full_2026-08-12`](experiments/z3_pb_formal_ab_v0_full_2026-08-12/). The latter keeps external ABC CEC as the PASS criterion and separates the formal flag's causal effect from the other backported correctness fixes. See [`Z3_PB_FORMAL_REFINEMENT_REPORT.md`](Z3_PB_FORMAL_REFINEMENT_REPORT.md) for the presentation-ready combined report.
 
 V4 multi-Trojan inputs can be projected into the same reproducible runner with `scripts/generate_v4_rule_benchmark_manifest.py` and `scripts/materialize_v4_benchmark_inputs.py`. A same-binary 13-case formal OFF/ON engineering smoke covers N=1/2/3/5, shared triggers, medium circuits, and held-out large OOD circuits; see [`V4_Z3_PB_FORMAL_SMOKE_REPORT.md`](V4_Z3_PB_FORMAL_SMOKE_REPORT.md). This smoke is intentionally diagnostic and is not presented as a V4 success-rate estimate.
+
+Compared with the prior frozen scalar result on the exact same diagnostic
+13-case V4 cohort, multi-head external-CEC PASS is **3/13 to 9/13** (six gains,
+zero regressions): all eight `c880` cases and the `c7552` five-Trojan case pass.
+The two large AES cases still fail CEC and both `mem_ctrl` cases hit the
+300-second timeout, so this is evidence that the tested multi-head repair
+configuration improves this cohort, not a general V4 success rate or a
+composition-only ablation.  In addition to per-output composition, the arm uses
+up to 20 rebuilds per head, an effective head negative ratio of 5, all physical
+gates for circuits with at most 20,000 nodes (otherwise the raw DT union), and
+up to five whole-patch CEC feedback rounds.  The binaries differ, so runtime is
+not a same-binary policy ablation.  Frozen input identities, aggregate raw-result
+snapshots/provenance, per-case metrics, and the analyzer are in
+[`experiments/v4_z3_pb_multi_head_smoke_2026-08-12`](experiments/v4_z3_pb_multi_head_smoke_2026-08-12/).
 
 ## ABC Setup
 

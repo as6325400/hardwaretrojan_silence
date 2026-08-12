@@ -349,7 +349,11 @@ class V4MultiHeadAnalyzerTest(unittest.TestCase):
             self.assertEqual(aggregate["multi_head_pass"], 2)
             self.assertEqual(aggregate["gains"], 1)
             self.assertEqual(aggregate["regressions"], 0)
-            self.assertEqual(aggregate["multi_head_telemetry"]["formal_rebuild_events"], 13)
+            telemetry = aggregate["multi_head_telemetry"]
+            self.assertEqual(
+                telemetry["scoped_formal_refinement_rebuild_events"], 13
+            )
+            self.assertEqual(telemetry["formal_global_cex_added"], 13)
             self.assertEqual(summary["correctness_authority"], "external ABC CEC")
             for name in ("paired_results.csv", "summary.json", "REPORT.md", "SHA256SUMS"):
                 self.assertTrue((fixture.output / name).is_file())

@@ -964,6 +964,8 @@ CEC Retry Loop（最多 5 輪）：
 | `--rule-formal-timeout-ms N` | 10000 | 每次 rule-miter 的 soft wall-clock budget |
 | `--rule-formal-max-rounds N` | 5 | SAT counterexample 造成的最大 rebuild 次數 |
 | `--rule-formal-cex-batch N` | 5 | 每次 miter 最多回傳的 counterexamples，範圍 1–5 |
+| `--rule-multi-head` | off | 在 Z3-PB + formal 下，為每個 mismatch PO 分別學習並組合 repair head |
+| `--rule-multi-head-max-rounds N` | 20 | 每個 output head 可由 SAT counterexample 觸發的最大 rebuild 次數 |
 
 ---
 
@@ -991,5 +993,37 @@ runner 強制 `--jobs 1`，避免同 case 的兩種方法競爭共用 rule-merge
 runner 會保存 stdout、stderr、patched bench、external CEC logs、JSON record，以及帶 pre-run fingerprints 與 post-run mutation check 的 aggregate CSV/JSON。可追蹤的 28-row 投影在 [`experiments/rule_method_ab_2026-08-11/paired_results.csv`](experiments/rule_method_ab_2026-08-11/paired_results.csv)；完整結果、commit 鏈、artifact SHA 與限制見 [`RULE_METHOD_COMPARISON_REPORT.md`](RULE_METHOD_COMPARISON_REPORT.md)。
 
 完整 V0 可執行母體（482 cases）的純 Z3-PB 對 v0–v5 結果在 [`experiments/z3_pb_v0_vs_v0_v5_2026-08-12`](experiments/z3_pb_v0_vs_v0_v5_2026-08-12/)；同一 frozen binary 下 formal OFF/ON 的 clean ablation 在 [`experiments/z3_pb_formal_ab_v0_full_2026-08-12`](experiments/z3_pb_formal_ab_v0_full_2026-08-12/)。整合說明見 [`Z3_PB_FORMAL_REFINEMENT_REPORT.md`](Z3_PB_FORMAL_REFINEMENT_REPORT.md)。報告以 external ABC CEC 為 success authority，並分開呈現 finite-training optimal、rule-miter proved 與 direct-cut skipped 三種語義。
+
+### Multi-head output repair
+
+scalar policy 只學一個 `R_any(x)`，再把它套到所有 payload actions；多個
+Trojan 的 activation mask 不同時，這會讓不該動作的 head 一起啟用。
+`--rule-multi-head` 改成以具名 PO 為 head。對每個 mismatch output `o`：
+
+```text
+E_o(x) = Golden_o(x) XOR Trojan_o(x)
+SAT prove/refine: E_o(x) <-> R_o(x)
+Patched_o(x) = Trojan_o(x) XOR R_o(x)
+```
+
+每個 `R_o` 都從未修改的 Trojan graph 建立，所有 predicate 完成後才更新
+PO，因此 head 之間不會改寫彼此的 feature logic。SAT CEX 會先回灌產生它的
+head，並以 `(PI, per-PO labels)` 保留供未來新 head 初始化；whole-patch CEC
+CEX 則更新所有現有 heads。CEC 若發現原 GT 未觀察到的 mismatch PO，會新增
+head 並用完整 corpus 回填。小於等於
+20,000 nodes 的 circuit 使用全部 physical gates 作 per-head candidate universe；
+更大的 circuit 使用 raw positive-DT path union 控制記憶體。每個 head 的
+effective negative ratio 是 `min(--neg-ratio, 5)`，SAT-driven rebuild 上限預設
+20，whole-patch CEC feedback 最多 5 輪。
+
+相對先前 frozen scalar formal result，exact V4 13-case diagnostic cohort
+從 3/13 提升至 9/13 external-CEC PASS（6 gains、0 regressions）。`c880` 8/8 與 `c7552` N=5
+皆 PASS；AES 兩案仍 CEC_FAIL，mem_ctrl 兩案仍在 300 秒 TIMEOUT。這個
+cohort 是刻意挑選的 engineering smoke，不是 V4 population success-rate
+估計；這也是 multi-head composition、較大的 head refinement budget、head
+negative-ratio clamp 與 candidate policy 的整套設定比較，不能視為只改
+composition 的單因子消融。兩 arm binary 不同，因此 runtime 只作描述，不能
+視為 same-binary policy ablation。aggregate raw-result snapshots、provenance 與逐案表見
+[`experiments/v4_z3_pb_multi_head_smoke_2026-08-12`](experiments/v4_z3_pb_multi_head_smoke_2026-08-12/)。
 
 面積比較應採 runner 對最終 patched bench 重新量測的 `actual_area_delta_trojan` / `actual_area_delta_golden`。main 的 `reported_area_delta` 是流程內摘要；正式 v2 hard artifacts 的 8 個 multi-rule runs 中，它都低估了包含 rule-match logic 的最終面積增量。

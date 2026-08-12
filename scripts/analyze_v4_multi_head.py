@@ -60,7 +60,8 @@ PAIRED_FIELDS = [
     "multi_minus_scalar_actual_level_delta_trojan", "initial_heads",
     "discovery_candidates", "discovery_candidate_source", "final_heads",
     "proved_heads", "all_final_heads_proved", "head_rule_events",
-    "formal_rebuild_events", "formal_cex_returned", "formal_cex_added",
+    "scoped_formal_refinement_rebuild_events", "formal_cex_returned",
+    "formal_cex_added",
     "formal_global_cex_added", "formal_solver_checks", "formal_miter_ms",
     "head_optimizer_ms", "head_learning_ms", "head_miter_statuses_json",
     "cec_feedback_rounds", "cec_feedback_labels_added",
@@ -453,7 +454,7 @@ def _multi_head_telemetry(row: Mapping[str, str]) -> Dict[str, Any]:
             and final_patch.get("proved_heads") is not None else None
         ),
         "head_rule_events": len(rules),
-        "formal_rebuild_events": sum(
+        "scoped_formal_refinement_rebuild_events": sum(
             1 for item in rules if (_number(item.get("pass", "")) or 0) > 1
         ),
         "formal_cex_returned": _sum_telemetry(rules, "returned"),
@@ -772,6 +773,11 @@ def aggregate(pairs: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
             ),
         },
         "multi_head_telemetry": {
+            "passing_cases_all_heads_proved": sum(
+                bool(row.get("multi_head_pass"))
+                and row.get("all_final_heads_proved") == 1
+                for row in pairs
+            ),
             "cases_with_discovery": sum(
                 row.get("initial_heads") is not None for row in pairs
             ),
@@ -779,9 +785,14 @@ def aggregate(pairs: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
             "final_heads_sum": _sum_available(pairs, "final_heads"),
             "proved_heads_sum": _sum_available(pairs, "proved_heads"),
             "head_rule_events": _sum_available(pairs, "head_rule_events"),
-            "formal_rebuild_events": _sum_available(pairs, "formal_rebuild_events"),
+            "scoped_formal_refinement_rebuild_events": _sum_available(
+                pairs, "scoped_formal_refinement_rebuild_events"
+            ),
             "formal_cex_returned": _sum_available(pairs, "formal_cex_returned"),
             "formal_cex_added": _sum_available(pairs, "formal_cex_added"),
+            "formal_global_cex_added": _sum_available(
+                pairs, "formal_global_cex_added"
+            ),
             "formal_solver_checks": _sum_available(pairs, "formal_solver_checks"),
             "formal_miter_ms": _sum_available(pairs, "formal_miter_ms"),
             "cec_feedback_rounds": _sum_available(pairs, "cec_feedback_rounds"),
@@ -800,7 +811,12 @@ def _atomic_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         prefix=f".{path.name}.", delete=False,
     ) as stream:
         temporary = Path(stream.name)
-        writer = csv.DictWriter(stream, fieldnames=PAIRED_FIELDS, extrasaction="ignore")
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=PAIRED_FIELDS,
+            extrasaction="ignore",
+            lineterminator="\n",
+        )
         writer.writeheader()
         writer.writerows(rows)
         stream.flush()
@@ -848,6 +864,17 @@ def _report(summary: Mapping[str, Any], pairs: Sequence[Mapping[str, Any]]) -> s
         f"- Multi-head Z3-PB + formal: **{aggregate_data['multi_head_pass']}/{aggregate_data['case_count']} PASS**",
         f"- Net change: **{aggregate_data['pass_delta']:+d} PASS** "
         f"({aggregate_data['gains']} gains, {aggregate_data['regressions']} regressions)",
+        "- This is a deliberately selected diagnostic cohort, not a random "
+        "sample or a V4 population success-rate estimate.",
+        "- The scalar arm is the prior frozen binary and the multi-head arm is "
+        "the new frozen binary. Status transitions answer the requested "
+        "before/after comparison; runtime is descriptive, not a same-binary "
+        "policy ablation.",
+        "- This is a bundled multi-head configuration, not a composition-only "
+        "ablation: each head uses up to 20 SAT-driven rebuilds, an effective "
+        "negative ratio of 5, all physical gates when the circuit has at most "
+        "20,000 nodes (otherwise the raw DT union), and up to 5 whole-patch "
+        "CEC feedback rounds.",
         "",
         "## Status transitions",
         "",
@@ -910,18 +937,23 @@ def _report(summary: Mapping[str, Any], pairs: Sequence[Mapping[str, Any]]) -> s
             "",
             "## Multi-head telemetry",
             "",
+            f"- Passing cases with every final head SAT-proved: "
+            f"{telemetry['passing_cases_all_heads_proved']} / "
+            f"{aggregate_data['multi_head_pass']}.",
             f"- Cases reaching discovery/patch: {telemetry['cases_with_discovery']} / "
             f"{telemetry['cases_with_patch']}.",
             f"- Final/proved heads summed across cases: "
             f"{_format_number(telemetry['final_heads_sum'])} / "
             f"{_format_number(telemetry['proved_heads_sum'])}.",
-            f"- Head rule events / formal rebuild events: "
+            f"- Head rule events / scoped SAT-driven refinement rebuild events: "
             f"{_format_number(telemetry['head_rule_events'])} / "
-            f"{_format_number(telemetry['formal_rebuild_events'])}.",
-            f"- Formal CEX returned/added and solver checks: "
+            f"{_format_number(telemetry['scoped_formal_refinement_rebuild_events'])}.",
+            f"- Head-local CEX events returned/inserted and solver checks: "
             f"{_format_number(telemetry['formal_cex_returned'])} / "
             f"{_format_number(telemetry['formal_cex_added'])} / "
             f"{_format_number(telemetry['formal_solver_checks'])}.",
+            f"- Unique global-corpus CEX insertions after deduplication: "
+            f"{_format_number(telemetry['formal_global_cex_added'])}.",
             f"- Internal CEC feedback rounds / labels added / new heads: "
             f"{_format_number(telemetry['cec_feedback_rounds'])} / "
             f"{_format_number(telemetry['cec_feedback_labels_added'])} / "
@@ -936,7 +968,9 @@ def _report(summary: Mapping[str, Any], pairs: Sequence[Mapping[str, Any]]) -> s
             f"- `show` SHA-256: `{provenance['show_sha256']}`",
             f"- Validated benchmark inputs: {provenance['validated_input_case_count']} exact cases.",
             f"- Formal config: timeout 10000 ms, 5 scalar refinement rounds, "
-            f"5 CEX/check; multi-head refinement limit 20.",
+            f"5 CEX/check; multi-head refinement limit 20, effective head "
+            f"negative ratio 5, all-gate threshold 20,000 nodes, and at most "
+            f"5 whole-patch CEC feedback rounds.",
             "",
             "`actual_*_and` columns are the runner's ABC `show` area metric "
             "(AIG AND count); QoR comparisons are restricted to cases where both arms PASS.",
