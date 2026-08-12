@@ -18,6 +18,13 @@ enum class RuleMethod {
 
 const char* rule_method_name(RuleMethod method);
 
+enum class RepairMethod {
+  legacy,
+  dac25_inspired
+};
+
+const char* repair_method_name(RepairMethod method);
+
 struct AppOptions {
   std::string golden_path;
   std::string trojan_path;
@@ -33,6 +40,7 @@ struct AppOptions {
   bool strict_retry = true;
   bool no_virtual = false;
   RuleMethod rule_method = RuleMethod::vn_retrain;
+  RepairMethod repair_method = RepairMethod::legacy;
   unsigned rule_opt_timeout_ms = 10000;
   std::size_t rule_opt_max_rounds = 100;
   std::size_t rule_opt_cex_batch = 5;
@@ -44,6 +52,12 @@ struct AppOptions {
   std::uint64_t rule_formal_timeout_ms = 10000;
   std::size_t rule_formal_max_rounds = 5;
   std::size_t rule_formal_cex_batch = 5;
+  std::uint64_t dac25_selector_timeout_ms = 30000;
+  std::size_t dac25_candidate_limit = 64;
+  std::size_t dac25_max_targets = 3;
+  std::size_t dac25_max_sets = 16;
+  std::uint64_t dac25_runeco_timeout_s = 60;
+  std::string dac25_abc_bin = "abc";
 };
 
 ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::string* error); // Parse CLI args into AppOptions.

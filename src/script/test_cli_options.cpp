@@ -84,12 +84,63 @@ bool expect_formal_options(std::vector<std::string> args) {
   return true;
 }
 
+bool expect_default_repair_options(std::vector<std::string> args,
+                                   const std::string& expected_abc_bin) {
+  AppOptions options;
+  std::string error;
+  const ParseStatus status = parse(std::move(args), &options, &error);
+  if (status != ParseStatus::ok ||
+      options.repair_method != RepairMethod::legacy ||
+      options.dac25_selector_timeout_ms != 30000 ||
+      options.dac25_candidate_limit != 64 ||
+      options.dac25_max_targets != 3 ||
+      options.dac25_max_sets != 16 ||
+      options.dac25_runeco_timeout_s != 60 ||
+      options.dac25_abc_bin != expected_abc_bin) {
+    std::cerr << "default repair option parse failed: status="
+              << static_cast<int>(status)
+              << " method=" << repair_method_name(options.repair_method)
+              << " abc=" << options.dac25_abc_bin
+              << " error=" << error << "\n";
+    return false;
+  }
+  return true;
+}
+
+bool expect_dac25_options(std::vector<std::string> args) {
+  AppOptions options;
+  std::string error;
+  const ParseStatus status = parse(std::move(args), &options, &error);
+  if (status != ParseStatus::ok ||
+      options.repair_method != RepairMethod::dac25_inspired ||
+      options.dac25_selector_timeout_ms != 45000 ||
+      options.dac25_candidate_limit != 80 ||
+      options.dac25_max_targets != 4 ||
+      options.dac25_max_sets != 20 ||
+      options.dac25_runeco_timeout_s != 90 ||
+      options.dac25_abc_bin != "/tmp/custom-abc") {
+    std::cerr << "DAC25 option parse failed: status="
+              << static_cast<int>(status)
+              << " method=" << repair_method_name(options.repair_method)
+              << " error=" << error << "\n";
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 int main() {
   const std::vector<std::string> positional = {"test_cli", "g", "t", "gt"};
+  const char* original_abc_bin_value = std::getenv("ABC_BIN");
+  const bool had_original_abc_bin = original_abc_bin_value != nullptr;
+  const std::string original_abc_bin =
+      original_abc_bin_value ? original_abc_bin_value : "";
+  unsetenv("ABC_BIN");
+
   bool ok = true;
   ok &= expect_method(positional, RuleMethod::vn_retrain, "default");
+  ok &= expect_default_repair_options(positional, "abc");
 
   auto explicit_vn = positional;
   explicit_vn.insert(explicit_vn.end(), {"--rule-method", "vn-retrain"});
@@ -136,6 +187,105 @@ int main() {
                     "--rule-formal-max-rounds", "3",
                     "--rule-formal-cex-batch", "4"});
   ok &= expect_formal_options(formal_z3);
+
+  auto explicit_dac25 = positional;
+  explicit_dac25.insert(explicit_dac25.end(),
+                        {"--repair-method", "dac25-inspired"});
+  {
+    AppOptions options;
+    std::string error;
+    const ParseStatus status = parse(explicit_dac25, &options, &error);
+    if (status != ParseStatus::ok ||
+        options.repair_method != RepairMethod::dac25_inspired ||
+        std::string(repair_method_name(options.repair_method)) !=
+            "dac25-inspired") {
+      std::cerr << "explicit DAC25 repair method failed: status="
+                << static_cast<int>(status) << " error=" << error << "\n";
+      ok = false;
+    }
+  }
+
+  auto configured_dac25 = positional;
+  configured_dac25.insert(
+      configured_dac25.end(),
+      {"--repair-method", "dac25-inspired",
+       "--dac25-selector-timeout-ms", "45000",
+       "--dac25-candidate-limit", "80",
+       "--dac25-max-targets", "4",
+       "--dac25-max-sets", "20",
+       "--dac25-runeco-timeout-s", "90",
+       "--dac25-abc-bin", "/tmp/custom-abc"});
+  ok &= expect_dac25_options(configured_dac25);
+
+  setenv("ABC_BIN", "/tmp/env-abc", 1);
+  ok &= expect_default_repair_options(positional, "/tmp/env-abc");
+  ok &= expect_dac25_options(configured_dac25);
+  unsetenv("ABC_BIN");
+
+  auto invalid_repair = positional;
+  invalid_repair.insert(invalid_repair.end(),
+                        {"--repair-method", "dac25"});
+  ok &= expect_error(invalid_repair, "Invalid --repair-method",
+                     "invalid repair method");
+
+  const std::vector<std::vector<std::string>> dac25_only_options = {
+      {"--dac25-selector-timeout-ms", "1"},
+      {"--dac25-candidate-limit", "8"},
+      {"--dac25-max-targets", "2"},
+      {"--dac25-max-sets", "4"},
+      {"--dac25-runeco-timeout-s", "1"},
+      {"--dac25-abc-bin", "/tmp/abc"},
+  };
+  for (const auto& dac25_option : dac25_only_options) {
+    auto dac25_knob_with_legacy = positional;
+    dac25_knob_with_legacy.insert(dac25_knob_with_legacy.end(),
+                                  dac25_option.begin(), dac25_option.end());
+    ok &= expect_error(dac25_knob_with_legacy,
+                       "require --repair-method dac25-inspired",
+                       dac25_option.front().c_str());
+  }
+
+  auto zero_selector_timeout = explicit_dac25;
+  zero_selector_timeout.insert(zero_selector_timeout.end(),
+                               {"--dac25-selector-timeout-ms", "0"});
+  ok &= expect_error(zero_selector_timeout, "must be positive",
+                     "zero DAC25 selector timeout");
+
+  auto zero_candidate_limit = explicit_dac25;
+  zero_candidate_limit.insert(zero_candidate_limit.end(),
+                              {"--dac25-candidate-limit", "0"});
+  ok &= expect_error(zero_candidate_limit, "must be positive",
+                     "zero DAC25 candidate limit");
+
+  auto zero_max_targets = explicit_dac25;
+  zero_max_targets.insert(zero_max_targets.end(),
+                          {"--dac25-max-targets", "0"});
+  ok &= expect_error(zero_max_targets, "must be positive",
+                     "zero DAC25 max targets");
+
+  auto too_many_targets = explicit_dac25;
+  too_many_targets.insert(too_many_targets.end(),
+                          {"--dac25-candidate-limit", "2",
+                           "--dac25-max-targets", "3"});
+  ok &= expect_error(too_many_targets, "cannot exceed",
+                     "DAC25 max targets above candidate limit");
+
+  auto zero_max_sets = explicit_dac25;
+  zero_max_sets.insert(zero_max_sets.end(), {"--dac25-max-sets", "0"});
+  ok &= expect_error(zero_max_sets, "must be positive",
+                     "zero DAC25 max sets");
+
+  auto zero_runeco_timeout = explicit_dac25;
+  zero_runeco_timeout.insert(zero_runeco_timeout.end(),
+                             {"--dac25-runeco-timeout-s", "0"});
+  ok &= expect_error(zero_runeco_timeout, "must be positive",
+                     "zero DAC25 runeco timeout");
+
+  auto empty_dac25_abc = explicit_dac25;
+  empty_dac25_abc.insert(empty_dac25_abc.end(),
+                         {"--dac25-abc-bin", ""});
+  ok &= expect_error(empty_dac25_abc, "must not be empty",
+                     "empty DAC25 ABC path");
 
   auto conflicting_z3_alias = positional;
   conflicting_z3_alias.insert(conflicting_z3_alias.end(),
@@ -184,6 +334,12 @@ int main() {
        "--rule-formal-cex-batch", "6"});
   ok &= expect_error(oversized_formal_batch, "between 1 and 5",
                      "oversized formal batch");
+
+  if (had_original_abc_bin) {
+    setenv("ABC_BIN", original_abc_bin.c_str(), 1);
+  } else {
+    unsetenv("ABC_BIN");
+  }
 
   if (!ok) {
     return EXIT_FAILURE;

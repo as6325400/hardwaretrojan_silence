@@ -1,5 +1,6 @@
 #include "cli_options.hpp"
 
+#include <cstdlib>
 #include <iostream>
 
 #include "../../extern/CLI11/CLI11.hpp"
@@ -16,6 +17,16 @@ const char* rule_method_name(RuleMethod method) {
   return "unknown";
 }
 
+const char* repair_method_name(RepairMethod method) {
+  switch (method) {
+    case RepairMethod::legacy:
+      return "legacy";
+    case RepairMethod::dac25_inspired:
+      return "dac25-inspired";
+  }
+  return "unknown";
+}
+
 void print_usage(const char* prog) {
   const char* name = prog ? prog : "main";
   std::cout << "Usage: " << name
@@ -28,6 +39,11 @@ void print_usage(const char* prog) {
                " [--rule-opt-max-literals N]"
                " [--rule-formal-refine] [--rule-formal-timeout-ms N]"
                " [--rule-formal-max-rounds N] [--rule-formal-cex-batch N]"
+               " [--repair-method legacy|dac25-inspired]"
+               " [--dac25-selector-timeout-ms N]"
+               " [--dac25-candidate-limit N] [--dac25-max-targets N]"
+               " [--dac25-max-sets N] [--dac25-runeco-timeout-s N]"
+               " [--dac25-abc-bin PATH]"
                " [--force-split] [--no-strict] [--no-virtual]\n";
 }
 
@@ -42,6 +58,10 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
     return ParseStatus::error;
   }
   *out = AppOptions{};
+  if (const char* abc_bin = std::getenv("ABC_BIN");
+      abc_bin != nullptr && abc_bin[0] != '\0') {
+    out->dac25_abc_bin = abc_bin;
+  }
 
   CLI::App app{"Hardware trojan silence tool"};
   app.allow_extras(false);
@@ -98,6 +118,32 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
       app.add_option("--rule-formal-cex-batch",
                      out->rule_formal_cex_batch,
                      "SAT rule counterexamples returned per check (1-5)");
+  std::string repair_method = "legacy";
+  app.add_option("--repair-method", repair_method,
+                 "Repair method: legacy or dac25-inspired");
+  CLI::Option* dac25_selector_timeout =
+      app.add_option("--dac25-selector-timeout-ms",
+                     out->dac25_selector_timeout_ms,
+                     "DAC25-inspired selector timeout in milliseconds");
+  CLI::Option* dac25_candidate_limit =
+      app.add_option("--dac25-candidate-limit",
+                     out->dac25_candidate_limit,
+                     "Maximum DAC25-inspired rectification candidates");
+  CLI::Option* dac25_max_targets =
+      app.add_option("--dac25-max-targets",
+                     out->dac25_max_targets,
+                     "Maximum targets in a DAC25-inspired candidate set");
+  CLI::Option* dac25_max_sets =
+      app.add_option("--dac25-max-sets",
+                     out->dac25_max_sets,
+                     "Maximum DAC25-inspired candidate sets to validate");
+  CLI::Option* dac25_runeco_timeout =
+      app.add_option("--dac25-runeco-timeout-s",
+                     out->dac25_runeco_timeout_s,
+                     "DAC25-inspired runeco timeout in seconds");
+  CLI::Option* dac25_abc_bin =
+      app.add_option("--dac25-abc-bin", out->dac25_abc_bin,
+                     "ABC executable used by DAC25-inspired runeco");
   app.add_option("--output", out->output_path, "Output path (alternative)");
 
   // --no-strict disables strict_retry (inverted flag)
@@ -147,6 +193,59 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
     out->rule_method = RuleMethod::vn_retrain;
   }
   out->no_virtual = out->rule_method == RuleMethod::dt;
+
+  if (repair_method != "legacy" && repair_method != "dac25-inspired") {
+    if (error) {
+      *error = "Invalid --repair-method '" + repair_method +
+               "' (expected legacy or dac25-inspired)";
+    }
+    return ParseStatus::error;
+  }
+  out->repair_method = repair_method == "dac25-inspired"
+                           ? RepairMethod::dac25_inspired
+                           : RepairMethod::legacy;
+
+  const bool dac25_option_used =
+      dac25_selector_timeout->count() || dac25_candidate_limit->count() ||
+      dac25_max_targets->count() || dac25_max_sets->count() ||
+      dac25_runeco_timeout->count() || dac25_abc_bin->count();
+  if (out->repair_method != RepairMethod::dac25_inspired &&
+      dac25_option_used) {
+    if (error) {
+      *error = "--dac25-* options require --repair-method dac25-inspired";
+    }
+    return ParseStatus::error;
+  }
+  if (out->dac25_selector_timeout_ms == 0) {
+    if (error) *error = "--dac25-selector-timeout-ms must be positive";
+    return ParseStatus::error;
+  }
+  if (out->dac25_candidate_limit == 0) {
+    if (error) *error = "--dac25-candidate-limit must be positive";
+    return ParseStatus::error;
+  }
+  if (out->dac25_max_targets == 0) {
+    if (error) *error = "--dac25-max-targets must be positive";
+    return ParseStatus::error;
+  }
+  if (out->dac25_max_targets > out->dac25_candidate_limit) {
+    if (error) {
+      *error = "--dac25-max-targets cannot exceed --dac25-candidate-limit";
+    }
+    return ParseStatus::error;
+  }
+  if (out->dac25_max_sets == 0) {
+    if (error) *error = "--dac25-max-sets must be positive";
+    return ParseStatus::error;
+  }
+  if (out->dac25_runeco_timeout_s == 0) {
+    if (error) *error = "--dac25-runeco-timeout-s must be positive";
+    return ParseStatus::error;
+  }
+  if (out->dac25_abc_bin.empty()) {
+    if (error) *error = "--dac25-abc-bin must not be empty";
+    return ParseStatus::error;
+  }
 
   if (out->rule_opt_max_rounds == 0) {
     if (error) *error = "--rule-opt-max-rounds must be positive";
