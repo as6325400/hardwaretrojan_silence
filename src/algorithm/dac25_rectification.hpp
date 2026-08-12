@@ -107,9 +107,10 @@ struct Dac25PlanResult {
   double total_ms = 0.0;
 };
 
-// Discover and cardinality-minimize a bounded rectification target set.  The
-// candidate ranking is deterministic and intentionally exposed in telemetry;
-// exact feasibility is always decided by validate_dac25_rectification_targets.
+// Discover and cardinality-minimize a bounded rectification target set within
+// the retained candidate pool.  The ranking is deterministic and intentionally
+// exposed in telemetry; exact feasibility is always decided by
+// validate_dac25_rectification_targets.
 Dac25PlanResult plan_dac25_rectification(
     const circuit& golden,
     const circuit& trojan,

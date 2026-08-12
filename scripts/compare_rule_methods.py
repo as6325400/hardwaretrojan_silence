@@ -534,6 +534,37 @@ def _summary_aggregates(
     return {"first": first, "last": last, "numeric_sum": sums}
 
 
+def _rectification_aggregates(
+    summaries: Sequence[Mapping[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Aggregate the overall repair records without summing trial metrics.
+
+    New DAC25 telemetry keeps both the end-to-end repair summary and one row
+    per attempted target set under the same raw collection.  Mixing them would
+    double-count wall time and make ``last.status`` describe an arbitrary
+    trial.  Older fixtures have no ``summary_kind`` and retain the legacy
+    behavior for parser compatibility.
+    """
+    overall = [
+        summary
+        for summary in summaries
+        if summary.get("summary_kind") == "overall"
+    ]
+    return _summary_aggregates(overall if overall else summaries)
+
+
+def _selected_rectification_aggregates(
+    summaries: Sequence[Mapping[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    selected = [
+        summary
+        for summary in summaries
+        if summary.get("summary_kind") == "trial"
+        and summary.get("selected") in (1, True)
+    ]
+    return _summary_aggregates(selected)
+
+
 def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
     summaries = parse_rule_synth_summaries(stdout)
     apply_summaries = parse_rule_apply_summaries(stdout)
@@ -578,8 +609,11 @@ def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
         "rule_miter_aggregates": _summary_aggregates(miter_summaries),
         "rule_miter_summary_count": len(miter_summaries),
         "rectification_summaries": rectification_summaries,
-        "rectification_aggregates": _summary_aggregates(
+        "rectification_aggregates": _rectification_aggregates(
             rectification_summaries
+        ),
+        "rectification_selected_aggregates": (
+            _selected_rectification_aggregates(rectification_summaries)
         ),
         "rectification_summary_count": len(rectification_summaries),
         "rule_build_attempts": build_attempts,
@@ -1179,6 +1213,15 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
             continue
         for key, value in values.items():
             row[f"rectification_{group}_{key}"] = value
+    selected_rectification = parsed.get(
+        "rectification_selected_aggregates", {}
+    )
+    for group in ("first", "last", "numeric_sum"):
+        values = selected_rectification.get(group, {})
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            row[f"rectification_selected_{group}_{key}"] = value
     return row
 
 
@@ -1490,7 +1533,7 @@ def _create_parser(repo_root: Path) -> argparse.ArgumentParser:
     parser.add_argument(
         "--dac25-max-sets",
         type=int,
-        help="maximum DAC25-inspired candidate sets to validate",
+        help="maximum feasible DAC25-inspired sets to retain",
     )
     parser.add_argument(
         "--dac25-runeco-timeout-s",

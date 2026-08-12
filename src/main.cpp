@@ -144,12 +144,15 @@ std::string binary_pattern_key(const std::vector<int>& values) {
 bool run_abc_cec(const string& golden_path,
                  const string& patched_path,
                  const circuit& golden_circuit,
-                 vector<int>* counter_example) {
+                 vector<int>* counter_example,
+                 const string& abc_override = "") {
   if (counter_example) counter_example->clear();
 
   string abc_bin;
   const char* configured_abc = std::getenv("ABC_BIN");
-  if (configured_abc && configured_abc[0] != '\0') {
+  if (!abc_override.empty()) {
+    abc_bin = abc_override;
+  } else if (configured_abc && configured_abc[0] != '\0') {
     abc_bin = configured_abc;
   } else {
     // Backward-compatible fallback: infer the project root from a golden
@@ -2220,6 +2223,7 @@ int main(int argc, char** argv) {
     const Dac25RepairResult dac25 = execute_dac25_inspired_repair(
         golden, trojan, dac25_options, fix_output_path);
     cout << "rectification_summary"
+         << " summary_kind overall"
          << " strategy dac25-inspired"
          << " repair_method dac25-inspired"
          << " rule_build_attempt 0"
@@ -2243,6 +2247,7 @@ int main(int argc, char** argv) {
          ++trial_index) {
       const Dac25RepairTrial& trial = dac25.trials[trial_index];
       cout << "rectification_summary"
+           << " summary_kind trial"
            << " strategy dac25-inspired"
            << " repair_method dac25-inspired"
            << " rule_build_attempt 0"
@@ -2284,12 +2289,13 @@ int main(int argc, char** argv) {
     const auto verify_start = std::chrono::steady_clock::now();
     std::vector<int> cec_counterexample;
     const bool cec_pass = run_abc_cec(options.golden_path, fix_output_path,
-                                      golden, &cec_counterexample);
+                                      golden, &cec_counterexample,
+                                      options.dac25_abc_bin);
     cerr << "[TIMING]   final_verify: " << ms_since(verify_start) << " ms "
          << (cec_pass ? "(PASS)" : "(FAIL)") << "\n";
     cout << "cec_rounds 0\n";
     cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
-    return 0;
+    return cec_pass ? 0 : 1;
   }
 
   const int kMaxCecRounds = 5;

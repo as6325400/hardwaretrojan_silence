@@ -136,7 +136,7 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
   CLI::Option* dac25_max_sets =
       app.add_option("--dac25-max-sets",
                      out->dac25_max_sets,
-                     "Maximum DAC25-inspired candidate sets to validate");
+                     "Maximum feasible DAC25-inspired sets to retain");
   CLI::Option* dac25_runeco_timeout =
       app.add_option("--dac25-runeco-timeout-s",
                      out->dac25_runeco_timeout_s,

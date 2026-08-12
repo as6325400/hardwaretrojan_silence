@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cctype>
 #include <limits>
+#include <queue>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -512,11 +513,12 @@ std::vector<Dac25Candidate> build_candidates(
   std::vector<std::size_t> cone_count(n, 0);
   std::vector<char> in_union(n, 0);
   for (int po : mismatch_po_nodes) {
-    std::vector<std::pair<int, std::size_t>> stack{{po, 0}};
+    std::queue<std::pair<int, std::size_t>> frontier;
+    frontier.push({po, 0});
     std::vector<char> seen(n, 0);
-    while (!stack.empty()) {
-      const auto current = stack.back();
-      stack.pop_back();
+    while (!frontier.empty()) {
+      const auto current = frontier.front();
+      frontier.pop();
       const int idx = current.first;
       if (idx < 0 || static_cast<std::size_t>(idx) >= n) {
         throw std::runtime_error("candidate cone node out of range");
@@ -530,7 +532,7 @@ std::vector<Dac25Candidate> build_candidates(
       const cell& node = trojan.get_cell(idx);
       if (node.ctype == CType::GATE) {
         for (int input : node.inputs) {
-          stack.emplace_back(input, current.second + 1);
+          frontier.push({input, current.second + 1});
         }
       }
     }
@@ -940,6 +942,12 @@ Dac25PlanResult plan_dac25_rectification(
     return result;
   }
 
+  // From this point onward, `invalid` is reserved for an explicit validation
+  // error.  Starting the search in the neutral infeasible state lets the
+  // finalizer distinguish timeout/unknown/exhaustion from the struct default.
+  result.status = Dac25PlanStatus::infeasible;
+  result.reason.clear();
+
   bool stopped_by_timeout = false;
   bool stopped_by_unknown = false;
   for (std::size_t cardinality = 1;
@@ -1004,7 +1012,8 @@ Dac25PlanResult plan_dac25_rectification(
   if (!result.feasible_target_sets.empty()) {
     result.selected_targets = result.feasible_target_sets.front();
     result.status = Dac25PlanStatus::selected;
-    result.reason = "minimum-cardinality feasible set selected";
+    result.reason =
+        "minimum-cardinality feasible set selected within retained pool";
   } else if (result.status == Dac25PlanStatus::invalid) {
     // Preserve detailed reason above.
   } else if (stopped_by_timeout) {

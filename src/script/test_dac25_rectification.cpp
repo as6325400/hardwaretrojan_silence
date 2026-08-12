@@ -201,6 +201,18 @@ void test_planner_selects_minimum_cardinality() {
          "planner records the observed mismatching PO");
 }
 
+void test_planner_zero_budget_reports_timeout() {
+  const circuit golden = make_single_golden();
+  const circuit trojan = make_single_trojan();
+  Dac25PlanOptions options;
+  options.timeout_ms = 0;
+  const Dac25PlanResult plan =
+      plan_dac25_rectification(golden, trojan, options);
+  expect(plan.status == Dac25PlanStatus::timeout,
+         "planner preserves a deterministic timeout status");
+  expect(!plan.reason.empty(), "planner timeout includes a reason");
+}
+
 }  // namespace
 
 int main() {
@@ -210,6 +222,7 @@ int main() {
   test_target_fanouts_share_one_value();
   test_name_alignment_and_input_validation();
   test_planner_selects_minimum_cardinality();
+  test_planner_zero_budget_reports_timeout();
   if (failures != 0) {
     std::cerr << failures << " DAC25 rectification test(s) failed\n";
     return EXIT_FAILURE;

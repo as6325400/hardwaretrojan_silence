@@ -99,7 +99,6 @@ ProcessResult run_abc_process(const std::string& executable,
     return result;
   }
   if (pid == 0) {
-    setpgid(0, 0);
     if (chdir(workdir.c_str()) != 0 ||
         dup2(stdout_fd, STDOUT_FILENO) < 0 ||
         dup2(stderr_fd, STDERR_FILENO) < 0) {
@@ -122,14 +121,14 @@ ProcessResult run_abc_process(const std::string& executable,
     if (waited == pid) break;
     if (waited < 0) {
       result.error = std::string("waitpid failed: ") + std::strerror(errno);
-      kill(-pid, SIGKILL);
+      kill(pid, SIGKILL);
       waitpid(pid, &wait_status, 0);
       break;
     }
     if (timeout_seconds == 0 ||
         elapsed_ms(start) >= static_cast<double>(timeout_seconds) * 1000.0) {
       result.timed_out = true;
-      kill(-pid, SIGTERM);
+      kill(pid, SIGTERM);
       const auto grace = Clock::now();
       while (elapsed_ms(grace) < 1000.0) {
         const pid_t grace_waited = waitpid(pid, &wait_status, WNOHANG);
@@ -137,7 +136,7 @@ ProcessResult run_abc_process(const std::string& executable,
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
       if (waitpid(pid, &wait_status, WNOHANG) == 0) {
-        kill(-pid, SIGKILL);
+        kill(pid, SIGKILL);
         waitpid(pid, &wait_status, 0);
       }
       break;

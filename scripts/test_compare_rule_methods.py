@@ -70,14 +70,17 @@ Path(sys.argv[4]).write_text(
     encoding="utf-8",
 )
 if method == "dac25-inspired":
-    print("rectification_summary strategy z3-pb repair_method dac25-inspired "
+    print("rectification_summary summary_kind overall strategy z3-pb "
+          "repair_method dac25-inspired "
           "cec_attempt 1 synth_pass 1 rule_build_attempt 2 "
-          "rectification_attempt 1 source selector status enumerated "
+          "rectification_attempt 1 source selector status success "
           "raw_candidates 64 filtered_candidates 20 selector_ms 4.2")
-    print("rectification_summary strategy z3-pb repair_method dac25-inspired "
+    print("rectification_summary summary_kind trial strategy z3-pb "
+          "repair_method dac25-inspired "
           "cec_attempt 1 synth_pass 1 rule_build_attempt 2 "
           "rectification_attempt 1 set_attempt 1 source dac25_runeco "
-          "status selected sets_checked 3 feasible_sets 1 selected_targets 1 "
+          "status success selected 1 sets_checked 3 feasible_sets 1 "
+          "selected_targets 1 "
           "patch_trials 1 proved 1 patch_ms 31.0")
 elif method == "z3-pb":
     print("rule_synth_summary strategy z3-pb cec_attempt 1 synth_pass 1 "
@@ -604,7 +607,12 @@ class EndToEndTest(RunnerFixture):
             dac_record["parsed"]["rectification_aggregates"]["last"][
                 "status"
             ],
-            "selected",
+            "success",
+        )
+        self.assertEqual(
+            dac_record["parsed"]["rectification_selected_aggregates"]
+            ["last"]["patch_ms"],
+            31.0,
         )
         patched = self.output / dac_record["artifacts"]["patched_bench"]
         self.assertTrue(patched.is_file())
@@ -625,8 +633,12 @@ class EndToEndTest(RunnerFixture):
             rows = {row["method"]: row for row in csv.DictReader(source)}
         dac_row = rows["dac25-inspired"]
         self.assertEqual(dac_row["rectification_summary_count"], "2")
-        self.assertEqual(dac_row["rectification_last_status"], "selected")
-        self.assertEqual(dac_row["rectification_numeric_sum_patch_ms"], "31.0")
+        self.assertEqual(dac_row["rectification_last_status"], "success")
+        self.assertEqual(dac_row["rectification_numeric_sum_selector_ms"], "4.2")
+        self.assertNotIn("rectification_numeric_sum_patch_ms", dac_row)
+        self.assertEqual(
+            dac_row["rectification_selected_last_patch_ms"], "31.0"
+        )
         self.assertEqual(
             dac_row["dac25_abc_sha256"], dac25_abc_identity["sha256"]
         )
@@ -634,6 +646,7 @@ class EndToEndTest(RunnerFixture):
             dac_row["rectification_summaries_json"]
         )
         self.assertEqual(len(raw_rectification), 2)
+        self.assertEqual(raw_rectification[1]["selected"], 1)
 
     def test_dac25_filters_manifest_formal_flags_only_for_dac(self) -> None:
         common = (

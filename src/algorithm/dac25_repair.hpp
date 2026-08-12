@@ -40,9 +40,10 @@ struct Dac25RepairResult {
   bool ok() const { return status == Dac25RepairStatus::success; }
 };
 
-// Plan minimum-cardinality target sets, synthesize every retained set with
-// the same runeco backend, and select lexicographically by post-strash area,
-// logic level, raw added patch gates, then target indices.
+// Plan minimum-cardinality target sets within the retained candidate pool,
+// synthesize every retained set with the same runeco backend, and select
+// lexicographically by post-strash area, logic level, raw added patch gates,
+// then target indices.
 Dac25RepairResult execute_dac25_inspired_repair(
     const circuit& golden,
     const circuit& trojan,
