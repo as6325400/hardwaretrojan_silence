@@ -32,9 +32,9 @@ import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
-RUNNER_SCHEMA_VERSION = "rule-method-ab-run/3"
+RUNNER_SCHEMA_VERSION = "rule-method-ab-run/4"
 MANIFEST_SCHEMA_VERSION = "rule-method-ab-cases/1"
-SUMMARY_SCHEMA_VERSION = "rule-method-ab-summary/3"
+SUMMARY_SCHEMA_VERSION = "rule-method-ab-summary/4"
 DEFAULT_MANIFEST = Path("configs/rule_method_ab_cases.json")
 DEFAULT_OUTPUT_ROOT = Path("validation/rule_method_ab")
 DEFAULT_METHODS = ("vn-retrain", "z3-pb")
@@ -394,6 +394,32 @@ def parse_rule_miter_summaries(stdout: str) -> List[Dict[str, Any]]:
     return summaries
 
 
+def _parse_named_summaries(stdout: str, name: str) -> List[Dict[str, Any]]:
+    """Parse order-independent key/value telemetry with the given prefix."""
+    summaries: List[Dict[str, Any]] = []
+    prefix = name + " "
+    for line_number, line in enumerate(stdout.splitlines(), start=1):
+        if not line.startswith(prefix):
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError as exc:
+            summaries.append(
+                {"_raw": line, "_line": line_number, "_parse_error": str(exc)}
+            )
+            continue
+        parsed: Dict[str, Any] = {"_raw": line, "_line": line_number}
+        tail = tokens[1:]
+        if len(tail) % 2:
+            parsed["_parse_error"] = "odd number of key/value tokens"
+            parsed["_unparsed_tail"] = tail[-1]
+            tail = tail[:-1]
+        for index in range(0, len(tail), 2):
+            parsed[tail[index]] = _parse_scalar(tail[index + 1])
+        summaries.append(parsed)
+    return summaries
+
+
 def _associate_rule_build_attempts(
     synth_summaries: Sequence[Mapping[str, Any]],
     apply_summaries: Sequence[Mapping[str, Any]],
@@ -446,6 +472,10 @@ _NON_ADDITIVE_SUMMARY_KEYS = frozenset(
         "cec_attempt",
         "synth_pass",
         "rule_build_attempt",
+        "head",
+        "po_position",
+        "pass",
+        "round",
         "literal_node",
         "literal_expected",
         "literal_forced",
@@ -498,6 +528,15 @@ def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
     build_attempts, unlinked_summaries = _associate_rule_build_attempts(
         summaries, apply_summaries, miter_summaries
     )
+    multi_head_names = (
+        "multi_head_discovery_summary",
+        "multi_head_rule_summary",
+        "multi_head_patch_summary",
+        "multi_head_cec_feedback",
+    )
+    multi_head = {
+        name: _parse_named_summaries(stdout, name) for name in multi_head_names
+    }
     runtime_matches = re.findall(
         r"\[TIMING\]\s+TOTAL:\s+([0-9]+(?:\.[0-9]+)?)\s+ms", stderr
     )
@@ -536,6 +575,38 @@ def parse_main_output(stdout: str, stderr: str) -> Dict[str, Any]:
         "rule_build_attempts": build_attempts,
         "rule_build_attempt_count": len(build_attempts),
         "rule_build_unlinked_summaries": unlinked_summaries,
+        "multi_head_discovery_summaries": multi_head[
+            "multi_head_discovery_summary"
+        ],
+        "multi_head_discovery_aggregates": _summary_aggregates(
+            multi_head["multi_head_discovery_summary"]
+        ),
+        "multi_head_discovery_summary_count": len(
+            multi_head["multi_head_discovery_summary"]
+        ),
+        "multi_head_rule_summaries": multi_head["multi_head_rule_summary"],
+        "multi_head_rule_aggregates": _summary_aggregates(
+            multi_head["multi_head_rule_summary"]
+        ),
+        "multi_head_rule_summary_count": len(
+            multi_head["multi_head_rule_summary"]
+        ),
+        "multi_head_patch_summaries": multi_head["multi_head_patch_summary"],
+        "multi_head_patch_aggregates": _summary_aggregates(
+            multi_head["multi_head_patch_summary"]
+        ),
+        "multi_head_patch_summary_count": len(
+            multi_head["multi_head_patch_summary"]
+        ),
+        "multi_head_cec_feedback_summaries": multi_head[
+            "multi_head_cec_feedback"
+        ],
+        "multi_head_cec_feedback_aggregates": _summary_aggregates(
+            multi_head["multi_head_cec_feedback"]
+        ),
+        "multi_head_cec_feedback_summary_count": len(
+            multi_head["multi_head_cec_feedback"]
+        ),
         "runtime_ms": float(runtime_matches[-1]) if runtime_matches else None,
         "cec_rounds": int(cec_matches[-1]) if cec_matches else None,
         "gt_verify": "PASS" if verify_pass else "FAIL",
@@ -1068,6 +1139,18 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         "rule_apply_summary_count": parsed.get("rule_apply_summary_count"),
         "rule_miter_summary_count": parsed.get("rule_miter_summary_count"),
         "rule_build_attempt_count": parsed.get("rule_build_attempt_count"),
+        "multi_head_discovery_summary_count": parsed.get(
+            "multi_head_discovery_summary_count"
+        ),
+        "multi_head_rule_summary_count": parsed.get(
+            "multi_head_rule_summary_count"
+        ),
+        "multi_head_patch_summary_count": parsed.get(
+            "multi_head_patch_summary_count"
+        ),
+        "multi_head_cec_feedback_summary_count": parsed.get(
+            "multi_head_cec_feedback_summary_count"
+        ),
         "binary_sha256": tools.get("binary", {}).get("sha256"),
         "abc_sha256": tools.get("abc", {}).get("sha256"),
         "highs_library_sha256": tools.get("highs_library", {}).get("sha256"),
@@ -1094,6 +1177,20 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
             parsed.get("rule_build_unlinked_summaries", {}),
             separators=(",", ":"),
         ),
+        "multi_head_discovery_summaries_json": json.dumps(
+            parsed.get("multi_head_discovery_summaries", []),
+            separators=(",", ":"),
+        ),
+        "multi_head_rule_summaries_json": json.dumps(
+            parsed.get("multi_head_rule_summaries", []), separators=(",", ":")
+        ),
+        "multi_head_patch_summaries_json": json.dumps(
+            parsed.get("multi_head_patch_summaries", []), separators=(",", ":")
+        ),
+        "multi_head_cec_feedback_summaries_json": json.dumps(
+            parsed.get("multi_head_cec_feedback_summaries", []),
+            separators=(",", ":"),
+        ),
     }
     aggregates = parsed.get("rule_synth_aggregates", {})
     for group in ("first", "last", "numeric_sum"):
@@ -1116,6 +1213,20 @@ def _flatten_record(record: Mapping[str, Any]) -> Dict[str, Any]:
             continue
         for key, value in values.items():
             row[f"miter_{group}_{key}"] = value
+    multi_head_aggregate_groups = (
+        ("multi_head_discovery", "multi_head_discovery_aggregates"),
+        ("multi_head_rule", "multi_head_rule_aggregates"),
+        ("multi_head_patch", "multi_head_patch_aggregates"),
+        ("multi_head_cec_feedback", "multi_head_cec_feedback_aggregates"),
+    )
+    for prefix, aggregate_name in multi_head_aggregate_groups:
+        aggregates = parsed.get(aggregate_name, {})
+        for group in ("first", "last", "numeric_sum"):
+            values = aggregates.get(group, {})
+            if not isinstance(values, dict):
+                continue
+            for key, value in values.items():
+                row[f"{prefix}_{group}_{key}"] = value
     return row
 
 
@@ -1132,12 +1243,17 @@ BASE_CSV_COLUMNS = [
     "actual_level_delta_golden", "rule_synth_summary_count",
     "rule_apply_summary_count", "rule_miter_summary_count",
     "rule_build_attempt_count",
+    "multi_head_discovery_summary_count", "multi_head_rule_summary_count",
+    "multi_head_patch_summary_count", "multi_head_cec_feedback_summary_count",
     "binary_sha256", "abc_sha256", "highs_library_sha256", "cache_key",
     "stdout_log", "stderr_log",
     "cec_stdout_log", "cec_stderr_log", "patched_bench", "command_json",
     "rule_synth_summaries_json", "rule_apply_summaries_json",
     "rule_miter_summaries_json", "rule_build_attempts_json",
     "rule_build_unlinked_summaries_json",
+    "multi_head_discovery_summaries_json", "multi_head_rule_summaries_json",
+    "multi_head_patch_summaries_json",
+    "multi_head_cec_feedback_summaries_json",
 ]
 
 
@@ -1408,6 +1524,16 @@ def _create_parser(repo_root: Path) -> argparse.ArgumentParser:
         help="SAT counterexamples returned per check (1-5)",
     )
     parser.add_argument(
+        "--rule-multi-head",
+        action="store_true",
+        help="enable per-output multi-head repair (z3-pb + formal only)",
+    )
+    parser.add_argument(
+        "--rule-multi-head-max-rounds",
+        type=int,
+        help="maximum per-head refinement rebuilds (default: 20)",
+    )
+    parser.add_argument(
         "--show", type=Path,
         help="optional area/level helper (default: bin/show or bin/script/show)",
     )
@@ -1460,6 +1586,14 @@ def _method_experiment_args(method: str, args: argparse.Namespace) -> Tuple[str,
         for option, value in formal_values:
             if value is not None:
                 values.extend((option, str(value)))
+    if args.rule_multi_head and method == "z3-pb":
+        values.extend(
+            (
+                "--rule-multi-head",
+                "--rule-multi-head-max-rounds",
+                str(args.rule_multi_head_max_rounds),
+            )
+        )
     return tuple(values)
 
 
@@ -1569,6 +1703,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             and not 1 <= args.rule_formal_cex_batch <= 5
         ):
             raise RunnerError("--rule-formal-cex-batch must be between 1 and 5")
+        if args.rule_multi_head:
+            if methods != ["z3-pb"]:
+                raise RunnerError(
+                    "--rule-multi-head requires the sole --method z3-pb"
+                )
+            if not args.rule_formal_refine:
+                raise RunnerError(
+                    "--rule-multi-head requires --rule-formal-refine"
+                )
+            if args.rule_multi_head_max_rounds is None:
+                args.rule_multi_head_max_rounds = 20
+        elif args.rule_multi_head_max_rounds is not None:
+            raise RunnerError(
+                "--rule-multi-head-max-rounds requires --rule-multi-head"
+            )
+        if (
+            args.rule_multi_head_max_rounds is not None
+            and args.rule_multi_head_max_rounds <= 0
+        ):
+            raise RunnerError("--rule-multi-head-max-rounds must be positive")
         if args.jobs != 1:
             raise RunnerError(
                 "--jobs must be 1: methods for the same case can write the "
@@ -1714,6 +1868,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "rule_formal_timeout_ms": args.rule_formal_timeout_ms,
             "rule_formal_max_rounds": args.rule_formal_max_rounds,
             "rule_formal_cex_batch": args.rule_formal_cex_batch,
+            "rule_multi_head": args.rule_multi_head,
+            "rule_multi_head_max_rounds": args.rule_multi_head_max_rounds,
         }
         context_payload["context_key"] = _sha256_bytes(
             json.dumps(context_payload, sort_keys=True).encode("utf-8")
@@ -1790,6 +1946,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "rule_formal_timeout_ms": args.rule_formal_timeout_ms,
             "rule_formal_max_rounds": args.rule_formal_max_rounds,
             "rule_formal_cex_batch": args.rule_formal_cex_batch,
+            "rule_multi_head": args.rule_multi_head,
+            "rule_multi_head_max_rounds": args.rule_multi_head_max_rounds,
             "context_key": context_payload["context_key"],
             "environment": environment_meta,
         }

@@ -74,6 +74,21 @@ if method == "z3-pb":
         print("rule_miter_summary strategy z3-pb cec_attempt 2 synth_pass 1 "
               "rule_build_attempt 2 refine_rounds 1 status proved "
               "proved 1 returned 0 added 0 checks 2 total_ms 1.5")
+    if "--rule-multi-head" in sys.argv:
+        print("multi_head_discovery_summary heads 2 candidates 17 "
+              "candidate_source raw_dt_union dt_builds 1 rules 2 literals 3 "
+              "optimizer_status optimal total_ms 6.5")
+        print("multi_head_rule_summary cec_attempt 1 head 0 po_position 2 pass 1 "
+              "positives 3 negatives 4 candidates 17 rules 1 literals 2 "
+              "miter_status proved proved 1 returned 0 added 0 checks 2 "
+              "optimizer_ms 4.0 miter_ms 1.0 total_ms 5.0")
+        print("multi_head_rule_summary cec_attempt 1 head 1 po_position 5 pass 1 "
+              "positives 2 negatives 5 candidates 17 rules 2 literals 3 "
+              "miter_status proved proved 1 returned 0 added 0 checks 2 "
+              "optimizer_ms 5.0 miter_ms 1.5 total_ms 6.5")
+        print("multi_head_patch_summary cec_attempt 1 heads 2 proved_heads 2 "
+              "predicate_nodes 5 output_xors 2 area_delta 7 level_delta 2")
+        print("multi_head_cec_feedback round 1 labels_added 2 new_heads 1")
 elif method == "milp-cover":
     print("rule_synth_summary strategy milp-cover cec_attempt 1 synth_pass 1 "
           "rule_build_attempt 1 dt_builds 1 candidate_count 17 optimizer_status accepted "
@@ -347,6 +362,32 @@ class SummaryParserTest(unittest.TestCase):
         )
         self.assertEqual(aggregates["last"]["refine_rounds"], 2)
 
+    def test_parses_multi_head_telemetry_and_aggregates(self) -> None:
+        stdout = (
+            "multi_head_discovery_summary heads 2 candidates 19 total_ms 3.5\n"
+            "multi_head_rule_summary head 0 po_position 4 pass 1 rules 2 "
+            "total_ms 1.25\n"
+            "multi_head_rule_summary head 1 po_position 7 pass 1 rules 1 "
+            "total_ms 2.75\n"
+            "multi_head_patch_summary cec_attempt 1 heads 2 area_delta 4\n"
+            "multi_head_cec_feedback round 1 labels_added 3 new_heads 1\n"
+        )
+        parsed = runner.parse_main_output(stdout, "")
+        self.assertEqual(parsed["multi_head_discovery_summary_count"], 1)
+        self.assertEqual(parsed["multi_head_rule_summary_count"], 2)
+        self.assertEqual(parsed["multi_head_patch_summary_count"], 1)
+        self.assertEqual(parsed["multi_head_cec_feedback_summary_count"], 1)
+        self.assertEqual(
+            parsed["multi_head_rule_aggregates"]["numeric_sum"]["total_ms"],
+            4.0,
+        )
+        self.assertNotIn(
+            "head", parsed["multi_head_rule_aggregates"]["numeric_sum"]
+        )
+        self.assertEqual(
+            parsed["multi_head_cec_feedback_summaries"][0]["new_heads"], 1
+        )
+
 
 class EndToEndTest(RunnerFixture):
     def test_atomic_artifacts_metrics_and_resume(self) -> None:
@@ -481,6 +522,101 @@ class EndToEndTest(RunnerFixture):
             runner.main(self.args("--rule-formal-timeout-ms", "10")), 2
         )
         self.assertFalse(self.output.exists())
+
+    def test_multi_head_command_config_cache_and_telemetry(self) -> None:
+        arguments = self.args(
+            "--method", "z3-pb",
+            "--rule-formal-refine",
+            "--rule-multi-head",
+            "--rule-multi-head-max-rounds", "7",
+        )
+        with mock.patch.dict(
+            os.environ, {"FAKE_INVOCATION_COUNTER": str(self.counter)}, clear=False
+        ):
+            self.assertEqual(runner.main(arguments), 0)
+
+        record = json.loads(
+            (self.output / "records" / "case1--z3-pb.json").read_text()
+        )
+        self.assertEqual(record["schema_version"], runner.RUNNER_SCHEMA_VERSION)
+        self.assertIn("--rule-multi-head", record["command"])
+        rounds_index = record["command"].index("--rule-multi-head-max-rounds")
+        self.assertEqual(record["command"][rounds_index + 1], "7")
+        parsed = record["parsed"]
+        self.assertEqual(parsed["multi_head_discovery_summary_count"], 1)
+        self.assertEqual(parsed["multi_head_rule_summary_count"], 2)
+        self.assertEqual(parsed["multi_head_patch_summary_count"], 1)
+        self.assertEqual(parsed["multi_head_cec_feedback_summary_count"], 1)
+
+        context = json.loads((self.output / "run_context.json").read_text())
+        self.assertTrue(context["rule_multi_head"])
+        self.assertEqual(context["rule_multi_head_max_rounds"], 7)
+        summary = json.loads((self.output / "summary.json").read_text())
+        self.assertTrue(summary["invocation"]["rule_multi_head"])
+        self.assertEqual(
+            summary["invocation"]["rule_multi_head_max_rounds"], 7
+        )
+        with (self.output / "results.csv").open(
+            newline="", encoding="utf-8"
+        ) as source:
+            row = next(csv.DictReader(source))
+        self.assertEqual(row["multi_head_rule_summary_count"], "2")
+        self.assertEqual(row["multi_head_rule_numeric_sum_total_ms"], "11.5")
+        self.assertEqual(row["multi_head_patch_last_proved_heads"], "2")
+        self.assertEqual(row["multi_head_cec_feedback_last_new_heads"], "1")
+        self.assertEqual(
+            len(json.loads(row["multi_head_rule_summaries_json"])), 2
+        )
+        first_cache_key = record["cache_key"]
+
+        with mock.patch.dict(
+            os.environ, {"FAKE_INVOCATION_COUNTER": str(self.counter)}, clear=False
+        ):
+            self.assertEqual(runner.main(arguments), 0)
+        self.assertEqual(
+            self.counter.read_text(encoding="utf-8").splitlines(), ["z3-pb"]
+        )
+        resumed = json.loads(
+            (self.output / "records" / "case1--z3-pb.json").read_text()
+        )
+        self.assertEqual(resumed["cache_key"], first_cache_key)
+
+    def test_multi_head_default_rounds_are_passed_and_recorded(self) -> None:
+        self.assertEqual(
+            runner.main(
+                self.args(
+                    "--method", "z3-pb", "--rule-formal-refine",
+                    "--rule-multi-head",
+                )
+            ),
+            0,
+        )
+        record = json.loads(
+            (self.output / "records" / "case1--z3-pb.json").read_text()
+        )
+        index = record["command"].index("--rule-multi-head-max-rounds")
+        self.assertEqual(record["command"][index + 1], "20")
+        context = json.loads((self.output / "run_context.json").read_text())
+        self.assertEqual(context["rule_multi_head_max_rounds"], 20)
+
+    def test_multi_head_requires_z3_pb_and_formal_refinement(self) -> None:
+        invalid = (
+            ("--method", "z3-pb", "--rule-multi-head"),
+            ("--method", "dt", "--rule-formal-refine", "--rule-multi-head"),
+            ("--rule-formal-refine", "--rule-multi-head"),
+            (
+                "--method", "z3-pb", "--rule-formal-refine",
+                "--rule-multi-head-max-rounds", "20",
+            ),
+            (
+                "--method", "z3-pb", "--rule-formal-refine",
+                "--rule-multi-head", "--rule-multi-head-max-rounds", "0",
+            ),
+        )
+        for options in invalid:
+            with self.subTest(options=options):
+                self.assertEqual(runner.main(self.args(*options)), 2)
+                self.assertFalse(self.output.exists())
 
     def test_external_cec_equivalence_marker_requires_zero_exit(self) -> None:
         with mock.patch.dict(
