@@ -257,9 +257,14 @@ def audit_run_artifacts(
 
 def same_input(left: Path, right: Path) -> bool:
     try:
-        return left.samefile(right)
+        if left.samefile(right):
+            return True
     except OSError:
+        pass
+    try:
         return left.stat().st_size == right.stat().st_size and sha256(left) == sha256(right)
+    except OSError:
+        return False
 
 
 def run_abc(abc: Path, command: str, timeout: float) -> str:
@@ -314,7 +319,37 @@ def winner(z3_value: int, dac_value: int) -> str:
 
 
 def format_optional(value: Optional[float], digits: int = 3) -> str:
-    return "" if value is None else f"{value:.{digits}f}"
+    return "n/a" if value is None else f"{value:.{digits}f}"
+
+
+def safe_ratio(numerator: float, denominator: float) -> Optional[float]:
+    if denominator <= 0:
+        return None
+    return numerator / denominator
+
+
+def median_or_none(values: Sequence[float]) -> Optional[float]:
+    return statistics.median(values) if values else None
+
+
+def positive_metric_pairs(
+    left: Mapping[Key, Mapping[str, str]],
+    right: Mapping[Key, Mapping[str, str]],
+    keys: Iterable[Key],
+    field: str,
+) -> List[Tuple[float, float]]:
+    pairs: List[Tuple[float, float]] = []
+    for key in keys:
+        left_value = number(left[key], field)
+        right_value = number(right[key], field)
+        if (
+            left_value is not None
+            and right_value is not None
+            and left_value > 0
+            and right_value > 0
+        ):
+            pairs.append((left_value, right_value))
+    return pairs
 
 
 def main() -> int:
@@ -328,9 +363,16 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--abc-timeout", type=float, default=60.0)
     parser.add_argument("--require-cases", type=int, default=482)
+    parser.add_argument(
+        "--cohort-label",
+        default="selected benchmark cohort",
+        help="human-readable cohort name used in the generated report",
+    )
     args = parser.parse_args()
-    if args.workers <= 0 or args.abc_timeout <= 0:
-        raise RuntimeError("workers and ABC timeout must be positive")
+    if args.workers <= 0 or args.abc_timeout <= 0 or args.require_cases <= 0:
+        raise RuntimeError("workers, ABC timeout, and required cases must be positive")
+    if not args.cohort_label.strip():
+        raise RuntimeError("cohort label must not be empty")
     abc = args.abc.resolve()
     if not abc.is_file():
         raise RuntimeError(f"ABC executable is missing: {abc}")
@@ -499,16 +541,12 @@ def main() -> int:
     z3_low, z3_high = wilson(z3_pass, len(common))
     dac_low, dac_high = wilson(dac_pass, len(common))
 
-    z3_wall = [number(z3[key], "wall_ms") for key in paired_keys]
-    dac_wall = [number(dac[key], "wall_ms") for key in paired_keys]
-    z3_runtime = [number(z3[key], "runtime_ms") for key in paired_keys]
-    dac_runtime = [number(dac[key], "runtime_ms") for key in paired_keys]
-    if any(value is None or value <= 0 for value in z3_wall + dac_wall + z3_runtime + dac_runtime):
-        raise RuntimeError("paired PASS cohort contains missing/nonpositive runtime")
-    z3_wall_f = [float(value) for value in z3_wall if value is not None]
-    dac_wall_f = [float(value) for value in dac_wall if value is not None]
-    z3_runtime_f = [float(value) for value in z3_runtime if value is not None]
-    dac_runtime_f = [float(value) for value in dac_runtime if value is not None]
+    wall_pairs = positive_metric_pairs(z3, dac, paired_keys, "wall_ms")
+    runtime_pairs = positive_metric_pairs(z3, dac, paired_keys, "runtime_ms")
+    z3_wall_f = [left for left, _ in wall_pairs]
+    dac_wall_f = [right for _, right in wall_pairs]
+    z3_runtime_f = [left for left, _ in runtime_pairs]
+    dac_runtime_f = [right for _, right in runtime_pairs]
 
     paired_case_rows = [row for row in case_rows if row["both_pass"] == 1]
     node_counts = Counter(row["node_winner"] for row in paired_case_rows)
@@ -528,40 +566,42 @@ def main() -> int:
         "dac_gains": gains, "dac_regressions": regressions,
         "mcnemar_exact_p": mcnemar_exact(gains, regressions),
         "both_pass": len(paired_keys),
+        "paired_wall_samples": len(wall_pairs),
         "z3_wall_sum_ms": sum(z3_wall_f), "dac_wall_sum_ms": sum(dac_wall_f),
-        "z3_over_dac_wall_sum_ratio": sum(z3_wall_f) / sum(dac_wall_f),
-        "z3_over_dac_wall_median_ratio": statistics.median(
-            left / right for left, right in zip(z3_wall_f, dac_wall_f)
+        "z3_over_dac_wall_sum_ratio": safe_ratio(sum(z3_wall_f), sum(dac_wall_f)),
+        "z3_over_dac_wall_median_ratio": median_or_none(
+            [left / right for left, right in wall_pairs]
         ),
         "z3_over_dac_wall_geomean_ratio": geomean(
-            left / right for left, right in zip(z3_wall_f, dac_wall_f)
+            left / right for left, right in wall_pairs
         ),
-        "dac_wall_wins": sum(right < left for left, right in zip(z3_wall_f, dac_wall_f)),
+        "dac_wall_wins": sum(right < left for left, right in wall_pairs),
+        "paired_runtime_samples": len(runtime_pairs),
         "z3_runtime_sum_ms": sum(z3_runtime_f), "dac_runtime_sum_ms": sum(dac_runtime_f),
-        "z3_over_dac_runtime_sum_ratio": sum(z3_runtime_f) / sum(dac_runtime_f),
-        "z3_over_dac_runtime_median_ratio": statistics.median(
-            left / right for left, right in zip(z3_runtime_f, dac_runtime_f)
+        "z3_over_dac_runtime_sum_ratio": safe_ratio(
+            sum(z3_runtime_f), sum(dac_runtime_f)
+        ),
+        "z3_over_dac_runtime_median_ratio": median_or_none(
+            [left / right for left, right in runtime_pairs]
         ),
         "z3_over_dac_runtime_geomean_ratio": geomean(
-            left / right for left, right in zip(z3_runtime_f, dac_runtime_f)
+            left / right for left, right in runtime_pairs
         ),
-        "dac_runtime_wins": sum(
-            right < left for left, right in zip(z3_runtime_f, dac_runtime_f)
-        ),
+        "dac_runtime_wins": sum(right < left for left, right in runtime_pairs),
         "dac_node_wins": node_counts["dac25-inspired"],
         "node_ties": node_counts["tie"], "z3_node_wins": node_counts["z3-pb-formal"],
         "dac_level_wins": level_counts["dac25-inspired"],
         "level_ties": level_counts["tie"], "z3_level_wins": level_counts["z3-pb-formal"],
         "z3_aig_nodes_sum": sum(z3_nodes), "dac_aig_nodes_sum": sum(dac_nodes),
-        "z3_over_dac_aig_nodes_ratio": sum(z3_nodes) / sum(dac_nodes),
+        "z3_over_dac_aig_nodes_ratio": safe_ratio(sum(z3_nodes), sum(dac_nodes)),
         "z3_delta_nodes_sum": sum(z3_delta_nodes),
         "dac_delta_nodes_sum": sum(dac_delta_nodes),
-        "z3_delta_nodes_median": statistics.median(z3_delta_nodes),
-        "dac_delta_nodes_median": statistics.median(dac_delta_nodes),
+        "z3_delta_nodes_median": median_or_none(z3_delta_nodes),
+        "dac_delta_nodes_median": median_or_none(dac_delta_nodes),
         "z3_delta_levels_sum": sum(z3_delta_levels),
         "dac_delta_levels_sum": sum(dac_delta_levels),
-        "z3_delta_levels_median": statistics.median(z3_delta_levels),
-        "dac_delta_levels_median": statistics.median(dac_delta_levels),
+        "z3_delta_levels_median": median_or_none(z3_delta_levels),
+        "dac_delta_levels_median": median_or_none(dac_delta_levels),
         "z3_cec_replayed": sum(label == "z3" for label, _ in cec_replay),
         "dac_cec_replayed": sum(label == "dac" for label, _ in cec_replay),
         "abc_sha256": expected_abc_hash,
@@ -569,6 +609,7 @@ def main() -> int:
         "dac_binary_sha256": next(iter(dac_binary_hashes)),
         "z3_results_sha256": sha256(args.z3_results),
         "dac_results_sha256": sha256(args.dac_results),
+        "cohort_label": args.cohort_label.strip(),
     }
     z3_provenance = run_provenance(args.z3_root)
     dac_provenance = run_provenance(args.dac_root)
@@ -618,6 +659,10 @@ def main() -> int:
         f"{row['case_id']} ({row['dac_status']})"
         for row in case_rows if row["transition"] == "regression"
     ]
+    gains_text = ", ".join(f"`{case}`" for case in gains_cases) or "none"
+    regressions_text = ", ".join(
+        f"`{case}`" for case in regression_cases
+    ) or "none"
     dac_statuses = Counter(row["dac_status"] for row in case_rows)
     z3_statuses = Counter(row["z3_status"] for row in case_rows)
     mcnemar_text = (
@@ -625,13 +670,43 @@ def main() -> int:
         if summary["mcnemar_exact_p"] is None
         else f"{summary['mcnemar_exact_p']:.6g}"
     )
+    if wall_pairs:
+        wall_runtime_text = (
+            f"Of these, {len(wall_pairs)} have positive finite wall-time values for "
+            f"both methods. Their sums are {sum(z3_wall_f)/1000:.3f}s (Z3) and "
+            f"{sum(dac_wall_f)/1000:.3f}s (DAC), "
+            f"Z3/DAC={format_optional(summary['z3_over_dac_wall_sum_ratio'])}. "
+            f"The per-case median and geometric-mean Z3/DAC ratios are "
+            f"{format_optional(summary['z3_over_dac_wall_median_ratio'])} and "
+            f"{format_optional(summary['z3_over_dac_wall_geomean_ratio'])}; DAC is "
+            f"faster on {summary['dac_wall_wins']}/{len(wall_pairs)} comparable cases."
+        )
+    else:
+        wall_runtime_text = (
+            "No paired-PASS case has positive finite wall-time values for both "
+            "methods, so wall-time ratios are n/a."
+        )
+    if runtime_pairs:
+        internal_runtime_text = (
+            f"Tool-reported runtime is comparable on {len(runtime_pairs)} paired-PASS "
+            f"cases; the aggregate Z3/DAC ratio is "
+            f"{format_optional(summary['z3_over_dac_runtime_sum_ratio'])}."
+        )
+    else:
+        internal_runtime_text = (
+            "No paired-PASS case has positive finite tool-reported runtime for both "
+            "methods; those runtime ratios are n/a."
+        )
     report = [
         "# DAC25-inspired rectification vs Z3-PB + formal refinement\n",
-        "This is an end-to-end comparison on the same 482 runnable V0 Golden/Trojan "
-        "pairs. The DAC arm is a public-information, **DAC'25-inspired** "
-        "reimplementation, not the authors' unavailable implementation. Z3-PB uses "
-        "error-pattern supervision; DAC uses the complete Golden/Trojan specification, "
-        "so this is not a same-oracle selector-only ablation.\n",
+        f"This is an end-to-end comparison on {len(common)} Golden/Trojan pairs "
+        f"({args.cohort_label.strip()}). "
+        "The DAC arm is a public-information, **DAC'25-inspired** "
+        "reimplementation, not the authors' unavailable implementation. Z3-PB starts "
+        "from error-pattern supervision and then queries the complete circuit pair "
+        "through its formal miter; DAC selects ECO cuts directly from the complete "
+        "pair and does not read the ground-truth pattern file. This remains an "
+        "end-to-end comparison, not a same-oracle selector-only ablation.\n",
         "## Correctness\n",
         "| Method | PASS | Rate | Wilson 95% | Other statuses |",
         "|---|---:|---:|---:|---|",
@@ -640,22 +715,19 @@ def main() -> int:
         f"| DAC25-inspired | {dac_pass}/{len(common)} | {100*dac_pass/len(common):.2f}% | "
         f"{100*dac_low:.2f}–{100*dac_high:.2f}% | `{dict(sorted(dac_statuses.items()))}` |",
         "",
-        f"DAC has {gains} gains and {regressions} regressions relative to Z3-PB "
+        "Wilson intervals describe the observed cohort only; no population-level "
+        "inference is made unless the cohort's sampling design supports it.",
+        "",
+        f"DAC has {gains} {'gain' if gains == 1 else 'gains'} and {regressions} "
+        f"{'regression' if regressions == 1 else 'regressions'} relative to Z3-PB "
         f"(McNemar exact two-sided p={mcnemar_text}).",
-        "Gains: " + ", ".join(f"`{case}`" for case in gains_cases) + ".",
-        "Regressions: " + ", ".join(f"`{case}`" for case in regression_cases) + ".",
+        f"Gains: {gains_text}.",
+        f"Regressions: {regressions_text}.",
         f"Independent replay with the pinned ABC proved all {z3_pass} recorded Z3 PASS "
         f"artifacts and all {dac_pass} recorded DAC PASS artifacts equivalent.\n",
         "## Paired end-to-end runtime\n",
         f"The paired cohort contains {len(paired_keys)} cases that PASS in both methods. "
-        f"Wall-time sums are {sum(z3_wall_f)/1000:.3f}s (Z3) and "
-        f"{sum(dac_wall_f)/1000:.3f}s (DAC), Z3/DAC={summary['z3_over_dac_wall_sum_ratio']:.3f}. "
-        f"The per-case median and geometric-mean Z3/DAC ratios are "
-        f"{summary['z3_over_dac_wall_median_ratio']:.3f} and "
-        f"{summary['z3_over_dac_wall_geomean_ratio']:.3f}; DAC is faster on "
-        f"{summary['dac_wall_wins']}/{len(paired_keys)} cases. The sum is influenced by "
-        "a small number of very slow Z3 cases, while the median/geometric mean describe "
-        "the typical case.\n",
+        f"{wall_runtime_text} {internal_runtime_text}\n",
         "## Common AIG structural QoR\n",
         "Every input and patch was independently read and strashed by the same pinned "
         "ABC. `and` is the AIG AND-node count and `lev` is topological AIG logic level. "
@@ -672,13 +744,16 @@ def main() -> int:
         "",
         f"AIG-node deltas versus the common Trojan sum to {summary['z3_delta_nodes_sum']} "
         f"for Z3 and {summary['dac_delta_nodes_sum']} for DAC; medians are "
-        f"{summary['z3_delta_nodes_median']} and {summary['dac_delta_nodes_median']}. "
+        f"{format_optional(summary['z3_delta_nodes_median'])} and "
+        f"{format_optional(summary['dac_delta_nodes_median'])}. "
         f"The aggregate patched-node ratio Z3/DAC is "
-        f"{summary['z3_over_dac_aig_nodes_ratio']:.6f}.\n",
+        f"{format_optional(summary['z3_over_dac_aig_nodes_ratio'], 6)}.\n",
         "## Reproducibility\n",
         f"- ABC SHA-256: `{expected_abc_hash}`",
         f"- Z3 binary SHA-256: `{summary['z3_binary_sha256']}`",
         f"- DAC binary SHA-256: `{summary['dac_binary_sha256']}`",
+        f"- Z3 recorded source commit: `{z3_provenance.get('git_commit', '')}` "
+        f"(dirty={z3_provenance.get('git_dirty', '')})",
         f"- DAC source commit: `{dac_provenance.get('git_commit', '')}` "
         f"(dirty={dac_provenance.get('git_dirty', '')})",
         f"- Manifest SHA-256: `{dac_provenance.get('manifest_sha256', '')}`",
