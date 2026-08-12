@@ -49,6 +49,12 @@ struct RuleMiterOptions {
   // is an in-process deadline, not a process-level hard kill; a single
   // allocation or library call can return slightly after the requested time.
   std::uint64_t timeout_ms = 10000;
+
+  // Golden PO positions whose mismatch predicates are ORed into E.  Positions
+  // follow golden.po_indices() order after PO-name alignment.  Empty preserves
+  // the legacy behavior and checks every PO.  A non-empty scope must not
+  // contain out-of-range or duplicate positions.
+  std::vector<std::size_t> error_po_positions;
 };
 
 struct RuleMiterSideResult {
@@ -91,9 +97,11 @@ RuleMiterStatus aggregate_rule_miter_status(
     RuleMiterStatus fallback_status);
 
 // Formally compare the mined DNF R against the circuit-derived error
-// predicate E = OR(golden_PO != trojan_PO).  Both E && !R (false negative)
-// and !E && R (false positive) are queried, alternating classes while
-// collecting at most five total PI patterns.
+// predicate E = OR(golden_PO != trojan_PO).  By default the OR covers every
+// aligned PO; RuleMiterOptions::error_po_positions can restrict it to one or
+// more Golden PO positions.  Both E && !R (false negative) and !E && R (false
+// positive) are queried, alternating classes while collecting at most five
+// total PI patterns.
 //
 // blocked_pi_bits is optional.  Each key must contain exactly one '0'/'1'
 // per golden PI, in golden PI order.  Blocked assignments are independently

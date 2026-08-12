@@ -1015,6 +1015,47 @@ struct ScalarRuleResult {
   bool rule_matches = false;
 };
 
+bool build_rule_miter_po_scope(
+    const RuleMiterAlignment& alignment,
+    const std::vector<std::size_t>& requested_positions,
+    std::vector<std::size_t>* scoped_positions,
+    std::string* error) {
+  if (!scoped_positions) {
+    if (error) *error = "null rule-miter PO scope output";
+    return false;
+  }
+  scoped_positions->clear();
+  if (requested_positions.empty()) {
+    scoped_positions->reserve(alignment.po_node_pairs.size());
+    for (std::size_t pos = 0; pos < alignment.po_node_pairs.size(); ++pos) {
+      scoped_positions->push_back(pos);
+    }
+    return true;
+  }
+
+  std::vector<char> seen(alignment.po_node_pairs.size(), 0);
+  scoped_positions->reserve(requested_positions.size());
+  for (std::size_t pos : requested_positions) {
+    if (pos >= alignment.po_node_pairs.size()) {
+      if (error) {
+        *error = "rule-miter PO position out of range: " +
+                 std::to_string(pos);
+      }
+      return false;
+    }
+    if (seen[pos]) {
+      if (error) {
+        *error = "duplicate rule-miter PO position: " +
+                 std::to_string(pos);
+      }
+      return false;
+    }
+    seen[pos] = 1;
+    scoped_positions->push_back(pos);
+  }
+  return true;
+}
+
 bool validate_rule_miter_dag(const circuit& net,
                              const char* circuit_name,
                              std::string* error) {
@@ -1278,6 +1319,7 @@ bool scalar_evaluate_rule_miter(
     const circuit& golden,
     const circuit& trojan,
     const RuleMiterAlignment& alignment,
+    const std::vector<std::size_t>& scoped_po_positions,
     const std::vector<int>& feature_nodes,
     const DecisionTreeModel& model,
     const std::vector<int>& golden_pi_values,
@@ -1313,7 +1355,12 @@ bool scalar_evaluate_rule_miter(
     (void)trojan_eval.simulate(trojan_pi_values);
 
     result->error_pattern = false;
-    for (const auto& po_pair : alignment.po_node_pairs) {
+    for (std::size_t po_position : scoped_po_positions) {
+      if (po_position >= alignment.po_node_pairs.size()) {
+        if (error) *error = "scalar rule-miter PO position out of range";
+        return false;
+      }
+      const auto& po_pair = alignment.po_node_pairs[po_position];
       const int golden_value = golden_eval.get_cell(po_pair.first).val;
       const int trojan_value = trojan_eval.get_cell(po_pair.second).val;
       if ((golden_value != 0) != (trojan_value != 0)) {
@@ -1572,9 +1619,12 @@ RuleMiterResult check_rule_miter(
     }
 
     RuleMiterAlignment alignment;
+    std::vector<std::size_t> scoped_po_positions;
     std::string error;
     if (!build_rule_miter_alignment(golden, trojan, &alignment, &error) ||
-        !validate_rule_miter_model(trojan, feature_nodes, model, &error)) {
+        !validate_rule_miter_model(trojan, feature_nodes, model, &error) ||
+        !build_rule_miter_po_scope(alignment, options.error_po_positions,
+                                   &scoped_po_positions, &error)) {
       finish_rule_miter_result(&result, RuleMiterStatus::invalid, error,
                                total_start);
       return result;
@@ -1620,8 +1670,9 @@ RuleMiterResult check_rule_miter(
       }
       const RuleMiterClock::time_point validation_start = RuleMiterClock::now();
       ScalarRuleResult scalar;
-      if (!scalar_evaluate_rule_miter(golden, trojan, alignment, feature_nodes,
-                                      model, values, &scalar, &error)) {
+      if (!scalar_evaluate_rule_miter(
+              golden, trojan, alignment, scoped_po_positions, feature_nodes,
+              model, values, &scalar, &error)) {
         result.validation_ms += rule_miter_elapsed_ms(validation_start);
         finish_rule_miter_result(&result, RuleMiterStatus::invalid, error,
                                  total_start);
@@ -1685,7 +1736,8 @@ RuleMiterResult check_rule_miter(
     }
 
     z3::expr error_expr = ctx.bool_val(false);
-    for (const auto& po_pair : alignment.po_node_pairs) {
+    for (std::size_t po_position : scoped_po_positions) {
+      const auto& po_pair = alignment.po_node_pairs[po_position];
       error_expr =
           error_expr ||
           (golden_vars[static_cast<std::size_t>(po_pair.first)] !=
@@ -1831,9 +1883,9 @@ RuleMiterResult check_rule_miter(
       const RuleMiterClock::time_point validation_start =
           RuleMiterClock::now();
       ScalarRuleResult scalar;
-      if (!scalar_evaluate_rule_miter(golden, trojan, alignment,
-                                      feature_nodes, model,
-                                      golden_pi_values, &scalar, &error)) {
+      if (!scalar_evaluate_rule_miter(
+              golden, trojan, alignment, scoped_po_positions, feature_nodes,
+              model, golden_pi_values, &scalar, &error)) {
         result.validation_ms += rule_miter_elapsed_ms(validation_start);
         finish_rule_miter_result(&result, RuleMiterStatus::invalid, error,
                                  total_start);

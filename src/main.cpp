@@ -18,6 +18,7 @@
 
 #include "algorithm/candidate_selector.hpp"
 #include "algorithm/miner.hpp"
+#include "algorithm/multi_head_patch.hpp"
 #include "algorithm/pattern_sampler.hpp"
 #include "algorithm/payload_analysis.hpp"
 #include "algorithm/rule_patch.hpp"
@@ -2129,6 +2130,615 @@ bool signature_minimize_trigger_model(
   return true;
 }
 
+struct MultiHeadAlignment {
+  // Golden PI position -> Trojan PI position.
+  std::vector<std::size_t> golden_pi_from_trojan;
+  // Golden PO position -> Trojan PO position.
+  std::vector<std::size_t> trojan_po_for_golden;
+};
+
+bool build_multi_head_alignment(const circuit& golden,
+                                const circuit& trojan,
+                                MultiHeadAlignment* alignment,
+                                std::string* error) {
+  if (!alignment) {
+    if (error) *error = "null multi-head alignment";
+    return false;
+  }
+  std::unordered_map<std::string, std::size_t> trojan_pi_positions;
+  std::unordered_map<std::string, std::size_t> trojan_po_positions;
+  for (std::size_t pos = 0; pos < trojan.pi_indices().size(); ++pos) {
+    const std::string& name = trojan.node_name(trojan.pi_indices()[pos]);
+    if (!trojan_pi_positions.emplace(name, pos).second) {
+      if (error) *error = "duplicate Trojan PI name: " + name;
+      return false;
+    }
+  }
+  for (std::size_t pos = 0; pos < trojan.po_indices().size(); ++pos) {
+    const std::string& name = trojan.node_name(trojan.po_indices()[pos]);
+    if (!trojan_po_positions.emplace(name, pos).second) {
+      if (error) *error = "duplicate Trojan PO name: " + name;
+      return false;
+    }
+  }
+
+  alignment->golden_pi_from_trojan.clear();
+  alignment->trojan_po_for_golden.clear();
+  for (int golden_pi : golden.pi_indices()) {
+    const std::string& name = golden.node_name(golden_pi);
+    const auto it = trojan_pi_positions.find(name);
+    if (it == trojan_pi_positions.end()) {
+      if (error) *error = "Golden PI missing from Trojan circuit: " + name;
+      return false;
+    }
+    alignment->golden_pi_from_trojan.push_back(it->second);
+  }
+  for (int golden_po : golden.po_indices()) {
+    const std::string& name = golden.node_name(golden_po);
+    const auto it = trojan_po_positions.find(name);
+    if (it == trojan_po_positions.end()) {
+      if (error) *error = "Golden PO missing from Trojan circuit: " + name;
+      return false;
+    }
+    alignment->trojan_po_for_golden.push_back(it->second);
+  }
+  if (alignment->golden_pi_from_trojan.size() != trojan.pi_count() ||
+      alignment->trojan_po_for_golden.size() != trojan.po_count()) {
+    if (error) *error = "Golden/Trojan interface name-set mismatch";
+    return false;
+  }
+  return true;
+}
+
+bool evaluate_multi_head_mismatches(
+    circuit* golden_eval,
+    circuit* trojan_eval,
+    const MultiHeadAlignment& alignment,
+    const std::vector<int>& trojan_pi_values,
+    std::vector<char>* mismatches,
+    std::string* error) {
+  if (!golden_eval || !trojan_eval || !mismatches) {
+    if (error) *error = "null multi-head simulation argument";
+    return false;
+  }
+  if (trojan_pi_values.size() != trojan_eval->pi_count()) {
+    if (error) *error = "multi-head pattern PI count mismatch";
+    return false;
+  }
+  std::vector<int> golden_pi_values(alignment.golden_pi_from_trojan.size());
+  for (std::size_t pos = 0; pos < golden_pi_values.size(); ++pos) {
+    golden_pi_values[pos] =
+        trojan_pi_values[alignment.golden_pi_from_trojan[pos]] ? 1 : 0;
+  }
+  try {
+    const std::vector<int> golden_outputs =
+        golden_eval->simulate(golden_pi_values);
+    const std::vector<int> trojan_outputs =
+        trojan_eval->simulate(trojan_pi_values);
+    mismatches->assign(golden_outputs.size(), 0);
+    for (std::size_t pos = 0; pos < golden_outputs.size(); ++pos) {
+      const std::size_t trojan_pos = alignment.trojan_po_for_golden[pos];
+      (*mismatches)[pos] =
+          (golden_outputs[pos] != trojan_outputs[trojan_pos]) ? 1 : 0;
+    }
+  } catch (const std::exception& exception) {
+    if (error) {
+      *error = std::string("multi-head simulation failed: ") + exception.what();
+    }
+    return false;
+  }
+  return true;
+}
+
+struct MultiHeadLearnState {
+  std::size_t po_position = 0;
+  std::vector<std::vector<int>> positives;
+  std::vector<std::vector<int>> negatives;
+  std::unordered_set<std::string> positive_keys;
+  std::unordered_set<std::string> negative_keys;
+  std::unordered_set<std::string> blocked_golden_bits;
+  MiningResult result;
+  RuleMiterResult miter;
+  std::size_t refinements = 0;
+  bool proved = false;
+};
+
+bool append_multi_head_sample(MultiHeadLearnState* head,
+                              const std::vector<int>& pattern,
+                              bool positive,
+                              bool* inserted,
+                              std::string* error) {
+  if (inserted) *inserted = false;
+  if (!head) {
+    if (error) *error = "null multi-head sample state";
+    return false;
+  }
+  const std::string key = binary_pattern_key(pattern);
+  auto& own = positive ? head->positive_keys : head->negative_keys;
+  const auto& opposite = positive ? head->negative_keys : head->positive_keys;
+  if (opposite.find(key) != opposite.end()) {
+    if (error) *error = "conflicting labels in one multi-head predicate";
+    return false;
+  }
+  if (!own.insert(key).second) return true;
+  (positive ? head->positives : head->negatives).push_back(pattern);
+  if (inserted) *inserted = true;
+  return true;
+}
+
+MiningOptions make_multi_head_mining_options(const AppOptions& options) {
+  MiningOptions mining;
+  mining.max_depth = options.max_depth;
+  mining.neg_ratio = options.neg_ratio;
+  mining.eval_count = 0;
+  mining.mine_rounds = 1;
+  mining.mine_max = 0;
+  mining.include_pi = options.include_pi;
+  mining.force_split = options.force_split;
+  mining.strict_retry = options.strict_retry;
+  mining.enable_rule_optimizer = true;
+  mining.rule_optimizer_options.timeout_ms = options.rule_opt_timeout_ms;
+  mining.rule_optimizer_options.max_rounds = options.rule_opt_max_rounds;
+  mining.rule_optimizer_options.counterexample_batch_size =
+      options.rule_opt_cex_batch;
+  mining.rule_optimizer_options.max_clauses = options.rule_opt_max_clauses;
+  mining.rule_optimizer_options.max_literals_per_clause =
+      options.rule_opt_max_literals;
+  return mining;
+}
+
+int run_multi_head_repair(
+    const AppOptions& options,
+    const circuit& golden,
+    const circuit& trojan,
+    const std::string& groundtruth_path,
+    std::chrono::steady_clock::time_point main_start) {
+  auto elapsed_ms = [](auto start) {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+  };
+  std::string error;
+  PatternStats discovery_stats;
+  try {
+    if (!build_stats_from_groundtruth(golden, trojan, groundtruth_path,
+                                      &discovery_stats, &error)) {
+      std::cerr << "Multi-head groundtruth error: " << error << "\n";
+      return 1;
+    }
+  } catch (const std::exception& exception) {
+    std::cerr << "Multi-head groundtruth parse error: " << exception.what()
+              << "\n";
+    return 1;
+  }
+
+  MultiHeadAlignment alignment;
+  if (!build_multi_head_alignment(golden, trojan, &alignment, &error)) {
+    std::cerr << "Multi-head alignment error: " << error << "\n";
+    return 1;
+  }
+
+  circuit golden_eval = golden;
+  circuit trojan_eval = trojan;
+  std::vector<std::vector<char>> base_labels;
+  base_labels.reserve(discovery_stats.trigger_patterns.size());
+  std::vector<char> observed_outputs(golden.po_count(), 0);
+  for (const std::vector<int>& pattern : discovery_stats.trigger_patterns) {
+    std::vector<char> labels;
+    if (!evaluate_multi_head_mismatches(&golden_eval, &trojan_eval, alignment,
+                                        pattern, &labels, &error)) {
+      std::cerr << "Multi-head label error: " << error << "\n";
+      return 1;
+    }
+    for (std::size_t po = 0; po < labels.size(); ++po) {
+      if (labels[po]) observed_outputs[po] = 1;
+    }
+    base_labels.push_back(std::move(labels));
+  }
+
+  // Retain every globally classified sample, not only the initial GT rows.
+  // A PO first exposed by a later whole-circuit CEC must be seeded with all
+  // earlier SAT/CEC evidence; otherwise the new head can immediately relearn
+  // a predicate that was already disproved for another head.
+  std::vector<std::vector<int>> global_patterns;
+  std::vector<std::vector<char>> global_labels;
+  std::unordered_map<std::string, std::size_t> global_pattern_rows;
+  auto append_global_pattern = [&](const std::vector<int>& trojan_pattern,
+                                   const std::vector<char>& labels,
+                                   bool* inserted,
+                                   std::string* append_error) -> bool {
+    if (inserted) *inserted = false;
+    if (labels.size() != golden.po_count()) {
+      if (append_error) *append_error = "global PO label count mismatch";
+      return false;
+    }
+    const std::string key = binary_pattern_key(trojan_pattern);
+    const auto existing = global_pattern_rows.find(key);
+    if (existing != global_pattern_rows.end()) {
+      if (global_labels[existing->second] != labels) {
+        if (append_error) {
+          *append_error = "conflicting global labels for one PI pattern";
+        }
+        return false;
+      }
+      return true;
+    }
+    global_pattern_rows.emplace(key, global_patterns.size());
+    global_patterns.push_back(trojan_pattern);
+    global_labels.push_back(labels);
+    if (inserted) *inserted = true;
+    return true;
+  };
+  for (std::size_t row = 0; row < base_labels.size(); ++row) {
+    bool inserted = false;
+    if (!append_global_pattern(discovery_stats.trigger_patterns[row],
+                               base_labels[row], &inserted, &error)) {
+      std::cerr << "Multi-head global dataset error: " << error << "\n";
+      return 1;
+    }
+  }
+
+  std::vector<MultiHeadLearnState> heads;
+  for (std::size_t po = 0; po < observed_outputs.size(); ++po) {
+    if (!observed_outputs[po]) continue;
+    MultiHeadLearnState head;
+    head.po_position = po;
+    for (std::size_t row = 0; row < global_labels.size(); ++row) {
+      bool inserted = false;
+      if (!append_multi_head_sample(
+              &head, global_patterns[row], global_labels[row][po] != 0,
+              &inserted, &error)) {
+        std::cerr << "Multi-head dataset error: " << error << "\n";
+        return 1;
+      }
+    }
+    heads.push_back(std::move(head));
+  }
+  if (heads.empty()) {
+    std::cerr << "multi_head skipped: no mismatching output in groundtruth\n";
+    return 0;
+  }
+
+  // One scalar DT discovers a shared raw gate union.  Per-head learners below
+  // reuse this pool instead of rebuilding feature matrices over every gate.
+  const MiningOptions mining_options = make_multi_head_mining_options(options);
+  MiningOptions head_mining_options = mining_options;
+  // Exact per-output SAT refinement supplies informative negatives.  Keeping
+  // the scalar 50:1 random-negative ratio for every head only multiplies
+  // duplicate safe signatures and causes avoidable PB timeouts.
+  head_mining_options.neg_ratio =
+      std::min<std::size_t>(options.neg_ratio, 5);
+  MiningResult discovery;
+  NegSampleTrace discovery_trace;
+  const auto discovery_start = std::chrono::steady_clock::now();
+  if (!run_mining(golden, trojan, discovery_stats.trigger_patterns,
+                  discovery_stats.gate_indices, mining_options,
+                  compute_trojan_rate(discovery_stats), nullptr,
+                  &discovery_trace, &discovery, &error)) {
+    std::cerr << "multi_head discovery failed: " << error << "\n";
+    return 0;
+  }
+  std::vector<int> shared_candidates = discovery.raw_dt_candidate_nodes;
+  for (const DecisionTreeRule& rule : discovery.model.rules) {
+    for (const auto& term : rule.terms) {
+      if (term.first >= discovery.feature_nodes.size()) continue;
+      const int node = discovery.feature_nodes[term.first];
+      if (std::find(shared_candidates.begin(), shared_candidates.end(), node) ==
+          shared_candidates.end()) {
+        shared_candidates.push_back(node);
+      }
+    }
+  }
+  std::sort(shared_candidates.begin(), shared_candidates.end());
+  shared_candidates.erase(
+      std::unique(shared_candidates.begin(), shared_candidates.end()),
+      shared_candidates.end());
+  // On small/medium circuits, retain the complete physical gate universe for
+  // each head.  The scalar raw-DT union is often sufficient for E_any but can
+  // omit support needed to distinguish one output predicate E_o.  Large
+  // circuits keep the compact discovered union to preserve the memory bound.
+  const bool use_complete_head_universe = trojan.node_count() <= 20000;
+  if (use_complete_head_universe) {
+    shared_candidates = discovery_stats.gate_indices;
+  }
+  if (shared_candidates.empty()) {
+    std::cerr << "multi_head discovery produced an empty candidate union\n";
+    return 0;
+  }
+  std::cout << "multi_head_discovery_summary"
+            << " heads " << heads.size()
+            << " candidates " << shared_candidates.size()
+            << " candidate_source "
+            << (use_complete_head_universe ? "all_physical_gates"
+                                           : "raw_dt_union")
+            << " dt_builds " << discovery.dt_builds
+            << " rules " << discovery.model.rules.size()
+            << " literals " << count_model_literals(discovery.model)
+            << " optimizer_status " << discovery.rule_optimizer_stats.status
+            << " total_ms " << elapsed_ms(discovery_start) << "\n";
+
+  const int kMaxMultiHeadCecRounds = 5;
+  std::size_t cec_retries = 0;
+  std::string output_path = options.output_path.empty()
+                                ? derive_patched_path(options.trojan_path)
+                                : options.output_path;
+  for (int cec_round = 0; cec_round < kMaxMultiHeadCecRounds; ++cec_round) {
+    bool learning_failed = false;
+    for (std::size_t hi = 0; hi < heads.size(); ++hi) {
+      MultiHeadLearnState& head = heads[hi];
+      head.proved = false;
+      for (std::size_t pass = 0;; ++pass) {
+        if (head.positives.empty()) {
+          std::cerr << "multi_head head has no positive samples\n";
+          learning_failed = true;
+          break;
+        }
+        NegSampleTrace trace;
+        MiningResult learned;
+        const double head_rate = static_cast<double>(head.positives.size()) /
+            static_cast<double>(head.positives.size() + head.negatives.size());
+        const auto head_start = std::chrono::steady_clock::now();
+        if (!run_mining(golden, trojan, head.positives, shared_candidates,
+                        head_mining_options, head_rate,
+                        head.negatives.empty() ? nullptr : &head.negatives,
+                        &trace, &learned, &error)) {
+          std::cerr << "multi_head PO " << head.po_position
+                    << " mining failed: " << error << "\n";
+          learning_failed = true;
+          break;
+        }
+        simplify_rules(&learned.model.rules);
+        refresh_model_rule_metadata(&learned.model);
+        if (learned.model.rules.empty()) {
+          std::cerr << "multi_head PO " << head.po_position
+                    << " produced no rule\n";
+          learning_failed = true;
+          break;
+        }
+
+        RuleMiterOptions miter_options;
+        miter_options.timeout_ms = options.rule_formal_timeout_ms;
+        miter_options.max_counterexamples = options.rule_formal_cex_batch;
+        miter_options.error_po_positions = {head.po_position};
+        RuleMiterResult miter = check_rule_miter(
+            golden, trojan, learned.feature_nodes, learned.model,
+            miter_options, &head.blocked_golden_bits);
+
+        // `pass` is the number of rebuilds already consumed after the initial
+        // model.  Do not append a newly discovered sample when no rebuild is
+        // left: doing so would make the stored training set newer than the
+        // model that is about to be composed.
+        const bool refinement_budget_available =
+            pass < options.rule_multi_head_max_rounds;
+        std::size_t added = 0;
+        std::size_t global_added = 0;
+        for (const RuleMiterCounterexample& counterexample :
+             miter.counterexamples) {
+          const std::string golden_key =
+              binary_pattern_key(counterexample.pi_values);
+          std::vector<int> trojan_pattern;
+          if (!reorder_golden_pattern_to_trojan_pis(
+                  golden, trojan, counterexample.pi_values,
+                  &trojan_pattern, &error)) {
+            std::cerr << "multi_head CEX reorder failed: " << error << "\n";
+            return 1;
+          }
+          std::vector<char> all_labels;
+          if (!evaluate_multi_head_mismatches(
+                  &golden_eval, &trojan_eval, alignment, trojan_pattern,
+                  &all_labels, &error)) {
+            std::cerr << "multi_head CEX classification failed: " << error
+                      << "\n";
+            return 1;
+          }
+          const bool positive =
+              counterexample.kind ==
+              RuleMiterCounterexampleKind::false_negative;
+          if ((all_labels[head.po_position] != 0) != positive) {
+            std::cerr << "multi_head scoped CEX label invariant failed\n";
+            return 1;
+          }
+          bool corpus_inserted = false;
+          if (!append_global_pattern(trojan_pattern, all_labels,
+                                     &corpus_inserted, &error)) {
+            std::cerr << "multi_head global CEX append failed: " << error
+                      << "\n";
+            return 1;
+          }
+          if (corpus_inserted) global_added += 1;
+          if (refinement_budget_available) {
+            bool inserted = false;
+            if (!append_multi_head_sample(&head, trojan_pattern, positive,
+                                          &inserted, &error)) {
+              std::cerr << "multi_head CEX append failed: " << error
+                        << "\n";
+              return 1;
+            }
+            if (inserted) {
+              head.blocked_golden_bits.insert(golden_key);
+              added += 1;
+            }
+          }
+        }
+
+        head.result = std::move(learned);
+        head.miter = std::move(miter);
+        head.proved = head.miter.proved();
+        std::cout << "multi_head_rule_summary"
+                  << " cec_attempt " << (cec_round + 1)
+                  << " head " << hi
+                  << " po_position " << head.po_position
+                  << " pass " << (pass + 1)
+                  << " positives " << head.positives.size()
+                  << " negatives " << head.negatives.size()
+                  << " candidates " << shared_candidates.size()
+                  << " rules " << head.result.model.rules.size()
+                  << " literals " << count_model_literals(head.result.model)
+                  << " miter_status "
+                  << rule_miter_status_name(head.miter.status)
+                  << " proved " << (head.proved ? 1 : 0)
+                  << " returned " << head.miter.counterexamples.size()
+                  << " added " << added
+                  << " global_added " << global_added
+                  << " refine_budget_available "
+                  << (refinement_budget_available ? 1 : 0)
+                  << " checks " << head.miter.solver_checks
+                  << " optimizer_ms "
+                  << head.result.rule_optimizer_solver_ms
+                  << " miter_ms " << head.miter.total_ms
+                  << " total_ms " << elapsed_ms(head_start) << "\n";
+
+        if (head.proved || added == 0) {
+          head.refinements += pass;
+          break;
+        }
+      }
+      if (learning_failed) break;
+    }
+    if (learning_failed) return 0;
+
+    std::vector<MultiHeadPatchHead> patch_heads;
+    patch_heads.reserve(heads.size());
+    std::size_t proved_heads = 0;
+    for (const MultiHeadLearnState& head : heads) {
+      MultiHeadPatchHead patch_head;
+      patch_head.base_po_position =
+          alignment.trojan_po_for_golden[head.po_position];
+      patch_head.feature_nodes = head.result.feature_nodes;
+      patch_head.model = head.result.model;
+      patch_heads.push_back(std::move(patch_head));
+      if (head.proved) proved_heads += 1;
+    }
+
+    circuit patched;
+    MultiHeadPatchMetrics metrics;
+    if (!compose_multi_head_po_patch(trojan, patch_heads, &patched, &metrics,
+                                     &error)) {
+      std::cerr << "multi_head composition failed: " << error << "\n";
+      return 0;
+    }
+
+    std::vector<std::vector<int>> verification_patterns =
+        discovery_stats.trigger_patterns;
+    std::unordered_set<std::string> verification_keys;
+    for (const auto& pattern : verification_patterns) {
+      verification_keys.insert(binary_pattern_key(pattern));
+    }
+    for (const MultiHeadLearnState& head : heads) {
+      for (const auto* collection : {&head.positives, &head.negatives}) {
+        for (const auto& pattern : *collection) {
+          if (verification_keys.insert(binary_pattern_key(pattern)).second) {
+            verification_patterns.push_back(pattern);
+          }
+        }
+      }
+    }
+    std::size_t mismatch_index = 0;
+    const auto verify_start = std::chrono::steady_clock::now();
+    const bool finite_verified = verify_patch_groundtruth(
+        golden, patched, verification_patterns, &mismatch_index, &error);
+    std::cerr << "[TIMING]   final_verify: " << elapsed_ms(verify_start)
+              << " ms (" << (finite_verified ? "PASS" : "FAIL") << ")\n";
+    if (!finite_verified) {
+      std::cerr << "multi_head finite verification failed: " << error
+                << " pattern " << mismatch_index << "\n";
+    }
+    if (!bench_io::write_bench_file(output_path, patched, &error)) {
+      std::cerr << "Multi-head write error: " << error << "\n";
+      return 1;
+    }
+    std::cout << "payload_fix_selected " << heads.size()
+              << " area_delta " << metrics.area_delta
+              << " level_delta " << metrics.level_delta << "\n";
+    std::cout << "payload_fix_bench " << output_path << "\n";
+    std::cout << "multi_head_patch_summary"
+              << " cec_attempt " << (cec_round + 1)
+              << " heads " << heads.size()
+              << " proved_heads " << proved_heads
+              << " predicate_nodes " << metrics.predicate_nodes_added
+              << " output_xors " << metrics.output_xor_nodes_added
+              << " area_delta " << metrics.area_delta
+              << " level_delta " << metrics.level_delta << "\n";
+
+    std::vector<int> cec_counterexample;
+    if (run_abc_cec(options.golden_path, output_path, golden,
+                    &cec_counterexample)) {
+      std::cout << "cec_rounds " << cec_retries << "\n";
+      std::cerr << "[TIMING] TOTAL: " << elapsed_ms(main_start) << " ms\n";
+      return 0;
+    }
+    if (cec_counterexample.empty()) {
+      std::cerr << "multi_head CEC failed without a counterexample\n";
+      break;
+    }
+
+    std::vector<int> trojan_pattern;
+    if (!reorder_golden_pattern_to_trojan_pis(
+            golden, trojan, cec_counterexample, &trojan_pattern, &error)) {
+      std::cerr << "multi_head CEC reorder failed: " << error << "\n";
+      return 1;
+    }
+    std::vector<char> labels;
+    if (!evaluate_multi_head_mismatches(&golden_eval, &trojan_eval, alignment,
+                                        trojan_pattern, &labels, &error)) {
+      std::cerr << "multi_head CEC classification failed: " << error << "\n";
+      return 1;
+    }
+    bool corpus_inserted = false;
+    if (!append_global_pattern(trojan_pattern, labels, &corpus_inserted,
+                               &error)) {
+      std::cerr << "multi_head global CEC append failed: " << error << "\n";
+      return 1;
+    }
+    std::size_t added = 0;
+    for (MultiHeadLearnState& head : heads) {
+      bool inserted = false;
+      if (!append_multi_head_sample(&head, trojan_pattern,
+                                    labels[head.po_position] != 0,
+                                    &inserted, &error)) {
+        std::cerr << "multi_head CEC append failed: " << error << "\n";
+        return 1;
+      }
+      if (inserted) added += 1;
+    }
+    std::size_t new_heads = 0;
+    for (std::size_t po = 0; po < labels.size(); ++po) {
+      if (!labels[po] || observed_outputs[po]) continue;
+      MultiHeadLearnState head;
+      head.po_position = po;
+      for (std::size_t row = 0; row < global_labels.size(); ++row) {
+        bool inserted = false;
+        if (!append_multi_head_sample(
+                &head, global_patterns[row], global_labels[row][po] != 0,
+                &inserted, &error)) {
+          std::cerr << "multi_head new-head dataset error: " << error
+                    << "\n";
+          return 1;
+        }
+      }
+      heads.push_back(std::move(head));
+      observed_outputs[po] = 1;
+      new_heads += 1;
+      std::cout << "multi_head_discovered_output"
+                << " cec_round " << (cec_round + 1)
+                << " po_position " << po
+                << " po_name " << golden.node_name(golden.po_indices()[po])
+                << "\n";
+    }
+    std::cout << "multi_head_cec_feedback"
+              << " round " << (cec_round + 1)
+              << " labels_added " << added
+              << " corpus_added " << (corpus_inserted ? 1 : 0)
+              << " corpus_size " << global_patterns.size()
+              << " new_heads " << new_heads << "\n";
+    if (added == 0 && new_heads == 0) break;
+    if (cec_round + 1 < kMaxMultiHeadCecRounds) cec_retries += 1;
+  }
+
+  std::cout << "cec_rounds " << cec_retries << "\n";
+  std::cerr << "[TIMING] TOTAL: " << elapsed_ms(main_start) << " ms\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2195,6 +2805,15 @@ int main(int argc, char** argv) {
          << " timeout_ms " << options.rule_formal_timeout_ms
          << " max_rounds " << options.rule_formal_max_rounds
          << " cex_batch " << options.rule_formal_cex_batch << "\n";
+  }
+  if (options.rule_multi_head) {
+    cout << "rule_multi_head_config enabled 1 policy per_output_xor"
+         << " max_rounds_per_head "
+         << options.rule_multi_head_max_rounds
+         << " head_neg_ratio " << std::min<std::size_t>(options.neg_ratio, 5)
+         << " complete_universe_node_limit 20000\n";
+    return run_multi_head_repair(options, golden, trojan, groundtruth_path,
+                                 t_main_start);
   }
 
   const int kMaxCecRounds = 5;

@@ -56,6 +56,29 @@ circuit make_trojan_error_b(std::size_t extra_pis = 0) {
   return net;
 }
 
+std::pair<circuit, circuit> make_two_output_scoped_miter() {
+  circuit golden;
+  golden.define_pi("a");
+  golden.define_pi("b");
+  golden.define_gate("y0", GType::BUFF, {golden.node_index("a")});
+  golden.define_gate("y1", GType::BUFF, {golden.node_index("b")});
+  golden.add_output_name("y0");
+  golden.add_output_name("y1");
+  golden.finalize_outputs();
+
+  circuit trojan;
+  trojan.define_pi("a");
+  trojan.define_pi("b");
+  trojan.define_gate("y0", GType::XOR,
+                     {trojan.node_index("a"), trojan.node_index("b")});
+  trojan.define_gate("y1", GType::XOR,
+                     {trojan.node_index("b"), trojan.node_index("a")});
+  trojan.add_output_name("y0");
+  trojan.add_output_name("y1");
+  trojan.finalize_outputs();
+  return {golden, trojan};
+}
+
 RuleMiterOptions test_options(std::size_t max_counterexamples = 5) {
   RuleMiterOptions options;
   options.max_counterexamples = max_counterexamples;
@@ -576,6 +599,119 @@ void test_blocked_patterns_are_checked_but_not_repeated() {
          "a blocked assignment that scalar-checks clean does not weaken proof");
 }
 
+void test_output_scoped_exact_rule() {
+  const auto nets = make_two_output_scoped_miter();
+  const circuit& golden = nets.first;
+  const circuit& trojan = nets.second;
+  const std::vector<int> features{trojan.node_index("a"),
+                                  trojan.node_index("b")};
+
+  RuleMiterOptions y0_options = test_options();
+  y0_options.error_po_positions = {0};
+  const DecisionTreeModel y0_model = make_model({{{1, 1}}});
+  const RuleMiterResult y0 = check_rule_miter(
+      golden, trojan, features, y0_model, y0_options);
+  expect(y0.proved(), "PO 0 scope proves E0=b equals R=b");
+
+  RuleMiterOptions y1_options = test_options();
+  y1_options.error_po_positions = {1};
+  const DecisionTreeModel y1_model = make_model({{{0, 1}}});
+  const RuleMiterResult y1 = check_rule_miter(
+      golden, trojan, features, y1_model, y1_options);
+  expect(y1.proved(), "PO 1 scope proves E1=a equals R=a");
+
+  RuleMiterOptions both_options = test_options();
+  both_options.error_po_positions = {0, 1};
+  const DecisionTreeModel both_model =
+      make_model({{{0, 1}}, {{1, 1}}});
+  const RuleMiterResult both = check_rule_miter(
+      golden, trojan, features, both_model, both_options);
+  expect(both.proved(), "multi-PO scope proves E0 OR E1 equals a OR b");
+}
+
+void test_output_scope_changes_error_predicate() {
+  const auto nets = make_two_output_scoped_miter();
+  const circuit& golden = nets.first;
+  const circuit& trojan = nets.second;
+  const std::vector<int> features{trojan.node_index("a"),
+                                  trojan.node_index("b")};
+  const DecisionTreeModel model = make_model({{{1, 1}}});
+
+  RuleMiterOptions y0_options = test_options();
+  y0_options.error_po_positions = {0};
+  const RuleMiterResult y0 = check_rule_miter(
+      golden, trojan, features, model, y0_options);
+  expect(y0.proved(), "R=b is exact when only PO 0 contributes to E");
+
+  RuleMiterOptions y1_options = test_options();
+  y1_options.error_po_positions = {1};
+  const RuleMiterResult y1 = check_rule_miter(
+      golden, trojan, features, model, y1_options);
+  expect(y1.status == RuleMiterStatus::counterexamples,
+         "the same R=b differs from PO 1's E1=a");
+  expect(count_kind(y1, RuleMiterCounterexampleKind::false_negative) == 1,
+         "PO 1 scope returns its false negative");
+  expect(count_kind(y1, RuleMiterCounterexampleKind::false_positive) == 1,
+         "PO 1 scope returns its false positive");
+}
+
+void test_output_scoped_directional_counterexamples() {
+  const auto nets = make_two_output_scoped_miter();
+  const circuit& golden = nets.first;
+  const circuit& trojan = nets.second;
+  const std::vector<int> features{trojan.node_index("a"),
+                                  trojan.node_index("b")};
+  RuleMiterOptions options = test_options();
+  options.error_po_positions = {0};
+
+  const DecisionTreeModel subset = make_model({{{0, 1}, {1, 1}}});
+  const RuleMiterResult false_negative = check_rule_miter(
+      golden, trojan, features, subset, options);
+  expect(count_kind(false_negative,
+                    RuleMiterCounterexampleKind::false_negative) == 1,
+         "scoped subset rule returns one false negative");
+  expect(count_kind(false_negative,
+                    RuleMiterCounterexampleKind::false_positive) == 0,
+         "scoped subset rule returns no false positive");
+
+  const DecisionTreeModel superset =
+      make_model({{{1, 1}}, {{0, 1}}});
+  const RuleMiterResult false_positive = check_rule_miter(
+      golden, trojan, features, superset, options);
+  expect(count_kind(false_positive,
+                    RuleMiterCounterexampleKind::false_negative) == 0,
+         "scoped superset rule returns no false negative");
+  expect(count_kind(false_positive,
+                    RuleMiterCounterexampleKind::false_positive) == 1,
+         "scoped superset rule returns one false positive");
+}
+
+void test_invalid_output_scope_rejected() {
+  const auto nets = make_two_output_scoped_miter();
+  const circuit& golden = nets.first;
+  const circuit& trojan = nets.second;
+  const std::vector<int> features{trojan.node_index("b")};
+  const DecisionTreeModel model = make_model({{{0, 1}}});
+
+  RuleMiterOptions out_of_range = test_options();
+  out_of_range.error_po_positions = {2};
+  const RuleMiterResult bad_position = check_rule_miter(
+      golden, trojan, features, model, out_of_range);
+  expect(bad_position.status == RuleMiterStatus::invalid,
+         "out-of-range PO scope is invalid");
+  expect(bad_position.reason.find("out of range") != std::string::npos,
+         "out-of-range PO scope reports its cause");
+
+  RuleMiterOptions duplicate = test_options();
+  duplicate.error_po_positions = {0, 0};
+  const RuleMiterResult repeated_position = check_rule_miter(
+      golden, trojan, features, model, duplicate);
+  expect(repeated_position.status == RuleMiterStatus::invalid,
+         "duplicate PO scope is invalid");
+  expect(repeated_position.reason.find("duplicate") != std::string::npos,
+         "duplicate PO scope reports its cause");
+}
+
 }  // namespace
 
 int main() {
@@ -600,6 +736,10 @@ int main() {
   test_stale_eval_order_cycle_rejected();
   test_basic_gate_encoding_crosscheck();
   test_blocked_patterns_are_checked_but_not_repeated();
+  test_output_scoped_exact_rule();
+  test_output_scope_changes_error_predicate();
+  test_output_scoped_directional_counterexamples();
+  test_invalid_output_scope_rejected();
 
   if (failures != 0) {
     std::cerr << failures << " rule-miter test(s) failed\n";

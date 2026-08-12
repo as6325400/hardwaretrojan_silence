@@ -25,6 +25,10 @@ struct MiningOptions {
 
 struct MiningResult {
   std::vector<int> feature_nodes;
+  // Physical circuit nodes appearing on raw positive DT paths before rule
+  // simplification/PB optimization.  This is the shared discovery pool used
+  // by the optional multi-head policy.
+  std::vector<int> raw_dt_candidate_nodes;
   DecisionTreeModel model;
   std::size_t data_pos = 0;
   std::size_t data_neg = 0;

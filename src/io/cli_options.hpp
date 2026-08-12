@@ -44,6 +44,10 @@ struct AppOptions {
   std::uint64_t rule_formal_timeout_ms = 10000;
   std::size_t rule_formal_max_rounds = 5;
   std::size_t rule_formal_cex_batch = 5;
+  // Opt-in per-output repair predicates.  The scalar policy remains the
+  // default so historical z3-pb runs retain their original semantics.
+  bool rule_multi_head = false;
+  std::size_t rule_multi_head_max_rounds = 20;
 };
 
 ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::string* error); // Parse CLI args into AppOptions.

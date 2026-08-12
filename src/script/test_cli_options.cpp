@@ -137,6 +137,24 @@ int main() {
                     "--rule-formal-cex-batch", "4"});
   ok &= expect_formal_options(formal_z3);
 
+  auto multi_head_z3 = positional;
+  multi_head_z3.insert(multi_head_z3.end(),
+                       {"--rule-method", "z3-pb",
+                        "--rule-formal-refine", "--rule-multi-head",
+                        "--rule-multi-head-max-rounds", "17"});
+  {
+    AppOptions options;
+    std::string error;
+    const ParseStatus status = parse(multi_head_z3, &options, &error);
+    if (status != ParseStatus::ok || !options.rule_multi_head ||
+        !options.rule_formal_refine ||
+        options.rule_multi_head_max_rounds != 17) {
+      std::cerr << "multi-head option parse failed: status="
+                << static_cast<int>(status) << " error=" << error << "\n";
+      ok = false;
+    }
+  }
+
   auto conflicting_z3_alias = positional;
   conflicting_z3_alias.insert(conflicting_z3_alias.end(),
                               {"--rule-method", "z3-pb", "--no-virtual"});
@@ -184,6 +202,32 @@ int main() {
        "--rule-formal-cex-batch", "6"});
   ok &= expect_error(oversized_formal_batch, "between 1 and 5",
                      "oversized formal batch");
+
+  auto multi_head_without_formal = positional;
+  multi_head_without_formal.insert(
+      multi_head_without_formal.end(),
+      {"--rule-method", "z3-pb", "--rule-multi-head"});
+  ok &= expect_error(multi_head_without_formal,
+                     "requires --rule-formal-refine",
+                     "multi-head without formal refinement");
+
+  auto multi_head_with_dt = positional;
+  multi_head_with_dt.insert(
+      multi_head_with_dt.end(),
+      {"--rule-method", "dt", "--rule-formal-refine",
+       "--rule-multi-head"});
+  ok &= expect_error(multi_head_with_dt,
+                     "requires --rule-method z3-pb",
+                     "multi-head with dt");
+
+  auto multi_head_rounds_without_flag = positional;
+  multi_head_rounds_without_flag.insert(
+      multi_head_rounds_without_flag.end(),
+      {"--rule-method", "z3-pb", "--rule-formal-refine",
+       "--rule-multi-head-max-rounds", "20"});
+  ok &= expect_error(multi_head_rounds_without_flag,
+                     "requires --rule-multi-head",
+                     "multi-head rounds without flag");
 
   if (!ok) {
     return EXIT_FAILURE;

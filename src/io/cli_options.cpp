@@ -28,6 +28,7 @@ void print_usage(const char* prog) {
                " [--rule-opt-max-literals N]"
                " [--rule-formal-refine] [--rule-formal-timeout-ms N]"
                " [--rule-formal-max-rounds N] [--rule-formal-cex-batch N]"
+               " [--rule-multi-head] [--rule-multi-head-max-rounds N]"
                " [--force-split] [--no-strict] [--no-virtual]\n";
 }
 
@@ -98,6 +99,13 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
       app.add_option("--rule-formal-cex-batch",
                      out->rule_formal_cex_batch,
                      "SAT rule counterexamples returned per check (1-5)");
+  CLI::Option* multi_head =
+      app.add_flag("--rule-multi-head", out->rule_multi_head,
+                   "Learn one formally refined repair rule per mismatching PO");
+  CLI::Option* multi_head_rounds =
+      app.add_option("--rule-multi-head-max-rounds",
+                     out->rule_multi_head_max_rounds,
+                     "Maximum SAT refinement rebuilds per PO head");
   app.add_option("--output", out->output_path, "Output path (alternative)");
 
   // --no-strict disables strict_retry (inverted flag)
@@ -190,6 +198,24 @@ ParseStatus parse_cli_options(int argc, char** argv, AppOptions* out, std::strin
   if (out->rule_formal_cex_batch == 0 ||
       out->rule_formal_cex_batch > 5) {
     if (error) *error = "--rule-formal-cex-batch must be between 1 and 5";
+    return ParseStatus::error;
+  }
+  if (multi_head->count() && out->rule_method != RuleMethod::z3_pb) {
+    if (error) *error = "--rule-multi-head requires --rule-method z3-pb";
+    return ParseStatus::error;
+  }
+  if (out->rule_multi_head && !out->rule_formal_refine) {
+    if (error) *error = "--rule-multi-head requires --rule-formal-refine";
+    return ParseStatus::error;
+  }
+  if (multi_head_rounds->count() && !out->rule_multi_head) {
+    if (error) {
+      *error = "--rule-multi-head-max-rounds requires --rule-multi-head";
+    }
+    return ParseStatus::error;
+  }
+  if (out->rule_multi_head_max_rounds == 0) {
+    if (error) *error = "--rule-multi-head-max-rounds must be positive";
     return ParseStatus::error;
   }
 

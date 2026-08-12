@@ -1477,6 +1477,15 @@ bool run_mining_loop(const circuit& golden,
           std::unique(raw_dt_candidate_features.begin(),
                       raw_dt_candidate_features.end()),
           raw_dt_candidate_features.end());
+      for (std::size_t feature_idx : raw_dt_candidate_features) {
+        if (feature_idx >= feature_nodes.size()) continue;
+        const int node_idx = feature_nodes[feature_idx];
+        if (std::find(result->raw_dt_candidate_nodes.begin(),
+                      result->raw_dt_candidate_nodes.end(),
+                      node_idx) == result->raw_dt_candidate_nodes.end()) {
+          result->raw_dt_candidate_nodes.push_back(node_idx);
+        }
+      }
     }
 
     const std::size_t rules_before = result->model.rules.size();
@@ -1624,6 +1633,7 @@ bool run_mining(const circuit& golden,
   result->dt_builds = 0;
   result->strict_dt_builds = 0;
   result->training_data_builds = 0;
+  result->raw_dt_candidate_nodes.clear();
   result->rule_optimizer_stats = RuleOptimizerStats{};
   result->rule_optimizer_calls = 0;
   result->rule_optimizer_accepted = 0;
