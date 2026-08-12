@@ -2,6 +2,11 @@
 
 Automatic hardware trojan detection and patching tool. Given a golden circuit and a trojaned version, the tool builds an interpretable trigger rule, patches the trojaned netlist, and uses ABC combinational equivalence checking (CEC) to decide whether the result is functionally equivalent to the golden circuit.
 
+The [`dac25-inspired-rectification`](DAC25_INSPIRED_RECTIFICATION.md) branch
+also contains an independently dispatched, public-information
+DAC'25-inspired functional-ECO baseline and its full 482-case comparison with
+Z3-PB + formal refinement.
+
 ## Algorithm Overview
 
 ```
@@ -73,6 +78,9 @@ src/
 │   ├── gpu_tree.cu/cuh         # GPU-accelerated tree training
 │   ├── miner.hpp/cpp           # Mining loop + hard-negative mining + strict retry
 │   ├── rule_optimizer.hpp/cpp  # Z3 Optimize bounded-DNF 0-1 PB optimizer
+│   ├── dac25_rectification.hpp/cpp # SAT validation of rectification sets
+│   ├── dac25_repair.hpp/cpp    # End-to-end DAC25-inspired repair dispatch
+│   ├── dac25_runeco.hpp/cpp    # ABC runeco patch generation and normalization
 │   ├── virtual_node.hpp/cpp    # Signature-ranked pair/triple AND virtual features
 │   ├── candidate_selector.hpp/cpp # Build the all-gate candidate set
 │   ├── pattern_sampler.hpp/cpp # Random pattern generation
@@ -94,6 +102,7 @@ src/
     └── packed_cmp.cpp          # Packed circuit comparison
 scripts/
 ├── compare_rule_methods.py     # Reproducible per-case A/B runner + external CEC
+├── analyze_dac25_vs_z3_formal.py # Common-AIG QoR and correctness comparison
 ├── test_compare_rule_methods.py
 └── test_rule_method_telemetry.sh
 ```
@@ -140,12 +149,27 @@ bin/main <golden.bench> <trojan.bench> <groundtruth.json> [output.bench] [option
 | `--rule-formal-timeout-ms N` | 10000 | Soft wall-clock budget for each SAT rule-miter check |
 | `--rule-formal-max-rounds N` | 5 | Maximum rule rebuilds caused by SAT counterexamples |
 | `--rule-formal-cex-batch N` | 5 | Counterexamples returned per check; range 1–5 |
+| `--repair-method M` | `legacy` | `legacy` or independently dispatched `dac25-inspired` |
+| `--dac25-selector-timeout-ms N` | 30000 | Shared DAC25-inspired candidate/set-validation deadline |
+| `--dac25-candidate-limit N` | 32 | Retained rectification candidates |
+| `--dac25-max-targets N` | 2 | Maximum targets per candidate set |
+| `--dac25-max-sets N` | 4 | Maximum feasible sets retained for patch trials |
+| `--dac25-runeco-timeout-s N` | 60 | ABC `runeco` deadline per feasible set |
+| `--dac25-abc-bin PATH` | `ABC_BIN` or `abc` | ABC used for DAC patch generation and final CEC |
 
 `z3-pb` changes rule synthesis only; downstream payload-node optimization and patch application are shared with the other methods. It uses Z3 Optimize as a pseudo-Boolean/MaxSMT backend. Its Boolean formulation is 0-1 ILP-equivalent, but it is not a generic MILP solver and does not construct or expose an LP relaxation, so there is no reported MILP gap. “Optimal” and “verified” telemetry apply only to the bounded candidate set and finite training matrix. Whole-input correctness is established by ABC CEC.
 
 With `--rule-formal-refine`, the learned rule is additionally compared against the circuit-derived observable-error predicate over the full PI space. SAT witnesses are labeled from the Golden/Trojan miter itself—no ground-truth membership lookup is used for this feedback—and are accumulated as positive or protected negative training rows. `FN/FP UNSAT` proves `E(x) ↔ R(x)` for that conditional rule. A verified direct literal cut bypasses the DNF, so its rule miter is reported as `skipped`; the independent external ABC CEC remains the final patch-correctness authority in every case.
 
 `rule_synth_summary synthesized_*` records the model immediately after rule synthesis. `rule_apply_summary` separately records the post-signature/applied mechanism and its effective rule/literal/depth counts; a verified direct literal cut is identified with `rule_model_used=0` and an effective `1/1/1` condition.
+
+`--repair-method dac25-inspired` takes an early, independent ECO path after
+Golden/Trojan parsing and alignment. It does not run DT/Z3 rule synthesis or
+read the positional ground-truth contents. It validates bounded target sets by
+exact SAT-based Shannon quantifier elimination, synthesizes feasible patches
+with ABC `runeco`, restores the original interface, and requires final CEC.
+See [DAC25_INSPIRED_RECTIFICATION.md](DAC25_INSPIRED_RECTIFICATION.md) for the
+method boundary, full benchmark, and common-AIG QoR protocol.
 
 **Example:**
 
