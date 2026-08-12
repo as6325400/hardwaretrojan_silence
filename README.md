@@ -223,6 +223,8 @@ Artifacts include per-method logs, patched netlists, JSON records, aggregate CSV
 
 The full 482-case Z3-PB benchmark and the same-binary formal OFF/ON ablation are tracked under [`experiments/z3_pb_v0_vs_v0_v5_2026-08-12`](experiments/z3_pb_v0_vs_v0_v5_2026-08-12/) and [`experiments/z3_pb_formal_ab_v0_full_2026-08-12`](experiments/z3_pb_formal_ab_v0_full_2026-08-12/). The latter keeps external ABC CEC as the PASS criterion and separates the formal flag's causal effect from the other backported correctness fixes. See [`Z3_PB_FORMAL_REFINEMENT_REPORT.md`](Z3_PB_FORMAL_REFINEMENT_REPORT.md) for the presentation-ready combined report.
 
+V4 multi-Trojan inputs can be projected into the same reproducible runner with `scripts/generate_v4_rule_benchmark_manifest.py` and `scripts/materialize_v4_benchmark_inputs.py`. A same-binary 13-case formal OFF/ON engineering smoke covers N=1/2/3/5, shared triggers, medium circuits, and held-out large OOD circuits; see [`V4_Z3_PB_FORMAL_SMOKE_REPORT.md`](V4_Z3_PB_FORMAL_SMOKE_REPORT.md). This smoke is intentionally diagnostic and is not presented as a V4 success-rate estimate.
+
 ## ABC Setup
 
 Ensure `abc` binary is available in `PATH` or project root:

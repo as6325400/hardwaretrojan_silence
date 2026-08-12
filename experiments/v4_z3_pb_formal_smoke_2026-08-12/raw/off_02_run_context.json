@@ -1,0 +1,37 @@
+{
+  "abc_sha256": "627ee77136889096c2d8aa11ef9adffb666504867f29508180ac10fc596093e3",
+  "abc_timeout": 60.0,
+  "binary_sha256": "2bebfa7eadefbcbda545d255dbd26bfa2da85a7adeb0097bffd9d36a61668b41",
+  "common_args": [
+    "--depth",
+    "10",
+    "--neg-ratio",
+    "50",
+    "--mine-rounds",
+    "15",
+    "--mine-max",
+    "5000"
+  ],
+  "context_key": "98c11124bfa15c4428540c45f7a3c866c20336e56c7be6d9bc075ff8a8d19403",
+  "highs_library_sha256": null,
+  "manifest_sha256": "a85a6a75260a9ff659d91ec4bc50a432e1343979418e94a24c581448fbacee82",
+  "methods": [
+    "z3-pb"
+  ],
+  "profile": "all_ready",
+  "rule_cover_fourth_objective": null,
+  "rule_cover_logic_risk_weights": {
+    "fanout": null,
+    "timing": null,
+    "unique": null
+  },
+  "rule_cover_phase4_timeout_ms": null,
+  "rule_formal_cex_batch": null,
+  "rule_formal_max_rounds": null,
+  "rule_formal_refine": false,
+  "rule_formal_timeout_ms": null,
+  "runner_schema": "rule-method-ab-run/3",
+  "runner_sha256": "bb85251ea9cf7bfcbe98f140a5f3a1395ee3f3a7810ccb154c1b041bcf40a614",
+  "show_sha256": "4517349556e40cf3468dc37802a4ceb8430df53c0447a2e36cf889f4fd9a4082",
+  "timeout_override": 300.0
+}
