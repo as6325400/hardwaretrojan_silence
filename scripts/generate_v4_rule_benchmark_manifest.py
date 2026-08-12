@@ -142,6 +142,89 @@ def _select_smallest(
     )["case_id"]
 
 
+def _add_fresh_paper_profile(
+    cases: Sequence[Mapping[str, Any]],
+    profiles: Dict[str, List[str]],
+    experiment_matrix_sha256: str | None,
+) -> None:
+    """Pre-register a result-blind, stratified multi-Trojan evaluation cohort.
+
+    The profile deliberately excludes every diagnostic smoke case.  Selection
+    uses only immutable dataset metadata and a declared matrix hash, never a
+    repair result, runtime, or generated patch.
+    """
+    if not experiment_matrix_sha256:
+        return
+    smoke_ids = set(profiles.get("smoke_extended", []))
+    eligible = [case for case in cases if case["case_id"] not in smoke_ids]
+    required_phases = {
+        "core_final", "heldout_ood", "shared_trigger_challenge",
+        "five_trojan_stress",
+    }
+    present_phases = {case["v4"]["phase_id"] for case in eligible}
+    # Small synthetic fixtures and partial manifests intentionally do not
+    # expose a paper cohort.  A full-looking dataset must satisfy the exact
+    # pre-registered cell count below, so real inventory drift still fails.
+    if not required_phases.issubset(present_phases):
+        return
+
+    def rank(case: Mapping[str, Any]) -> tuple[str, str]:
+        case_id = str(case["case_id"])
+        digest = hashlib.sha256(
+            (experiment_matrix_sha256 + "\0" + case_id).encode("utf-8")
+        ).hexdigest()
+        return digest, case_id
+
+    def select_groups(
+        phase: str, group_fields: Sequence[str], count: int
+    ) -> List[str]:
+        groups: Dict[tuple[Any, ...], List[Mapping[str, Any]]] = {}
+        for case in eligible:
+            metadata = case["v4"]
+            if metadata["phase_id"] != phase:
+                continue
+            values = []
+            for field in group_fields:
+                values.append(case[field] if field in case else metadata[field])
+            groups.setdefault(tuple(values), []).append(case)
+        selected: List[str] = []
+        for key in sorted(groups, key=lambda value: tuple(map(str, value))):
+            selected.extend(
+                str(case["case_id"])
+                for case in sorted(groups[key], key=rank)[:count]
+            )
+        return selected
+
+    selected = []
+    selected.extend(
+        select_groups(
+            "core_final", ("circuit", "trojan_count", "trigger_size"), 1
+        )
+    )
+    selected.extend(
+        select_groups("heldout_ood", ("circuit", "trojan_count"), 2)
+    )
+    selected.extend(
+        select_groups(
+            "shared_trigger_challenge",
+            ("circuit", "trojan_count", "trigger_size"),
+            1,
+        )
+    )
+    selected.extend(sorted(
+        str(case["case_id"])
+        for case in eligible
+        if case["v4"]["phase_id"] == "five_trojan_stress"
+    ))
+    if len(selected) != 81 or len(set(selected)) != 81:
+        raise RuntimeError(
+            "fresh paper profile requires exactly 81 unique V4 cases"
+        )
+    if set(selected) & smoke_ids:
+        raise RuntimeError("fresh paper profile overlaps diagnostic smoke cases")
+    profiles["paper_fresh_stratified_81"] = selected
+
+
 def build_manifest(
     source_root: Path,
     projected_root: Path,
@@ -342,6 +425,9 @@ def build_manifest(
         profiles["smoke_fast"] = smoke_ids[:9]
         profiles["smoke_extended"] = smoke_ids
 
+    matrix_sha256 = _sha256(matrix_path) if matrix_path else None
+    _add_fresh_paper_profile(cases, profiles, matrix_sha256)
+
     rejected_ids = []
     rejected_categories: Dict[str, int] = {}
     for row in rejected_rows:
@@ -356,6 +442,23 @@ def build_manifest(
 
     for values in profiles.values():
         values.sort()
+    profile_metadata: Dict[str, Dict[str, Any]] = {}
+    paper_profile = profiles.get("paper_fresh_stratified_81")
+    if paper_profile:
+        encoded_ids = "".join(f"{case_id}\n" for case_id in paper_profile).encode()
+        profile_metadata["paper_fresh_stratified_81"] = {
+            "case_count": len(paper_profile),
+            "case_ids_sha256": hashlib.sha256(encoded_ids).hexdigest(),
+            "excluded_profile": "smoke_extended",
+            "selection_uses_outcomes": False,
+            "selection_salt": matrix_sha256,
+            "selection": (
+                "core: rank-min 1 per (circuit,N,trigger_size); "
+                "heldout OOD: rank-min 2 per (circuit,N); shared-trigger: "
+                "rank-min 1 per (circuit,N,trigger_size); N=5 stress: all "
+                "remaining ready cases; rank=SHA256(matrix_sha256,case_id)"
+            ),
+        }
     projected = str(projected_root)
     manifest = {
         "schema_version": MANIFEST_SCHEMA,
@@ -376,7 +479,7 @@ def build_manifest(
             "rejected_index": str(rejected_index.relative_to(source_root)),
             "rejected_index_sha256": _sha256(rejected_index),
             "experiment_matrix": str(matrix_path.resolve()) if matrix_path else None,
-            "experiment_matrix_sha256": _sha256(matrix_path) if matrix_path else None,
+            "experiment_matrix_sha256": matrix_sha256,
         },
         "inventory": {
             "scheduled_count": len(cases) + len(rejected_ids),
@@ -386,6 +489,7 @@ def build_manifest(
             "rejected_categories": dict(sorted(rejected_categories.items())),
         },
         "profiles": dict(sorted(profiles.items())),
+        "profile_metadata": profile_metadata,
         "cases": cases,
     }
     return manifest

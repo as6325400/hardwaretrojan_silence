@@ -138,6 +138,7 @@ class V4ManifestTest(unittest.TestCase):
             self.assertEqual(manifest["profiles"]["core_final"], ["c880_n1"])
             self.assertEqual(manifest["profiles"]["n3"], ["c880_n3"])
             self.assertEqual(manifest["profiles"]["shared_trigger_literals"], ["c880_n3"])
+            self.assertEqual(manifest["profile_metadata"], {})
             self.assertEqual(manifest["cases"][0]["timeout_seconds"], 123.0)
 
             target = temp / "target"
@@ -239,6 +240,60 @@ class V4ManifestTest(unittest.TestCase):
             generator._safe_component("..", "benchmark")
         with self.assertRaisesRegex(RuntimeError, "unsafe case_id"):
             generator._safe_component(".", "case_id")
+
+    def test_fresh_paper_profile_is_result_blind_and_excludes_smoke(self) -> None:
+        cases = []
+        ordinal = 0
+
+        def add(phase: str, circuit: str, count: int, trigger_size: int,
+                amount: int) -> None:
+            nonlocal ordinal
+            topology = (
+                "shared_trigger_literals"
+                if phase == "shared_trigger_challenge" else "disjoint"
+            )
+            for _ in range(amount):
+                ordinal += 1
+                cases.append({
+                    "case_id": f"case_{ordinal:03d}",
+                    "circuit": circuit,
+                    "v4": {
+                        "phase_id": phase,
+                        "trojan_count": count,
+                        "trigger_size": trigger_size,
+                        "trigger_topology": topology,
+                    },
+                })
+
+        # 48 core cells, with one extra alternative in each cell.
+        for circuit in ("a", "b", "c", "d", "e", "f", "g", "h"):
+            for count in (1, 2, 3):
+                for trigger_size in (3, 5):
+                    add("core_final", circuit, count, trigger_size, 2)
+        # 6 OOD cells × two selected, plus one alternative each.
+        for circuit in ("i", "j", "k"):
+            for count in (2, 3):
+                add("heldout_ood", circuit, count, 5, 3)
+        # 12 shared cells.
+        for circuit in ("l", "m", "n"):
+            for count in (2, 3):
+                for trigger_size in (3, 5):
+                    add("shared_trigger_challenge", circuit, count, trigger_size, 2)
+        # Ten stress cases; one is reserved for the diagnostic smoke.
+        add("five_trojan_stress", "o", 5, 5, 10)
+        smoke_case = cases[-1]["case_id"]
+        profiles = {"smoke_extended": [smoke_case]}
+        generator._add_fresh_paper_profile(cases, profiles, "matrix-sha")
+        selected = profiles["paper_fresh_stratified_81"]
+        self.assertEqual(len(selected), 81)
+        self.assertEqual(len(set(selected)), 81)
+        self.assertNotIn(smoke_case, selected)
+
+        replay = {"smoke_extended": [smoke_case]}
+        generator._add_fresh_paper_profile(
+            list(reversed(cases)), replay, "matrix-sha"
+        )
+        self.assertEqual(selected, replay["paper_fresh_stratified_81"])
 
 
 if __name__ == "__main__":
