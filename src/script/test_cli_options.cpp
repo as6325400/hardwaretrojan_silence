@@ -92,9 +92,9 @@ bool expect_default_repair_options(std::vector<std::string> args,
   if (status != ParseStatus::ok ||
       options.repair_method != RepairMethod::legacy ||
       options.dac25_selector_timeout_ms != 30000 ||
-      options.dac25_candidate_limit != 64 ||
-      options.dac25_max_targets != 3 ||
-      options.dac25_max_sets != 16 ||
+      options.dac25_candidate_limit != 32 ||
+      options.dac25_max_targets != 2 ||
+      options.dac25_max_sets != 4 ||
       options.dac25_runeco_timeout_s != 60 ||
       options.dac25_abc_bin != expected_abc_bin) {
     std::cerr << "default repair option parse failed: status="

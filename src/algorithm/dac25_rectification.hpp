@@ -24,7 +24,7 @@ const char* dac25_validation_status_name(Dac25ValidationStatus status);
 struct Dac25ValidationOptions {
   // Soft in-process deadline shared by encoding and the SAT check.
   std::uint64_t timeout_ms = 30000;
-  std::size_t max_targets = 3;
+  std::size_t max_targets = 2;
 };
 
 struct Dac25ValidationResult {
@@ -74,9 +74,9 @@ struct Dac25Candidate {
 
 struct Dac25PlanOptions {
   std::uint64_t timeout_ms = 30000;
-  std::size_t candidate_limit = 64;
-  std::size_t max_targets = 3;
-  std::size_t max_feasible_sets = 16;
+  std::size_t candidate_limit = 32;
+  std::size_t max_targets = 2;
+  std::size_t max_feasible_sets = 4;
 };
 
 enum class Dac25PlanStatus {

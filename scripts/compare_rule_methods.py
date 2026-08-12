@@ -41,8 +41,8 @@ DEFAULT_METHODS = ("vn-retrain", "z3-pb")
 SUPPORTED_METHODS = (
     "vn-retrain", "dt", "z3-pb", "milp-cover", "dac25-inspired"
 )
-DAC25_DEFAULT_CANDIDATE_LIMIT = 64
-DAC25_DEFAULT_MAX_TARGETS = 3
+DAC25_DEFAULT_CANDIDATE_LIMIT = 32
+DAC25_DEFAULT_MAX_TARGETS = 2
 
 _RULE_FORMAL_VALUE_OPTIONS = frozenset(
     {

@@ -53,9 +53,9 @@ struct AppOptions {
   std::size_t rule_formal_max_rounds = 5;
   std::size_t rule_formal_cex_batch = 5;
   std::uint64_t dac25_selector_timeout_ms = 30000;
-  std::size_t dac25_candidate_limit = 64;
-  std::size_t dac25_max_targets = 3;
-  std::size_t dac25_max_sets = 16;
+  std::size_t dac25_candidate_limit = 32;
+  std::size_t dac25_max_targets = 2;
+  std::size_t dac25_max_sets = 4;
   std::uint64_t dac25_runeco_timeout_s = 60;
   std::string dac25_abc_bin = "abc";
 };

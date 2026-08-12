@@ -636,6 +636,38 @@ std::vector<Dac25Candidate> build_candidates(
               if (lhs.name != rhs.name) return lhs.name < rhs.name;
               return lhs.node < rhs.node;
             });
+
+  // Keep both the intervention-ranked front and a structural frontier.  The
+  // latter prevents a single SAT witness from crowding a genuinely useful
+  // name-aligned changed net out of a bounded candidate pool.  This is an
+  // explicit V0 structural-matching mode and is reported through each
+  // candidate's structurally_different field.
+  std::vector<Dac25Candidate> interleaved;
+  interleaved.reserve(candidates.size());
+  std::vector<char> emitted(candidates.size(), 0);
+  std::size_t structural_position = 0;
+  std::size_t rank_position = 0;
+  while (interleaved.size() < candidates.size()) {
+    while (structural_position < candidates.size() &&
+           (!candidates[structural_position].structurally_different ||
+            emitted[structural_position])) {
+      ++structural_position;
+    }
+    if (structural_position < candidates.size()) {
+      interleaved.push_back(candidates[structural_position]);
+      emitted[structural_position] = 1;
+      ++structural_position;
+    }
+    while (rank_position < candidates.size() && emitted[rank_position]) {
+      ++rank_position;
+    }
+    if (rank_position < candidates.size()) {
+      interleaved.push_back(candidates[rank_position]);
+      emitted[rank_position] = 1;
+      ++rank_position;
+    }
+  }
+  candidates = std::move(interleaved);
   return candidates;
 }
 
