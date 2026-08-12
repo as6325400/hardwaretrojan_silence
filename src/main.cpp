@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "algorithm/candidate_selector.hpp"
+#include "algorithm/dac25_repair.hpp"
 #include "algorithm/miner.hpp"
 #include "algorithm/pattern_sampler.hpp"
 #include "algorithm/payload_analysis.hpp"
@@ -2180,6 +2181,7 @@ int main(int argc, char** argv) {
        << " mine_rounds " << options.mine_rounds
        << " mine_max " << options.mine_max
        << " rule_method " << rule_method_name(options.rule_method)
+       << " repair_method " << repair_method_name(options.repair_method)
        << " force_split " << (options.force_split ? 1 : 0)
        << " strict_retry " << (options.strict_retry ? 1 : 0) << "\n";
   if (options.rule_method == RuleMethod::z3_pb) {
@@ -2195,6 +2197,99 @@ int main(int argc, char** argv) {
          << " timeout_ms " << options.rule_formal_timeout_ms
          << " max_rounds " << options.rule_formal_max_rounds
          << " cex_batch " << options.rule_formal_cex_batch << "\n";
+  }
+
+  if (options.repair_method == RepairMethod::dac25_inspired) {
+    cout << "dac25_config"
+         << " selector_timeout_ms " << options.dac25_selector_timeout_ms
+         << " candidate_limit " << options.dac25_candidate_limit
+         << " max_targets " << options.dac25_max_targets
+         << " max_sets " << options.dac25_max_sets
+         << " runeco_timeout_s " << options.dac25_runeco_timeout_s
+         << " abc_bin " << options.dac25_abc_bin << "\n";
+    Dac25RepairOptions dac25_options;
+    dac25_options.plan.timeout_ms = options.dac25_selector_timeout_ms;
+    dac25_options.plan.candidate_limit = options.dac25_candidate_limit;
+    dac25_options.plan.max_targets = options.dac25_max_targets;
+    dac25_options.plan.max_feasible_sets = options.dac25_max_sets;
+    dac25_options.abc_executable = options.dac25_abc_bin;
+    dac25_options.runeco_timeout_seconds = options.dac25_runeco_timeout_s;
+    const string fix_output_path = options.output_path.empty()
+                                       ? derive_patched_path(options.trojan_path)
+                                       : options.output_path;
+    const Dac25RepairResult dac25 = execute_dac25_inspired_repair(
+        golden, trojan, dac25_options, fix_output_path);
+    cout << "rectification_summary"
+         << " strategy dac25-inspired"
+         << " repair_method dac25-inspired"
+         << " rule_build_attempt 0"
+         << " rectification_attempt 0"
+         << " status " << dac25_repair_status_name(dac25.status)
+         << " plan_status " << dac25_plan_status_name(dac25.plan.status)
+         << " raw_candidates " << dac25.plan.raw_candidates
+         << " retained_candidates " << dac25.plan.candidates.size()
+         << " sets_checked " << dac25.plan.sets_checked
+         << " feasible_sets " << dac25.plan.feasible_sets
+         << " infeasible_sets " << dac25.plan.infeasible_sets
+         << " unknown_sets " << dac25.plan.unknown_sets
+         << " patch_trials " << dac25.trials.size()
+         << " successful_trials " << dac25.successful_trials
+         << " selected_trial " << dac25.selected_trial
+         << " candidate_ms " << dac25.plan.candidate_ms
+         << " solver_ms " << dac25.plan.solver_ms
+         << " selector_ms " << dac25.plan.total_ms
+         << " total_ms " << dac25.total_ms << "\n";
+    for (std::size_t trial_index = 0; trial_index < dac25.trials.size();
+         ++trial_index) {
+      const Dac25RepairTrial& trial = dac25.trials[trial_index];
+      cout << "rectification_summary"
+           << " strategy dac25-inspired"
+           << " repair_method dac25-inspired"
+           << " rule_build_attempt 0"
+           << " rectification_attempt 0"
+           << " set_attempt " << trial_index
+           << " status " << dac25_runeco_status_name(trial.runeco.status)
+           << " selected " << (dac25.selected_trial == trial_index ? 1 : 0)
+           << " target_count " << trial.targets.size()
+           << " patch_inputs " << trial.runeco.metrics.patch_inputs
+           << " patch_added_gates "
+           << trial.runeco.metrics.patch_added_gates
+           << " patched_area " << trial.runeco.metrics.patched_area
+           << " patched_level " << trial.runeco.metrics.patched_level
+           << " area_delta " << trial.runeco.metrics.area_delta
+           << " level_delta " << trial.runeco.metrics.level_delta
+           << " runeco_ms " << trial.runeco.metrics.runeco_ms
+           << " convert_ms " << trial.runeco.metrics.convert_ms
+           << " total_ms " << trial.runeco.metrics.total_ms << "\n";
+      cout << "rectification_targets set_attempt " << trial_index
+           << " names";
+      for (int target : trial.targets) {
+        cout << " " << trojan.node_name(target);
+      }
+      cout << "\n";
+    }
+    if (!dac25.ok()) {
+      cerr << "dac25-inspired repair did not produce a patch: "
+           << dac25.reason << "\n";
+      cout << "cec_rounds 0\n";
+      cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
+      return 0;
+    }
+    const Dac25RunecoResult& selected =
+        dac25.trials[dac25.selected_trial].runeco;
+    cout << "payload_fix_selected " << selected.metrics.selected_targets
+         << " area_delta " << selected.metrics.area_delta
+         << " level_delta " << selected.metrics.level_delta << "\n";
+    cout << "payload_fix_bench " << fix_output_path << "\n";
+    const auto verify_start = std::chrono::steady_clock::now();
+    std::vector<int> cec_counterexample;
+    const bool cec_pass = run_abc_cec(options.golden_path, fix_output_path,
+                                      golden, &cec_counterexample);
+    cerr << "[TIMING]   final_verify: " << ms_since(verify_start) << " ms "
+         << (cec_pass ? "(PASS)" : "(FAIL)") << "\n";
+    cout << "cec_rounds 0\n";
+    cerr << "[TIMING] TOTAL: " << ms_since(t_main_start) << " ms\n";
+    return 0;
   }
 
   const int kMaxCecRounds = 5;
