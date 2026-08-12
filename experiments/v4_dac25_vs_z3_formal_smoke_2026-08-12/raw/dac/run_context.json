@@ -1,0 +1,44 @@
+{
+  "abc_sha256": "627ee77136889096c2d8aa11ef9adffb666504867f29508180ac10fc596093e3",
+  "abc_timeout": 60.0,
+  "binary_sha256": "ddaced4a3d969f341ec69da7fa2475a1ea3bdc7310513972a2f30e621048da2c",
+  "common_args": [
+    "--depth",
+    "10",
+    "--neg-ratio",
+    "50",
+    "--mine-rounds",
+    "15",
+    "--mine-max",
+    "5000"
+  ],
+  "context_key": "c95daba6de3c25a49f85ea991956cb401bafc5ba8a6656e5c47a453427ce5fba",
+  "dac25_abc_bin": "/home/as6325400/hardwaretrojan_silence/abc",
+  "dac25_abc_sha256": "627ee77136889096c2d8aa11ef9adffb666504867f29508180ac10fc596093e3",
+  "dac25_candidate_limit": 32,
+  "dac25_max_sets": 4,
+  "dac25_max_targets": 2,
+  "dac25_runeco_timeout_s": 60,
+  "dac25_selector_timeout_ms": 30000,
+  "highs_library_sha256": null,
+  "manifest_sha256": "a85a6a75260a9ff659d91ec4bc50a432e1343979418e94a24c581448fbacee82",
+  "methods": [
+    "dac25-inspired"
+  ],
+  "profile": "smoke_extended",
+  "rule_cover_fourth_objective": null,
+  "rule_cover_logic_risk_weights": {
+    "fanout": null,
+    "timing": null,
+    "unique": null
+  },
+  "rule_cover_phase4_timeout_ms": null,
+  "rule_formal_cex_batch": null,
+  "rule_formal_max_rounds": null,
+  "rule_formal_refine": false,
+  "rule_formal_timeout_ms": null,
+  "runner_schema": "rule-method-ab-run/4",
+  "runner_sha256": "b8e947e6d09cee55e5b662da46fe8b44f64525e88b8867a5b27620491a12f769",
+  "show_sha256": "576484e8323838c1c37d286463e4637e476496a30005f0e2dd938b6f3d1fde11",
+  "timeout_override": 300.0
+}

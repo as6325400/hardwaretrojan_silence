@@ -70,8 +70,10 @@ bin/main golden.bench trojan.bench groundtruth.json patched.bench \
 The positional ground-truth file remains required by the common CLI and is
 fingerprinted by the runner, but the DAC25-inspired early repair path does not
 read it. The method instead uses the complete Golden/Trojan functional
-specification. This oracle difference is why the result below is an
-end-to-end system comparison, not a selector-only ablation against Z3-PB.
+specification. Z3-PB starts from the error-pattern file and, when formal
+refinement is enabled, also queries the complete circuit pair through its
+formal miter. The different repair flow and initial supervision mean the
+result below is an end-to-end system comparison, not a selector-only ablation.
 
 ## Full V0 result
 
@@ -188,3 +190,40 @@ python3 scripts/analyze_dac25_vs_z3_formal.py \
 - A future selector-only comparison should feed both target selectors into the
   same patch generator and give both the same target universe. The present
   result is intentionally an end-to-end repair-system comparison.
+
+## V4 multi-Trojan diagnostic result
+
+The same fixed `smoke_extended` V4 cohort used for the Z3-PB formal-refinement
+smoke experiment was also run through the DAC25-inspired flow. It contains 13
+cases spanning one, two, three, and five independent Trojans, trigger sizes
+three and five, shared-trigger cases, and AES/mem_ctrl cases. The selector
+configuration was fixed before the run: 32 retained candidates, at most two
+targets, four feasible sets, a 30-second selector budget, a 60-second `runeco`
+budget, and a 300-second outer timeout.
+
+| Method | PASS | Other outcomes |
+|---|---:|---|
+| Z3-PB + formal refinement | 3/13 | 4 CEC_FAIL, 4 NO_PATCH, 2 TIMEOUT |
+| DAC25-inspired | 2/13 | 9 NO_PATCH, 2 TIMEOUT |
+
+DAC has no gains and one regression relative to Z3-PB + formal: the disjoint
+`c880` N=2, trigger-size-3 case passes with Z3-PB but produces no feasible DAC
+target set within the retained pool and two-target bound. Both DAC PASS cases
+are N=1 cases. All five recorded PASS artifacts were independently replayed
+with the same pinned ABC and passed CEC.
+
+Only two cases pass in both methods. After reading and strashing every input
+and patch with the same ABC, both methods produce exactly 327 AIG AND nodes at
+24 levels on each case. Thus DAC has no structural QoR advantage in this
+sample. The paired wall-time sums are 0.825 seconds for Z3-PB + formal and
+4.227 seconds for DAC, making DAC about 5.12x slower on these two cases.
+
+This 13-case cohort is a diagnostic sample, not a statistically powered
+success-rate benchmark. In particular, `max-targets=2` is a declared method
+bound and can limit N=3/N=5 repairs. The full V4 stratified experiment should
+retain this configuration or declare a separate scalability arm rather than
+tune the cap after observing these results.
+
+Detailed paired results, normalized AIG metrics, provenance hashes, and the
+generated report are in
+[`experiments/v4_dac25_vs_z3_formal_smoke_2026-08-12`](experiments/v4_dac25_vs_z3_formal_smoke_2026-08-12/).

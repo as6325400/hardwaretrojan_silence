@@ -1,0 +1,5 @@
+circuit,cases,z3_pass,dac_pass,gains,regressions,both_pass,dac_node_wins,node_ties,z3_node_wins,dac_level_wins,level_ties,z3_level_wins
+aes,2,0,0,0,0,0,0,0,0,0,0,0
+c7552,1,0,0,0,0,0,0,0,0,0,0,0
+c880,8,3,2,0,1,2,0,2,0,0,2,0
+mem_ctrl,2,0,0,0,0,0,0,0,0,0,0,0
